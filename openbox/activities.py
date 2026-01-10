@@ -36,6 +36,8 @@ def _rfc3339_now() -> str:
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from .types import Verdict
+
 logger = logging.getLogger(__name__)
 
 
@@ -106,13 +108,14 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
             if response.status_code == 200:
                 data = response.json()
-                action = data.get("action", "continue")
+                # Parse verdict (v1.1) or action (v1.0)
+                verdict = Verdict.from_string(data.get("verdict") or data.get("action", "continue"))
                 reason = data.get("reason")
                 policy_id = data.get("policy_id")
                 risk_score = data.get("risk_score", 0.0)
 
-                # Check if governance wants to stop the workflow
-                if action == "stop":
+                # Check if governance wants to stop the workflow (BLOCK or HALT)
+                if verdict.should_stop():
                     logger.info(f"Governance blocked {event_type}: {reason} (policy: {policy_id})")
 
                     # For SignalReceived events, return result instead of raising
@@ -120,7 +123,8 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
                     if event_type == "SignalReceived":
                         return {
                             "success": True,
-                            "action": action,
+                            "verdict": verdict.value,
+                            "action": verdict.value,  # backward compat
                             "reason": reason,
                             "policy_id": policy_id,
                             "risk_score": risk_score,
@@ -135,7 +139,8 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
                 return {
                     "success": True,
-                    "action": action,
+                    "verdict": verdict.value,
+                    "action": verdict.value,  # backward compat
                     "reason": reason,
                     "policy_id": policy_id,
                     "risk_score": risk_score,

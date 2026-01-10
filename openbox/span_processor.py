@@ -17,7 +17,7 @@ _logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
-from .types import WorkflowSpanBuffer
+from .types import WorkflowSpanBuffer, Verdict
 
 
 class WorkflowSpanProcessor:
@@ -64,7 +64,7 @@ class WorkflowSpanProcessor:
         self._trace_to_workflow: Dict[int, str] = {}  # trace_id (int) -> workflow_id
         self._trace_to_activity: Dict[int, str] = {}  # trace_id (int) -> activity_id
         self._body_data: Dict[int, dict] = {}  # span_id (int) -> {request_body, response_body}
-        self._verdicts: Dict[str, dict] = {}  # workflow_id -> {"verdict": str, "reason": str}
+        self._verdicts: Dict[str, dict] = {}  # workflow_id -> {"verdict": Verdict, "reason": str}
         self._lock = threading.Lock()
 
     def _should_ignore_span(self, span: "ReadableSpan") -> bool:
@@ -160,46 +160,21 @@ class WorkflowSpanProcessor:
     # Verdict Storage (called by workflow interceptor for SignalReceived stop)
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def set_verdict(self, workflow_id: str, verdict: str, reason: str = None, run_id: str = None) -> None:
-        """
-        Store governance verdict for a workflow.
-
-        Called by workflow interceptor when SignalReceived returns action="stop".
-        The activity interceptor checks this before executing activities.
-
-        Args:
-            workflow_id: Temporal workflow ID
-            verdict: "stop" or "continue"
-            reason: Reason for the verdict (optional)
-            run_id: Workflow run ID (used to detect stale verdicts from previous runs)
-        """
+    def set_verdict(self, workflow_id: str, verdict: Verdict, reason: str = None, run_id: str = None) -> None:
+        """Store governance verdict for a workflow. Called when SignalReceived returns BLOCK/HALT."""
         with self._lock:
             self._verdicts[workflow_id] = {"verdict": verdict, "reason": reason, "run_id": run_id}
-            # Also update buffer if it exists
             if workflow_id in self._buffers:
                 self._buffers[workflow_id].verdict = verdict
                 self._buffers[workflow_id].verdict_reason = reason
 
     def get_verdict(self, workflow_id: str) -> Optional[dict]:
-        """
-        Get stored verdict for a workflow.
-
-        Args:
-            workflow_id: Temporal workflow ID
-
-        Returns:
-            Dict with "verdict" and "reason" keys, or None if no verdict stored
-        """
+        """Get stored verdict for a workflow. Returns dict with 'verdict' (Verdict) and 'reason' keys."""
         with self._lock:
             return self._verdicts.get(workflow_id)
 
     def clear_verdict(self, workflow_id: str) -> None:
-        """
-        Clear stored verdict for a workflow.
-
-        Args:
-            workflow_id: Temporal workflow ID
-        """
+        """Clear stored verdict for a workflow."""
         with self._lock:
             self._verdicts.pop(workflow_id, None)
 

@@ -1,12 +1,5 @@
 # openbox/types.py
-"""
-Data types for workflow-boundary governance.
-
-WorkflowEventType: Enum of workflow/activity lifecycle events
-WorkflowSpanBuffer: Buffer for spans during workflow execution
-GovernanceVerdictResponse: Response from governance API
-GuardrailsCheckResult: Guardrails redaction result
-"""
+"""Data types for workflow-boundary governance."""
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union
@@ -24,15 +17,54 @@ class WorkflowEventType(str, Enum):
     ACTIVITY_COMPLETED = "ActivityCompleted"
 
 
+class Verdict(str, Enum):
+    """5-tier graduated response. Priority: HALT > BLOCK > REQUIRE_APPROVAL > CONSTRAIN > ALLOW"""
+
+    ALLOW = "allow"
+    CONSTRAIN = "constrain"
+    REQUIRE_APPROVAL = "require_approval"
+    BLOCK = "block"
+    HALT = "halt"
+
+    @classmethod
+    def from_string(cls, value: str) -> "Verdict":
+        """Parse with v1.0 compat: 'continue'→ALLOW, 'stop'→HALT, 'require-approval'→REQUIRE_APPROVAL"""
+        if value is None:
+            return cls.ALLOW
+        normalized = value.lower().replace("-", "_")
+        if normalized == "continue":
+            return cls.ALLOW
+        if normalized == "stop":
+            return cls.HALT
+        if normalized in ("require_approval", "request_approval"):
+            return cls.REQUIRE_APPROVAL
+        try:
+            return cls(normalized)
+        except ValueError:
+            return cls.ALLOW
+
+    @property
+    def priority(self) -> int:
+        """Priority for aggregation: HALT=5, BLOCK=4, REQUIRE_APPROVAL=3, CONSTRAIN=2, ALLOW=1"""
+        return {Verdict.ALLOW: 1, Verdict.CONSTRAIN: 2, Verdict.REQUIRE_APPROVAL: 3, Verdict.BLOCK: 4, Verdict.HALT: 5}[self]
+
+    @classmethod
+    def highest_priority(cls, verdicts: List["Verdict"]) -> "Verdict":
+        """Get highest priority verdict from list. Returns ALLOW if empty."""
+        return max(verdicts, key=lambda v: v.priority) if verdicts else cls.ALLOW
+
+    def should_stop(self) -> bool:
+        """True if BLOCK or HALT."""
+        return self in (Verdict.BLOCK, Verdict.HALT)
+
+    def requires_approval(self) -> bool:
+        """True if REQUIRE_APPROVAL."""
+        return self == Verdict.REQUIRE_APPROVAL
+
+
 @dataclass
 class WorkflowSpanBuffer:
-    """
-    Buffer for spans generated during workflow execution.
-
-    NOTE: No timestamps stored here. The workflow interceptor passes workflow
-    metadata to the activity, and the activity adds timestamps when it executes.
-    This maintains workflow determinism (no time.time() calls in workflow code).
-    """
+    """Buffer for spans generated during workflow execution."""
 
     workflow_id: str
     run_id: str
@@ -44,11 +76,10 @@ class WorkflowSpanBuffer:
     error: Optional[Dict[str, Any]] = None
 
     # Governance verdict (set by workflow interceptor, checked by activity interceptor)
-    # This allows signal handlers to block subsequent activities without sandbox issues
-    verdict: Optional[str] = None  # "continue" or "stop"
+    verdict: Optional[Verdict] = None
     verdict_reason: Optional[str] = None
 
-    # Pending approval: governance_event_id from /evaluate response when action is "request-approval"
+    # Pending approval: governance_event_id from /evaluate response
     pending_approval_governance_event_id: Optional[str] = None
 
 
@@ -74,25 +105,37 @@ class GuardrailsCheckResult:
 
 @dataclass
 class GovernanceVerdictResponse:
-    """
-    Response from governance API evaluation.
+    """Response from governance API evaluation."""
 
-    action: "continue" to allow, "stop" to terminate, "require-approval" for HITL
-    governance_event_id: ID returned by /evaluate API for tracking this governance event
-    guardrails_result: Optional redacted input from guardrails
-    """
-
-    action: str  # "continue" or "stop" or "require-approval"
+    verdict: Verdict  # v1.1: 5-tier verdict
     reason: Optional[str] = None
+    # v1.0 fields (kept for compatibility)
     policy_id: Optional[str] = None
     risk_score: float = 0.0
     metadata: Optional[Dict[str, Any]] = None
-    governance_event_id: Optional[str] = None  # ID from /evaluate response
+    governance_event_id: Optional[str] = None
     guardrails_result: Optional[GuardrailsCheckResult] = None
+    # v1.1 fields
+    trust_tier: Optional[str] = None
+    behavioral_violations: Optional[List[str]] = None
+    alignment_score: Optional[float] = None
+    approval_id: Optional[str] = None
+    constraints: Optional[List[Dict[str, Any]]] = None
+
+    @property
+    def action(self) -> str:
+        """Backward compat: return action string from verdict."""
+        if self.verdict == Verdict.ALLOW:
+            return "continue"
+        if self.verdict == Verdict.HALT:
+            return "stop"
+        if self.verdict == Verdict.REQUIRE_APPROVAL:
+            return "require-approval"
+        return self.verdict.value
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GovernanceVerdictResponse":
-        """Parse governance response from JSON dict."""
+        """Parse governance response from JSON dict (v1.0 and v1.1 compatible)."""
         guardrails_result = None
         if data.get("guardrails_result"):
             gr = data["guardrails_result"]
@@ -104,12 +147,20 @@ class GovernanceVerdictResponse:
                 reasons=gr.get("reasons") or [],
             )
 
+        # Parse verdict (v1.1) or action (v1.0)
+        verdict = Verdict.from_string(data.get("verdict") or data.get("action", "continue"))
+
         return cls(
-            action=data.get("action", "continue"),
+            verdict=verdict,
             reason=data.get("reason"),
             policy_id=data.get("policy_id"),
             risk_score=data.get("risk_score", 0.0),
             metadata=data.get("metadata"),
             governance_event_id=data.get("governance_event_id"),
             guardrails_result=guardrails_result,
+            trust_tier=data.get("trust_tier"),
+            behavioral_violations=data.get("behavioral_violations"),
+            alignment_score=data.get("alignment_score"),
+            approval_id=data.get("approval_id"),
+            constraints=data.get("constraints"),
         )

@@ -48,8 +48,8 @@ OpenBox SDK provides governance and observability for Temporal workflows by capt
                       │        evaluate         │
                       │                         │
                       │   Returns:              │
-                      │   - action: continue    │
-                      │   - action: stop        │
+                      │   - verdict: allow/halt │
+                      │   - verdict: block      │
                       │   - guardrails_result   │
                       │     (redacted input/    │
                       │      output)            │
@@ -66,14 +66,53 @@ OpenBox SDK provides governance and observability for Temporal workflows by capt
 | `ActivityStarted` | Activity begins | activity_id, activity_type, **activity_input** |
 | `ActivityCompleted` | Activity ends | activity_id, activity_type, status, **activity_input**, **activity_output**, spans, error |
 
-## Governance Actions
+## Governance Verdicts
 
-OpenBox Core can return these actions:
+OpenBox Core returns a verdict indicating what action the SDK should take.
 
-| Action | Effect |
-|--------|--------|
-| `continue` | Allow workflow/activity to proceed |
-| `stop` | Terminate workflow immediately (non-retryable `ApplicationError`) |
+### v1.1 Verdict Enum (5-tier graduated response)
+
+| Verdict | Value | SDK Behavior |
+|---------|-------|--------------|
+| `ALLOW` | `"allow"` | Continue execution normally |
+| `CONSTRAIN` | `"constrain"` | Log constraints, continue (sandbox enforcement future) |
+| `REQUIRE_APPROVAL` | `"require_approval"` | Pause, poll for human approval |
+| `BLOCK` | `"block"` | Raise non-retryable error |
+| `HALT` | `"halt"` | Raise non-retryable error, terminate workflow |
+
+### Backward Compatibility (v1.0)
+
+The SDK automatically maps v1.0 action strings to v1.1 verdicts:
+
+| v1.0 Action | v1.1 Verdict |
+|-------------|--------------|
+| `"continue"` | `ALLOW` |
+| `"stop"` | `HALT` |
+| `"require-approval"` | `REQUIRE_APPROVAL` |
+
+### Verdict Priority
+
+When aggregating multiple verdicts (e.g., from multiple policies), the highest priority wins:
+
+```
+HALT (5) > BLOCK (4) > REQUIRE_APPROVAL (3) > CONSTRAIN (2) > ALLOW (1)
+```
+
+### v1.1 Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `verdict` | `string` | v1.1 verdict value (see table above) |
+| `action` | `string` | v1.0 action (for backward compat) |
+| `reason` | `string` | Human-readable explanation |
+| `policy_id` | `string` | Policy that triggered the verdict |
+| `risk_score` | `float` | Risk score (0.0 - 1.0) |
+| `trust_tier` | `string` | Trust tier (v1.1) |
+| `alignment_score` | `float` | Alignment score (v1.1) |
+| `behavioral_violations` | `array` | List of violations (v1.1) |
+| `approval_id` | `string` | Approval tracking ID (v1.1) |
+| `constraints` | `array` | Constraints to apply (v1.1) |
+| `guardrails_result` | `object` | Guardrails redaction result |
 
 ## Guardrails (Input/Output Validation & Redaction)
 
@@ -81,7 +120,7 @@ OpenBox Core can return `guardrails_result` to validate and modify activity inpu
 
 ```json
 {
-  "action": "continue",
+  "verdict": "allow",
   "guardrails_result": {
     "input_type": "activity_input",
     "redacted_input": {"prompt": "[REDACTED]", "user_id": "123"},
@@ -108,7 +147,7 @@ When `validation_passed` is `false`, the workflow is terminated with a non-retry
 
 ```json
 {
-  "action": "continue",
+  "verdict": "allow",
   "guardrails_result": {
     "input_type": "activity_input",
     "validation_passed": false,
@@ -353,13 +392,15 @@ worker = Worker(
 ```
 
 ### Governance Stop Response
-When OpenBox Core returns `action: "stop"`:
+When OpenBox Core returns `verdict: "block"` or `verdict: "halt"` (or v1.0 `action: "stop"`):
 ```json
 {
-  "action": "stop",
+  "verdict": "halt",
   "reason": "Policy violation: unauthorized API call detected",
   "policy_id": "policy-123",
-  "risk_score": 0.95
+  "risk_score": 0.95,
+  "trust_tier": "untrusted",
+  "behavioral_violations": ["unauthorized_api_call"]
 }
 ```
 
@@ -369,7 +410,7 @@ The workflow/activity will be terminated with a non-retryable `ApplicationError`
 
 | Error Type | Trigger | Description |
 |------------|---------|-------------|
-| `GovernanceStop` | `action: "stop"` | Governance policy blocked the workflow |
+| `GovernanceStop` | `verdict: BLOCK/HALT` | Governance policy blocked the workflow |
 | `GuardrailsValidationFailed` | `validation_passed: false` | Guardrails validation failed (PII, sensitive data, etc.) |
 
 ## Span Data Structures
@@ -931,7 +972,7 @@ worker = create_openbox_worker(
 
 5. **trace_id mapping**: Child HTTP spans are associated with parent activity via trace_id → workflow_id/activity_id mapping.
 
-6. **Governance stop**: When API returns `action: "stop"`, raises `ApplicationError` with `non_retryable=True` to immediately terminate the workflow.
+6. **Governance stop**: When API returns `verdict: "block"` or `verdict: "halt"`, raises `ApplicationError` with `non_retryable=True` to immediately terminate the workflow.
 
 7. **Fail-open/closed policy**: Configurable behavior when governance API is unreachable.
 
