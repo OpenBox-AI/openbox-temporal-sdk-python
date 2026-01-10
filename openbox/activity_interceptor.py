@@ -71,7 +71,7 @@ from opentelemetry import trace
 
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
-from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse
+from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict
 
 
 def _serialize_value(value: Any) -> Any:
@@ -182,7 +182,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         activity.logger.info(f"Checking verdict for workflow {info.workflow_id}: buffer={buffer is not None}, buffer.verdict={buffer.verdict if buffer else None}, pending_verdict={pending_verdict}")
 
-        if pending_verdict and pending_verdict.get("verdict") == "stop":
+        if pending_verdict and pending_verdict.get("verdict") and Verdict.from_string(pending_verdict.get("verdict")).should_stop():
             from temporalio.exceptions import ApplicationError
             reason = pending_verdict.get("reason") or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from signal): {reason}")
@@ -192,7 +192,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 non_retryable=True,
             )
 
-        if buffer and buffer.verdict == "stop":
+        if buffer and buffer.verdict and buffer.verdict.should_stop():
             from temporalio.exceptions import ApplicationError
             reason = buffer.verdict_reason or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from buffer): {reason}")
@@ -216,14 +216,14 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                 if approval_response:
                     from temporalio.exceptions import ApplicationError
-                    action = approval_response.get("action")
+                    verdict = Verdict.from_string(approval_response.get("verdict") or approval_response.get("action"))
 
-                    if action == "continue":
+                    if verdict == Verdict.ALLOW:
                         # Approved - clear pending and proceed
                         activity.logger.info(f"Approval granted for governance_event_id={governance_event_id}")
                         buffer.pending_approval_governance_event_id = None
                         approval_granted = True
-                    elif action == "stop":
+                    elif verdict.should_stop():
                         # Rejected - clear pending and fail
                         buffer.pending_approval_governance_event_id = None
                         reason = approval_response.get("reason", "Activity rejected")
@@ -232,7 +232,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             type="ApprovalRejected",
                             non_retryable=True,
                         )
-                    else:  # action == "require-approval" (still pending)
+                    else:  # REQUIRE_APPROVAL or CONSTRAIN (still pending)
                         raise ApplicationError(
                             f"Awaiting approval for activity {info.activity_type}",
                             type="ApprovalPending",
@@ -289,8 +289,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
             )
 
-        # If governance returned "stop", fail the activity before it runs
-        if governance_verdict and governance_verdict.action == "stop":
+        # If governance returned BLOCK/HALT, fail the activity before it runs
+        if governance_verdict and governance_verdict.verdict.should_stop():
             from temporalio.exceptions import ApplicationError
             raise ApplicationError(
                 f"Governance blocked: {governance_verdict.reason or 'No reason provided'}",
@@ -314,11 +314,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 non_retryable=True,
             )
 
-        # ═══ Handle require-approval verdict (pre-execution) ═══
+        # ═══ Handle REQUIRE_APPROVAL verdict (pre-execution) ═══
         if (
             self._config.hitl_enabled
             and governance_verdict
-            and governance_verdict.action in ("require-approval", "request-approval")
+            and governance_verdict.verdict.requires_approval()
             and info.activity_type not in self._config.skip_hitl_activity_types
         ):
             from temporalio.exceptions import ApplicationError
@@ -343,7 +343,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         # Debug: Log governance verdict details
         if governance_verdict:
             activity.logger.info(
-                f"Governance verdict: action={governance_verdict.action}, "
+                f"Governance verdict: verdict={governance_verdict.verdict.value}, "
                 f"has_guardrails_result={governance_verdict.guardrails_result is not None}"
             )
             if governance_verdict.guardrails_result:
@@ -481,8 +481,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         error=error,
                     )
 
-                    # If governance returned "stop", fail the activity after it completes
-                    if completed_verdict and completed_verdict.action == "stop":
+                    # If governance returned BLOCK/HALT, fail the activity after it completes
+                    if completed_verdict and completed_verdict.verdict.should_stop():
                         from temporalio.exceptions import ApplicationError
                         raise ApplicationError(
                             f"Governance blocked: {completed_verdict.reason or 'No reason provided'}",
@@ -506,11 +506,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             non_retryable=True,
                         )
 
-                    # ═══ Handle require-approval verdict (post-execution) ═══
+                    # ═══ Handle REQUIRE_APPROVAL verdict (post-execution) ═══
                     if (
                         self._config.hitl_enabled
                         and completed_verdict
-                        and completed_verdict.action in ("require-approval", "request-approval")
+                        and completed_verdict.verdict.requires_approval()
                         and info.activity_type not in self._config.skip_hitl_activity_types
                     ):
                         from temporalio.exceptions import ApplicationError
@@ -615,7 +615,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     # Respect on_api_error policy
                     if self._config.on_api_error == "fail_closed":
                         return GovernanceVerdictResponse(
-                            action="stop",
+                            verdict=Verdict.HALT,
                             reason=f"Governance API error: {error_msg}",
                         )
 
@@ -631,7 +631,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                         verdict = GovernanceVerdictResponse.from_dict(data)
 
-                        if verdict.action == "stop":
+                        if verdict.verdict.should_stop():
                             activity.logger.info(
                                 f"Governance blocked activity: {verdict.reason} (policy: {verdict.policy_id})"
                             )
@@ -654,7 +654,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             # Respect on_api_error policy
             if self._config.on_api_error == "fail_closed":
                 return GovernanceVerdictResponse(
-                    action="stop",
+                    verdict=Verdict.HALT,
                     reason=f"Governance API error: {error_msg}",
                 )
 
@@ -667,8 +667,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             governance_event_id: The governance event ID to check
 
         Returns:
-            Dict with action ("continue", "stop", "require-approval") and optional reason
-            None if API call fails
+            Dict with verdict/action and optional reason. None if API call fails.
         """
         import httpx
 

@@ -28,6 +28,8 @@ from temporalio.worker import (
     HandleSignalInput,
 )
 
+from .types import Verdict
+
 
 def _serialize_value(value: Any) -> Any:
     """Convert a value to JSON-serializable format for workflow result."""
@@ -246,12 +248,13 @@ class GovernanceInterceptor(Interceptor):
                         "signal_args": input.args,
                     }, timeout, on_error)
 
-                    # If governance returned "stop", store verdict for activity interceptor
+                    # If governance returned BLOCK/HALT, store verdict for activity interceptor
                     # The next activity will check this and fail with GovernanceStop
-                    if result and result.get("action") == "stop" and span_processor:
+                    verdict = Verdict.from_string(result.get("verdict") or result.get("action")) if result else Verdict.ALLOW
+                    if verdict.should_stop() and span_processor:
                         span_processor.set_verdict(
                             info.workflow_id,
-                            "stop",
+                            verdict,
                             result.get("reason"),
                             info.run_id,  # Include run_id to detect stale verdicts
                         )

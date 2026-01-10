@@ -24,6 +24,7 @@ from .config import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from .types import (
+    Verdict,
     WorkflowEventType,
     WorkflowSpanBuffer,
     GovernanceVerdictResponse,
@@ -93,6 +94,7 @@ __all__ = [
     "OpenBoxAuthError",
     "OpenBoxNetworkError",
     # Types
+    "Verdict",
     "WorkflowEventType",
     "WorkflowSpanBuffer",
     "GovernanceVerdictResponse",
