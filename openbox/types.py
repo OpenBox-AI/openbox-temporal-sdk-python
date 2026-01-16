@@ -79,8 +79,8 @@ class WorkflowSpanBuffer:
     verdict: Optional[Verdict] = None
     verdict_reason: Optional[str] = None
 
-    # Pending approval: governance_event_id from /evaluate response
-    pending_approval_governance_event_id: Optional[str] = None
+    # Pending approval: True when activity is waiting for human approval
+    pending_approval: bool = False
 
 
 @dataclass

@@ -207,25 +207,41 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         approval_granted = False
         if self._config.hitl_enabled and info.activity_type not in self._config.skip_hitl_activity_types:
             buffer = self._span_processor.get_buffer(info.workflow_id)
-            if buffer and buffer.pending_approval_governance_event_id:
-                governance_event_id = buffer.pending_approval_governance_event_id
-                activity.logger.info(f"Polling approval status for governance_event_id={governance_event_id}")
+            if buffer and buffer.pending_approval:
+                activity.logger.info(f"Polling approval status for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
 
                 # Poll OpenBox Core for approval status
-                approval_response = await self._poll_approval_status(governance_event_id)
+                approval_response = await self._poll_approval_status(
+                    workflow_id=info.workflow_id,
+                    run_id=info.workflow_run_id,
+                    activity_id=info.activity_id,
+                )
 
                 if approval_response:
                     from temporalio.exceptions import ApplicationError
+
+                    activity.logger.info(f"Processing approval response: expired={approval_response.get('expired')}, verdict={approval_response.get('verdict')}")
+
+                    # Check for approval expiration first
+                    if approval_response.get("expired"):
+                        buffer.pending_approval = False
+                        activity.logger.info(f"TERMINATING WORKFLOW - Approval expired for activity {info.activity_type}")
+                        raise ApplicationError(
+                            f"Approval expired for activity {info.activity_type} (workflow_id={info.workflow_id}, run_id={info.workflow_run_id}, activity_id={info.activity_id})",
+                            type="ApprovalExpired",
+                            non_retryable=True,
+                        )
+
                     verdict = Verdict.from_string(approval_response.get("verdict") or approval_response.get("action"))
 
                     if verdict == Verdict.ALLOW:
                         # Approved - clear pending and proceed
-                        activity.logger.info(f"Approval granted for governance_event_id={governance_event_id}")
-                        buffer.pending_approval_governance_event_id = None
+                        activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
+                        buffer.pending_approval = False
                         approval_granted = True
                     elif verdict.should_stop():
                         # Rejected - clear pending and fail
-                        buffer.pending_approval_governance_event_id = None
+                        buffer.pending_approval = False
                         reason = approval_response.get("reason", "Activity rejected")
                         raise ApplicationError(
                             f"Activity rejected: {reason}",
@@ -240,6 +256,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         )
                 else:
                     # Failed to poll - raise retryable error
+                    from temporalio.exceptions import ApplicationError
                     raise ApplicationError(
                         f"Failed to check approval status, retrying...",
                         type="ApprovalPending",
@@ -281,8 +298,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         governance_verdict: Optional[GovernanceVerdictResponse] = None
 
         # Optional: Send ActivityStarted event (with input)
-        # Skip if approval granted - already approved, no need to check governance again
-        if self._config.send_activity_start_event and not approval_granted:
+        if self._config.send_activity_start_event:
             governance_verdict = await self._send_activity_event(
                 info,
                 WorkflowEventType.ACTIVITY_STARTED.value,
@@ -323,14 +339,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             from temporalio.exceptions import ApplicationError
 
-            # Store governance_event_id in span buffer for approval tracking
-            # Buffer already has workflow_id and run_id
+            # Mark approval as pending in span buffer
             buffer = self._span_processor.get_buffer(info.workflow_id)
             if buffer:
-                buffer.pending_approval_governance_event_id = governance_verdict.governance_event_id
+                buffer.pending_approval = True
                 activity.logger.info(
-                    f"Pending approval stored: governance_event_id={governance_verdict.governance_event_id}, "
-                    f"workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
+                    f"Pending approval stored: workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
                 )
 
             # Raise retryable error - Temporal will retry the activity
@@ -464,93 +478,88 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                                 s["response_headers"] = pending_body["response_headers"]
 
                 # Send ActivityCompleted event (with input and output)
-                # Skip if approval granted - already approved, no need to check governance again
-                completed_verdict = None
-                if not approval_granted:
-                    completed_verdict = await self._send_activity_event(
-                        info,
-                        WorkflowEventType.ACTIVITY_COMPLETED.value,
-                        status=status,
-                        start_time=start_time,
-                        end_time=end_time,
-                        duration_ms=(end_time - start_time) * 1000,
-                        span_count=len(spans),
-                        spans=spans,
-                        activity_input=activity_input,
-                        activity_output=activity_output,
-                        error=error,
+                # Always send for observability, but skip governance verdict check if already approved
+                completed_verdict = await self._send_activity_event(
+                    info,
+                    WorkflowEventType.ACTIVITY_COMPLETED.value,
+                    status=status,
+                    start_time=start_time,
+                    end_time=end_time,
+                    duration_ms=(end_time - start_time) * 1000,
+                    span_count=len(spans),
+                    spans=spans,
+                    activity_input=activity_input,
+                    activity_output=activity_output,
+                    error=error,
+                )
+
+                # If governance returned BLOCK/HALT, fail the activity after it completes
+                if completed_verdict and completed_verdict.verdict.should_stop():
+                    from temporalio.exceptions import ApplicationError
+                    raise ApplicationError(
+                        f"Governance blocked: {completed_verdict.reason or 'No reason provided'}",
+                        type="GovernanceStop",
+                        non_retryable=True,
                     )
 
-                    # If governance returned BLOCK/HALT, fail the activity after it completes
-                    if completed_verdict and completed_verdict.verdict.should_stop():
-                        from temporalio.exceptions import ApplicationError
-                        raise ApplicationError(
-                            f"Governance blocked: {completed_verdict.reason or 'No reason provided'}",
-                            type="GovernanceStop",
-                            non_retryable=True,
+                # Check guardrails validation_passed for output - if False, stop
+                if (
+                    completed_verdict
+                    and completed_verdict.guardrails_result
+                    and not completed_verdict.guardrails_result.validation_passed
+                ):
+                    from temporalio.exceptions import ApplicationError
+                    reasons = completed_verdict.guardrails_result.get_reason_strings()
+                    reason_str = "; ".join(reasons) if reasons else "Guardrails output validation failed"
+                    activity.logger.info(f"Guardrails output validation failed: {reason_str}")
+                    raise ApplicationError(
+                        f"Guardrails validation failed: {reason_str}",
+                        type="GuardrailsValidationFailed",
+                        non_retryable=True,
+                    )
+
+                # ═══ Handle REQUIRE_APPROVAL verdict (post-execution) ═══
+                if (
+                    self._config.hitl_enabled
+                    and completed_verdict
+                    and completed_verdict.verdict.requires_approval()
+                    and info.activity_type not in self._config.skip_hitl_activity_types
+                ):
+                    from temporalio.exceptions import ApplicationError
+
+                    # Mark approval as pending in span buffer
+                    buffer = self._span_processor.get_buffer(info.workflow_id)
+                    if buffer:
+                        buffer.pending_approval = True
+                        activity.logger.info(
+                            f"Pending approval stored (post-execution): workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
                         )
 
-                    # Check guardrails validation_passed for output - if False, stop
-                    if (
-                        completed_verdict
-                        and completed_verdict.guardrails_result
-                        and not completed_verdict.guardrails_result.validation_passed
-                    ):
-                        from temporalio.exceptions import ApplicationError
-                        reasons = completed_verdict.guardrails_result.get_reason_strings()
-                        reason_str = "; ".join(reasons) if reasons else "Guardrails output validation failed"
-                        activity.logger.info(f"Guardrails output validation failed: {reason_str}")
-                        raise ApplicationError(
-                            f"Guardrails validation failed: {reason_str}",
-                            type="GuardrailsValidationFailed",
-                            non_retryable=True,
-                        )
+                    # Raise retryable error - Temporal will retry the activity
+                    raise ApplicationError(
+                        f"Approval required for output: {completed_verdict.reason or 'Activity output requires human approval'}",
+                        type="ApprovalPending",
+                        non_retryable=False,  # Retryable!
+                    )
 
-                    # ═══ Handle REQUIRE_APPROVAL verdict (post-execution) ═══
-                    if (
-                        self._config.hitl_enabled
-                        and completed_verdict
-                        and completed_verdict.verdict.requires_approval()
-                        and info.activity_type not in self._config.skip_hitl_activity_types
-                    ):
-                        from temporalio.exceptions import ApplicationError
+                # Apply output redaction if governance returned guardrails_result for activity_output
+                if (
+                    completed_verdict
+                    and completed_verdict.guardrails_result
+                    and completed_verdict.guardrails_result.input_type == "activity_output"
+                ):
+                    redacted_output = completed_verdict.guardrails_result.redacted_input
+                    activity.logger.info(f"Applying guardrails redaction to activity output")
 
-                        # Store governance_event_id in span buffer for approval tracking
-                        buffer = self._span_processor.get_buffer(info.workflow_id)
-                        if buffer:
-                            buffer.pending_approval_governance_event_id = completed_verdict.governance_event_id
-                            activity.logger.info(
-                                f"Pending approval stored (post-execution): governance_event_id={completed_verdict.governance_event_id}, "
-                                f"workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
-                            )
-
-                        # Raise retryable error - Temporal will retry the activity
-                        raise ApplicationError(
-                            f"Approval required for output: {completed_verdict.reason or 'Activity output requires human approval'}",
-                            type="ApprovalPending",
-                            non_retryable=False,  # Retryable!
-                        )
-
-                    # Apply output redaction if governance returned guardrails_result for activity_output
-                    if (
-                        completed_verdict
-                        and completed_verdict.guardrails_result
-                        and completed_verdict.guardrails_result.input_type == "activity_output"
-                    ):
-                        redacted_output = completed_verdict.guardrails_result.redacted_input
-                        activity.logger.info(f"Applying guardrails redaction to activity output")
-
-                        if redacted_output is not None:
-                            # If result is a dataclass, update fields in place
-                            if is_dataclass(result) and not isinstance(result, type) and isinstance(redacted_output, dict):
-                                _deep_update_dataclass(result, redacted_output)
-                                activity.logger.info(f"Updated {type(result).__name__} output fields with redacted values")
-                            else:
-                                # Replace result directly (dict, primitive, etc.)
-                                result = redacted_output
-                                activity.logger.info(f"Replaced activity output with redacted value")
-                else:
-                    activity.logger.info(f"Approval granted - skipping ActivityCompleted governance check")
+                    if redacted_output is not None:
+                        # If result is a dataclass, update fields in place
+                        if is_dataclass(result) and not isinstance(result, type) and isinstance(redacted_output, dict):
+                            _deep_update_dataclass(result, redacted_output)
+                            activity.logger.info(f"Updated {type(result).__name__} output fields with redacted values")
+                        else:
+                            # Replace result directly (dict, primitive, etc.)
+                            result = redacted_output
+                            activity.logger.info(f"Replaced activity output with redacted value")
 
         return result
 
@@ -660,27 +669,82 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
             return None  # Fail-open: allow activity to proceed
 
-    async def _poll_approval_status(self, governance_event_id: str) -> Optional[dict]:
+    async def _poll_approval_status(
+        self,
+        workflow_id: str,
+        run_id: str,
+        activity_id: str,
+    ) -> Optional[dict]:
         """Poll OpenBox Core for approval status.
 
         Args:
-            governance_event_id: The governance event ID to check
+            workflow_id: The workflow ID
+            run_id: The workflow run ID
+            activity_id: The activity ID
 
         Returns:
             Dict with verdict/action and optional reason. None if API call fails.
+            If approval_expiration_time has passed, returns a halt verdict with expired=True.
         """
         import httpx
+        from datetime import datetime, timezone
+
+        payload = {
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "activity_id": activity_id,
+        }
 
         try:
             async with httpx.AsyncClient(timeout=self._config.api_timeout) as client:
-                response = await client.get(
-                    f"{self._api_url}/api/v1/governance/approval/{governance_event_id}",
+                response = await client.post(
+                    f"{self._api_url}/api/v1/governance/approval",
+                    json=payload,
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
 
                 if response.status_code == 200:
                     data = response.json()
                     activity.logger.info(f"Approval status response: {data}")
+
+                    # Check for approval expiration (skip if field is missing, null, or empty)
+                    expiration_time_str = data.get("approval_expiration_time")
+                    activity.logger.info(f"Checking expiration: approval_expiration_time={expiration_time_str}")
+
+                    if expiration_time_str:
+                        try:
+                            # Parse timestamp - handle multiple formats:
+                            # - "2026-01-11T17:43:39Z" (ISO with Z)
+                            # - "2026-01-11T17:43:39+00:00" (ISO with offset)
+                            # - "2026-01-11 17:43:39" (space-separated from DB)
+                            normalized = expiration_time_str.replace('Z', '+00:00').replace(' ', 'T')
+                            expiration_time = datetime.fromisoformat(normalized)
+
+                            # If no timezone info (naive), assume UTC
+                            if expiration_time.tzinfo is None:
+                                expiration_time = expiration_time.replace(tzinfo=timezone.utc)
+
+                            current_time = datetime.now(timezone.utc)
+
+                            activity.logger.info(
+                                f"Expiration check: expiration_time={expiration_time.isoformat()}, "
+                                f"current_time={current_time.isoformat()}, "
+                                f"is_expired={current_time > expiration_time}"
+                            )
+
+                            if current_time > expiration_time:
+                                activity.logger.info(
+                                    f"Approval EXPIRED - terminating workflow"
+                                )
+                                # Mark as expired - caller will terminate like HALT verdict
+                                data["expired"] = True
+                                return data
+                        except (ValueError, TypeError) as e:
+                            activity.logger.warning(
+                                f"Failed to parse approval_expiration_time '{expiration_time_str}': {e}"
+                            )
+                            # Continue with normal processing if parsing fails
+
                     return data
                 else:
                     activity.logger.warning(f"Failed to get approval status: HTTP {response.status_code}")
