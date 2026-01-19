@@ -17,7 +17,7 @@ OpenBox SDK provides governance and observability for Temporal workflows by capt
 │  │  - SignalReceived      │      │  Guardrails: Redact/modify input   │ │
 │  │                        │      │  before execution, output after    │ │
 │  │  Sends via activity    │      │                                    │ │
-│  │  (determinism)         │      │  Collects HTTP spans with bodies   │ │
+│  │  (determinism)         │      │  Collects all spans (see below)    │ │
 │  └────────────────────────┘      └────────────────────────────────────┘ │
 │              │                                    │                     │
 │              │                                    ▼                     │
@@ -31,14 +31,15 @@ OpenBox SDK provides governance and observability for Temporal workflows by capt
 │              │         └──────────────────────────────────────────────┘ │
 │              │                                    │                     │
 │              ▼                                    ▼                     │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │                   OTel HTTP Instrumentation                       │  │
-│  │  ──────────────────────────────────────────────────────────────  │  │
-│  │  - httpx (sync + async with body capture patches)                 │  │
-│  │  - requests, urllib3                                              │  │
-│  │  Captures: request/response headers + bodies                      │  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+│  ┌──────────────────────────────────────────────────────────────────────────┐│
+│  │                        OTel Instrumentation Layer                        ││
+│  │  ──────────────────────────────────────────────────────────────────────  ││
+│  │  HTTP:      httpx, requests, urllib3 (headers + bodies)                  ││
+│  │  Database:  PostgreSQL, MySQL, MongoDB, Redis, SQLAlchemy (db.statement) ││
+│  │  File I/O:  open(), read(), write() (path, bytes, mode)                  ││
+│  │  Functions: @traced decorator, create_span() (args + results)            ││
+│  └──────────────────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
                       ┌─────────────────────────┐
