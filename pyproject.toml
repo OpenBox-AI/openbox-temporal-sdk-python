@@ -1,14 +1,14 @@
 [project]
-name = "openbox-sdk"
-version = "0.1.0"
+name = "temporal-sdk-python"
+version = "1.0.0"
 description = "OpenBox SDK - Governance and observability for Temporal workflows"
 authors = [
-    { name = "OpenBox Team" },
+    { name = "OpenBox Team", email = "tino@openbox.ai" },
 ]
 requires-python = ">=3.9"
 readme = "README.md"
 license = "MIT"
-keywords = ["temporal", "workflow", "governance", "observability", "opentelemetry"]
+keywords = ["temporal", "workflow", "governance", "observability", "opentelemetry", "hitl", "human-in-the-loop"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -18,51 +18,45 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Typing :: Typed",
 ]
-
 dependencies = [
     "temporalio>=1.8.0,<2",
     "httpx>=0.28.0,<1",
+    # OpenTelemetry core
     "opentelemetry-api>=1.38.0",
     "opentelemetry-sdk>=1.38.0",
+    # HTTP instrumentation
     "opentelemetry-instrumentation-httpx>=0.59b0",
     "opentelemetry-instrumentation-requests>=0.59b0",
     "opentelemetry-instrumentation-urllib3>=0.59b0",
     "opentelemetry-instrumentation-urllib>=0.59b0",
-]
-
-[project.optional-dependencies]
-postgres = [
+    # Database drivers
     "psycopg2-binary>=2.9.10",
-    "opentelemetry-instrumentation-psycopg2>=0.59b0",
-]
-postgres-async = [
     "asyncpg>=0.29.0",
-    "opentelemetry-instrumentation-asyncpg>=0.59b0",
-]
-mysql = [
     "mysql-connector-python>=8.0.0",
-    "opentelemetry-instrumentation-mysql>=0.59b0",
-]
-pymysql = [
     "pymysql>=1.0.0",
-    "opentelemetry-instrumentation-pymysql>=0.59b0",
-]
-mongodb = [
     "pymongo>=4.0.0",
-    "opentelemetry-instrumentation-pymongo>=0.59b0",
-]
-redis = [
     "redis>=5.0.0",
-    "opentelemetry-instrumentation-redis>=0.59b0",
-]
-sqlalchemy = [
     "sqlalchemy>=2.0.0",
+    # Database instrumentation
+    "opentelemetry-instrumentation-psycopg2>=0.59b0",
+    "opentelemetry-instrumentation-asyncpg>=0.59b0",
+    "opentelemetry-instrumentation-mysql>=0.59b0",
+    "opentelemetry-instrumentation-pymysql>=0.59b0",
+    "opentelemetry-instrumentation-pymongo>=0.59b0",
+    "opentelemetry-instrumentation-redis>=0.59b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0",
 ]
-all-databases = [
-    "openbox-sdk[postgres,postgres-async,mysql,pymysql,mongodb,redis,sqlalchemy]",
-]
+
+[project.urls]
+Homepage = "https://github.com/OpenBox-AI/temporal-sdk-python"
+Documentation = "https://github.com/OpenBox-AI/temporal-sdk-python#readme"
+Repository = "https://github.com/OpenBox-AI/temporal-sdk-python.git"
+Issues = "https://github.com/OpenBox-AI/temporal-sdk-python/issues"
+Changelog = "https://github.com/OpenBox-AI/temporal-sdk-python/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = [
