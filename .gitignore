@@ -33,3 +33,10 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+.opencode/
+AGENTS.md
+
+.claude/
+CLAUDE.md
+plans/
