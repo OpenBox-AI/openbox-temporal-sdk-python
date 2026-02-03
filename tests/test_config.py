@@ -511,6 +511,38 @@ class TestGlobalConfigClass:
         assert config.api_key == "obx_live_second"
         assert config.governance_timeout == 60.0
 
+    def test_repr_masks_long_api_key(self):
+        """Test __repr__ masks API key longer than 8 characters."""
+        config = _GlobalConfig()
+        config.configure(
+            api_url="https://api.openbox.ai",
+            api_key="obx_live_abc123xyz789",
+        )
+        repr_str = repr(config)
+        assert "obx_live_abc123xyz789" not in repr_str
+        assert "obx_****" in repr_str
+        assert "z789" in repr_str  # Last 4 chars visible
+        assert "https://api.openbox.ai" in repr_str
+
+    def test_repr_masks_short_api_key(self):
+        """Test __repr__ masks API key 8 characters or shorter."""
+        config = _GlobalConfig()
+        config.configure(
+            api_url="https://api.openbox.ai",
+            api_key="short",
+        )
+        repr_str = repr(config)
+        assert "short" not in repr_str
+        assert "****" in repr_str
+        assert "obx_****" not in repr_str  # Short key uses just ****
+
+    def test_repr_handles_empty_api_key(self):
+        """Test __repr__ handles empty API key."""
+        config = _GlobalConfig()
+        repr_str = repr(config)
+        assert "api_key=''" in repr_str
+        assert "api_url=''" in repr_str
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # get_global_config() Tests
