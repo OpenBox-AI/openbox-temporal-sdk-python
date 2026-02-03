@@ -1,0 +1,163 @@
+# .github/workflows/sonarqube.yml
+name: SonarQube
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write   
+  issues: write  
+
+jobs:
+  sonarqube:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     
+          
+      - name: Compute Sonar project name
+        shell: bash
+        run: |
+          REPO_NAME="${{ github.event.repository.name }}"
+      
+          if [ "${GITHUB_REF_NAME}" = "staging" ]; then
+            echo "SONAR_PROJECT_NAME=${REPO_NAME}-staging" >> $GITHUB_ENV
+          else
+            echo "SONAR_PROJECT_NAME=${REPO_NAME}" >> $GITHUB_ENV
+          fi
+      
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v5.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_NAME }}
+            -Dsonar.projectName="${{ env.SONAR_PROJECT_NAME }}"
+      
+      - name: Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1.2.0
+        continue-on-error: true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+           pollingTimeoutSec: 600 
+
+
+      - name: Wait for quality gate
+        if: always()
+        run: sleep 30   
+
+      - name: Build SonarQube Quality Gate report 
+        if: always()
+        id: qg
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_NAME: ${{ env.SONAR_PROJECT_NAME }}
+        run: |
+          set -euo pipefail
+      
+          HOST_TRIM="${SONAR_HOST_URL%/}"
+          TOKEN="${SONAR_TOKEN}"
+          PKEY="${SONAR_PROJECT_NAME}"   # projectKey
+          PNAME="${SONAR_PROJECT_NAME}"  # projectName hiển thị
+      
+          urlencode() { jq -nr --arg v "$1" '$v|@uri'; }
+      
+          PKEY_ENC="$(urlencode "$PKEY")"
+          API_URL="${HOST_TRIM}/api/qualitygates/project_status?projectKey=${PKEY_ENC}"
+      
+          JSON="$(curl -fsSL -u "${TOKEN}:" "$API_URL")"
+      
+          STATUS="$(jq -r '.projectStatus.status' <<<"$JSON")"                       # OK | WARN | ERROR
+          QG_NAME="$(jq -r '.projectStatus.qualityGate.name // "Default"' <<<"$JSON")"
+          if [ -z "${SONAR_HOST_URL:-}" ]; then
+            echo "::warning::SONAR_HOST_URL is empty"
+          fi
+          DASH_URL="${SONAR_HOST_URL}/dashboard?id=$(urlencode "$PKEY")"
+      
+          {
+            echo "### SonarQube Quality Gate: ${QG_NAME}"
+            echo
+            echo "- **Project**: ${PNAME}"
+            echo "- **Status**: **${STATUS}**"
+            echo "- **Detail**: [Open in SonarQube](${DASH_URL})"
+          } > qg.md
+      
+          cat qg.md >> "$GITHUB_STEP_SUMMARY"
+          echo "STATUS=${STATUS}"   >> "$GITHUB_ENV"
+          echo "QG_NAME=${QG_NAME}" >> "$GITHUB_ENV"
+          echo "PNAME=${PNAME}"     >> "$GITHUB_ENV"   # truyền sang bước sau
+        
+      # (2) Upsert Issue cho
+      - name: Comment (or create) Issue with QG report
+        if: always() && env.STATUS != 'OK'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ vars.SONAR_ISSUE_NUMBER }}      
+          SONAR_PROJECT_NAME: ${{ env.SONAR_PROJECT_NAME }}  
+          QG_NAME: ${{ env.QG_NAME }}
+          STATUS: ${{ env.STATUS }}
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+      
+            const body = fs.readFileSync('qg.md', 'utf8');
+            const projectName = process.env.SONAR_PROJECT_NAME;
+            const status = process.env.STATUS;
+            const qgName = process.env.QG_NAME;
+      
+
+            const stableTitle = `SonarQube QG • ${projectName}`;
+
+            const displayTitle = `${stableTitle} — ${qgName} (${status})`;
+      
+            let issueNumber = process.env.ISSUE_NUMBER ? Number(process.env.ISSUE_NUMBER) : null;
+      
+            if (!issueNumber) {
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:issue state:open in:title "${stableTitle}" label:sonarqube`
+              });
+      
+              if (search.total_count > 0) {
+                issueNumber = search.items[0].number;
+                core.info(`Found existing issue #${issueNumber} for project "${projectName}".`);
+              }
+            }
+      
+            if (issueNumber) {
+              try {
+                await github.rest.issues.update({ owner, repo, issue_number: issueNumber, title: stableTitle });
+              } catch (e) {
+                core.warning(`Failed to update title to stableTitle: ${e.message}`);
+              }
+              await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body });
+              core.info(`Appended comment to issue #${issueNumber}`);
+            } else {
+              const { data: issue } = await github.rest.issues.create({
+                owner, repo,
+                title: stableTitle,
+                body,
+                labels: ['sonarqube','quality-gate']
+              });
+              core.info(`Created issue #${issue.number} for project "${projectName}"`);
+            }
+
+      - name: Fail job when Quality Gate not OK
+        if: env.STATUS != 'OK'
+        run: |
+          echo "::error title=Quality Gate Failed::STATUS=${{ env.STATUS }} (expected OK)"
+          exit 1
