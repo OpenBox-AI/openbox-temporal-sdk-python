@@ -42,9 +42,9 @@ def create_openbox_worker(
     *,
     workflows: Sequence[Type] = (),
     activities: Sequence[Callable] = (),
-    # OpenBox config (required for governance)
-    openbox_url: Optional[str] = None,
-    openbox_api_key: Optional[str] = None,
+    # OpenBox config (required)
+    openbox_url: str,
+    openbox_api_key: str,
     governance_timeout: float = 30.0,
     governance_policy: str = "fail_open",
     send_start_event: bool = True,
@@ -131,17 +131,19 @@ def create_openbox_worker(
 
     Example:
         ```python
+        import os
         from openbox import create_openbox_worker
 
         client = await Client.connect("localhost:7233")
 
+        # Use HTTPS for production, HTTP is only allowed for localhost
         worker = create_openbox_worker(
             client=client,
             task_queue="my-queue",
             workflows=[MyWorkflow],
             activities=[my_activity, another_activity],
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key_1",
+            openbox_url=os.getenv("OPENBOX_URL"),  # e.g., "https://api.openbox.ai"
+            openbox_api_key=os.getenv("OPENBOX_API_KEY"),
             governance_policy="fail_closed",
         )
 
@@ -152,76 +154,73 @@ def create_openbox_worker(
     all_interceptors = list(interceptors)
     all_activities = list(activities)
 
-    # Initialize OpenBox if configured
-    if openbox_url and openbox_api_key:
-        print(f"Initializing OpenBox SDK with URL: {openbox_url}")
+    # Initialize OpenBox
+    print(f"Initializing OpenBox SDK with URL: {openbox_url}")
 
-        # 1. Validate API key
-        validate_api_key(
-            api_url=openbox_url,
-            api_key=openbox_api_key,
-            governance_timeout=governance_timeout,
-        )
+    # 1. Validate API key (also validates URL security - HTTPS required for non-localhost)
+    validate_api_key(
+        api_url=openbox_url,
+        api_key=openbox_api_key,
+        governance_timeout=governance_timeout,
+    )
 
-        # 2. Create span processor
-        span_processor = WorkflowSpanProcessor(ignored_url_prefixes=[openbox_url])
+    # 2. Create span processor
+    span_processor = WorkflowSpanProcessor(ignored_url_prefixes=[openbox_url])
 
-        # 3. Setup OTel HTTP, database, and file I/O instrumentation
-        from .otel_setup import setup_opentelemetry_for_governance
-        setup_opentelemetry_for_governance(
-            span_processor,
-            ignored_urls=[openbox_url],
-            instrument_databases=instrument_databases,
-            db_libraries=db_libraries,
-            instrument_file_io=instrument_file_io,
-        )
+    # 3. Setup OTel HTTP, database, and file I/O instrumentation
+    from .otel_setup import setup_opentelemetry_for_governance
+    setup_opentelemetry_for_governance(
+        span_processor,
+        ignored_urls=[openbox_url],
+        instrument_databases=instrument_databases,
+        db_libraries=db_libraries,
+        instrument_file_io=instrument_file_io,
+    )
 
-        # 4. Create governance config
-        config = GovernanceConfig(
-            on_api_error=governance_policy,
-            api_timeout=governance_timeout,
-            send_start_event=send_start_event,
-            send_activity_start_event=send_activity_start_event,
-            skip_workflow_types=skip_workflow_types or set(),
-            skip_activity_types=skip_activity_types or {"send_governance_event"},
-            skip_signals=skip_signals or set(),
-            hitl_enabled=hitl_enabled,
-        )
+    # 4. Create governance config
+    config = GovernanceConfig(
+        on_api_error=governance_policy,
+        api_timeout=governance_timeout,
+        send_start_event=send_start_event,
+        send_activity_start_event=send_activity_start_event,
+        skip_workflow_types=skip_workflow_types or set(),
+        skip_activity_types=skip_activity_types or {"send_governance_event"},
+        skip_signals=skip_signals or set(),
+        hitl_enabled=hitl_enabled,
+    )
 
-        # 5. Create interceptors
-        from .workflow_interceptor import GovernanceInterceptor
-        from .activity_interceptor import ActivityGovernanceInterceptor
+    # 5. Create interceptors
+    from .workflow_interceptor import GovernanceInterceptor
+    from .activity_interceptor import ActivityGovernanceInterceptor
 
-        workflow_interceptor = GovernanceInterceptor(
-            api_url=openbox_url,
-            api_key=openbox_api_key,
-            span_processor=span_processor,
-            config=config,
-        )
+    workflow_interceptor = GovernanceInterceptor(
+        api_url=openbox_url,
+        api_key=openbox_api_key,
+        span_processor=span_processor,
+        config=config,
+    )
 
-        activity_interceptor = ActivityGovernanceInterceptor(
-            api_url=openbox_url,
-            api_key=openbox_api_key,
-            span_processor=span_processor,
-            config=config,
-        )
+    activity_interceptor = ActivityGovernanceInterceptor(
+        api_url=openbox_url,
+        api_key=openbox_api_key,
+        span_processor=span_processor,
+        config=config,
+    )
 
-        # 6. Get governance activities
-        from .activities import send_governance_event
+    # 6. Get governance activities
+    from .activities import send_governance_event
 
-        # Add OpenBox components
-        all_interceptors = [workflow_interceptor, activity_interceptor, *interceptors]
-        all_activities = [*activities, send_governance_event]
+    # Add OpenBox components
+    all_interceptors = [workflow_interceptor, activity_interceptor, *interceptors]
+    all_activities = [*activities, send_governance_event]
 
-        print("OpenBox SDK initialized successfully")
-        print(f"  - Governance policy: {governance_policy}")
-        print(f"  - Governance timeout: {governance_timeout}s")
-        print("  - Events: WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted")
-        print(f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}")
-        print(f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}")
-        print(f"  - Approval polling: {'enabled' if hitl_enabled else 'disabled'}")
-    else:
-        print("OpenBox SDK not configured (openbox_url and openbox_api_key not provided)")
+    print("OpenBox SDK initialized successfully")
+    print(f"  - Governance policy: {governance_policy}")
+    print(f"  - Governance timeout: {governance_timeout}s")
+    print("  - Events: WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted")
+    print(f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}")
+    print(f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}")
+    print(f"  - Approval polling: {'enabled' if hitl_enabled else 'disabled'}")
 
     # Create and return Worker
     return Worker(

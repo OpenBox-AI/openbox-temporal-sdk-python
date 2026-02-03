@@ -17,6 +17,7 @@ from .config import (
     OpenBoxConfigError,
     OpenBoxAuthError,
     OpenBoxNetworkError,
+    OpenBoxInsecureURLError,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -93,6 +94,7 @@ __all__ = [
     "OpenBoxConfigError",
     "OpenBoxAuthError",
     "OpenBoxNetworkError",
+    "OpenBoxInsecureURLError",
     # Types
     "Verdict",
     "WorkflowEventType",

@@ -65,6 +65,7 @@ dev = [
     "black~=23.7",
     "isort~=5.12",
     "mypy>=1.16.0,<2",
+    "pytest-cov>=7.0.0",
 ]
 
 [build-system]

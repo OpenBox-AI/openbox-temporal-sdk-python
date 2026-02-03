@@ -49,6 +49,12 @@ class OpenBoxNetworkError(OpenBoxConfigError):
     pass
 
 
+class OpenBoxInsecureURLError(OpenBoxConfigError):
+    """Raised when HTTP is used for non-localhost URLs."""
+
+    pass
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GovernanceConfig - Configuration for interceptors
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,6 +135,27 @@ def _validate_api_key_format(api_key: str) -> bool:
     return bool(API_KEY_PATTERN.match(api_key))
 
 
+def _validate_url_security(api_url: str) -> None:
+    """
+    Validate that non-localhost URLs use HTTPS.
+
+    Raises:
+        OpenBoxInsecureURLError: If HTTP is used for non-localhost URLs.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(api_url)
+
+    # Allow HTTP only for localhost/127.0.0.1
+    is_localhost = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+
+    if parsed.scheme == "http" and not is_localhost:
+        raise OpenBoxInsecureURLError(
+            f"Insecure HTTP URL detected: {api_url}. "
+            "Use HTTPS for non-localhost URLs to protect API keys in transit."
+        )
+
+
 def _validate_api_key_with_server(api_url: str, api_key: str, timeout: float) -> None:
     """
     Validate API key by calling /v1/auth/validate endpoint.
@@ -199,6 +226,20 @@ class _GlobalConfig:
         """Check if OpenBox is configured."""
         return bool(self.api_url and self.api_key)
 
+    def __repr__(self) -> str:
+        """Return string representation with masked API key."""
+        if self.api_key and len(self.api_key) > 8:
+            masked_key = f"obx_****{self.api_key[-4:]}"
+        elif self.api_key:
+            masked_key = "****"
+        else:
+            masked_key = ""
+        return (
+            f"_GlobalConfig(api_url={self.api_url!r}, "
+            f"api_key={masked_key!r}, "
+            f"governance_timeout={self.governance_timeout})"
+        )
+
 
 # Global singleton
 _config = _GlobalConfig()
@@ -239,8 +280,8 @@ def initialize(
             GovernanceConfig,
         )
 
-        # 1. Initialize SDK
-        initialize(api_url="http://localhost:8086", api_key="obx_live_...")
+        # 1. Initialize SDK (use HTTPS for production, HTTP allowed for localhost only)
+        initialize(api_url="https://api.openbox.ai", api_key="obx_live_...")
 
         # 2. Setup OTel and span processor
         span_processor = WorkflowSpanProcessor()
@@ -257,9 +298,15 @@ def initialize(
         # 5. Add to Temporal worker
         worker = Worker(..., interceptors=[workflow_interceptor, activity_interceptor])
     """
+    # Validate URL security (HTTPS required for non-localhost)
+    _validate_url_security(api_url)
+
     # Validate API key format
     if not _validate_api_key_format(api_key):
-        _get_logger().warning("API key format may be invalid. Expected: obx_live_... or obx_test_...")
+        raise OpenBoxAuthError(
+            f"Invalid API key format. Expected 'obx_live_*' or 'obx_test_*', "
+            f"got: '{api_key[:15]}...' (showing first 15 chars)"
+        )
 
     _config.configure(
         api_url=api_url,
