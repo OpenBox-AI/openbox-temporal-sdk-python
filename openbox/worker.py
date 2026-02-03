@@ -150,10 +150,6 @@ def create_openbox_worker(
         await worker.run()
         ```
     """
-    # Build interceptors and activities lists
-    all_interceptors = list(interceptors)
-    all_activities = list(activities)
-
     # Initialize OpenBox
     print(f"Initializing OpenBox SDK with URL: {openbox_url}")
 
