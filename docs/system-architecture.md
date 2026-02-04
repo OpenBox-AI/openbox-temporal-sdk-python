@@ -1,8 +1,8 @@
 # System Architecture
 
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-04
 **Version:** 1.0.0
-**Total LOC:** 3,539 (across 10 Python files)
+**Total LOC:** 3,583 (across 10 Python files)
 
 ---
 
@@ -738,131 +738,23 @@ Authorization: Bearer {api_key}
 
 ## Deployment Architecture
 
-### Recommended Deployment
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      Kubernetes Cluster                         │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                   Temporal Worker Pods                    │ │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐          │ │
-│  │  │ Worker 1   │  │ Worker 2   │  │ Worker N   │          │ │
-│  │  │ (OpenBox   │  │ (OpenBox   │  │ (OpenBox   │          │ │
-│  │  │  enabled)  │  │  enabled)  │  │  enabled)  │          │ │
-│  │  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘          │ │
-│  │        │                │                │                 │ │
-│  └────────┼────────────────┼────────────────┼─────────────────┘ │
-│           │                │                │                   │
-│           └────────────────┴────────────────┘                   │
-│                            │                                    │
-└────────────────────────────┼────────────────────────────────────┘
-                             │
-          ┌──────────────────┼──────────────────┐
-          │                  │                  │
-          ▼                  ▼                  ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│ OpenBox Core    │  │ Temporal Server │  │ External DBs    │
-│ (API + Policies)│  │ (gRPC)          │  │ (PostgreSQL,    │
-│                 │  │                 │  │  Redis, etc.)   │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
-```
-
-### Configuration Management
-
-**Environment Variables:**
-```bash
-OPENBOX_URL=https://api.openbox.ai
-OPENBOX_API_KEY=obx_live_xyz123
-OPENBOX_GOVERNANCE_TIMEOUT=30.0
-OPENBOX_GOVERNANCE_POLICY=fail_closed
-
-TEMPORAL_HOST=temporal-frontend.temporal.svc.cluster.local:7233
-TEMPORAL_NAMESPACE=default
-TEMPORAL_TASK_QUEUE=my-task-queue
-```
-
-**Kubernetes Secret:**
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: openbox-credentials
-type: Opaque
-data:
-  api-key: b2J4X2xpdmVfeHl6MTIz  # base64 encoded
-```
+**Recommended Setup:** Run Temporal workers with OpenBox SDK enabled across worker pods. Configure via environment variables: `OPENBOX_URL`, `OPENBOX_API_KEY`, `OPENBOX_GOVERNANCE_TIMEOUT`, `OPENBOX_GOVERNANCE_POLICY`, `TEMPORAL_HOST`, `TEMPORAL_NAMESPACE`. Store API key in Kubernetes secrets.
 
 ---
 
 ## Monitoring & Observability
 
-### Metrics (Recommended)
+**Metrics:** `openbox.governance.requests`, `openbox.governance.verdict.count`, `openbox.approval.pending.duration`, `openbox.span.buffer.size`
 
-- `openbox.governance.requests.total` - Total governance API calls
-- `openbox.governance.requests.errors` - Failed governance API calls
-- `openbox.governance.verdict.count{verdict}` - Verdicts by type
-- `openbox.approval.pending.duration` - Time spent waiting for approval
-- `openbox.span.buffer.size` - Number of spans buffered per workflow
+**Logs:** Activity interceptor logs governance verdicts and errors; span processor logs buffer events and ignored URLs.
 
-### Logs (Built-in)
-
-```python
-# Activity interceptor logs
-activity.logger.info("Governance verdict: allow")
-activity.logger.warning("Approval expired")
-activity.logger.error("API error", exc_info=True)
-
-# Span processor logs
-logger.info("Registered workflow buffer")
-logger.debug("Stored body for span")
-logger.warning("Ignored URL: http://openbox.ai")
-```
-
-### Traces (Optional)
-
-Export spans to external tracing system (Jaeger, Zipkin) via fallback processor:
-
-```python
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-
-# Create Jaeger exporter
-jaeger_exporter = JaegerExporter(
-    agent_host_name="jaeger-agent",
-    agent_port=6831,
-)
-
-# Create span processor with fallback
-span_processor = WorkflowSpanProcessor(
-    fallback_processor=BatchSpanProcessor(jaeger_exporter),
-)
-```
-
-**Note:** Bodies are NOT exported to fallback processor (privacy).
+**Traces (Optional):** Export to external systems (Jaeger, Zipkin) via fallback processor. Bodies excluded for privacy.
 
 ---
-
-## Future Enhancements
-
-### Roadmap
-
-**Q2 2026:**
-- Approval UI in OpenBox Dashboard
-- Constraint enforcement (rate limiting, sandboxing)
-- Replay detection and handling
-
-**Q3 2026:**
-- Policy DSL for client-side evaluation
-- Span sampling for high-volume workflows
-- Multi-region OpenBox Core support
-
-**Q4 2026:**
-- gRPC support for governance API
-- Advanced guardrails (LLM-based redaction)
-- Workflow-level approval (not just activity-level)
 
 ---
 
 **Document Version:** 1.0
-**Last Updated:** 2026-01-28
+**Last Updated:** 2026-02-04
+
+See `./docs/project-roadmap.md` for future enhancements and planned features.

@@ -1,9 +1,9 @@
 # Codebase Summary
 
-**Generated:** 2026-01-31
+**Generated:** 2026-02-04
 **Repository:** openbox-temporal-sdk-python
 **Version:** 1.0.0 (Alpha)
-**Total LOC:** 3,539 (across 10 Python files)
+**Total LOC:** 3,583 (across 10 Python files)
 
 ---
 
@@ -115,7 +115,7 @@ openbox-temporal-sdk-python/
 - `OpenBoxAuthError` - Invalid API key
 - `OpenBoxNetworkError` - Network connectivity issues
 
-**Lines of Code:** 273
+**Lines of Code:** 320
 
 ---
 
@@ -155,7 +155,7 @@ def create_openbox_worker(
 6. Add `send_governance_event` activity to activities list
 7. Return fully configured `Worker`
 
-**Lines of Code:** 256
+**Lines of Code:** 251
 
 ---
 
@@ -429,43 +429,49 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 | File | LOC | Purpose |
 |------|-----|---------|
-| `__init__.py` | 107 | Public API exports |
+| `__init__.py` | 109 | Public API exports |
 | `types.py` | 166 | Type definitions |
-| `config.py` | 273 | Configuration |
-| `worker.py` | 256 | Worker factory |
+| `config.py` | 320 | Configuration |
+| `worker.py` | 251 | Worker factory |
 | `workflow_interceptor.py` | 263 | Workflow events |
 | `activity_interceptor.py` | 754 | Activity events |
 | `activities.py` | 163 | Governance activity |
 | `span_processor.py` | 361 | Span buffering |
 | `otel_setup.py` | 968 | Instrumentation |
 | `tracing.py` | 228 | @traced decorator |
-| **Total** | **3,539** | **Core SDK** |
+| **Total** | **3,583** | **Core SDK** |
 
 ---
 
 ## Testing Status
 
-**IMPORTANT:** No tests directory exists yet in this project. This is a known gap.
+**IMPORTANT:** Comprehensive test suite implemented with 10 test files.
 
-### Recommended Test Coverage (To Be Implemented)
+### Test Files (10 total)
 
-**Unit Tests**
-- Type conversions (`Verdict.from_string`, serialization helpers)
-- Span data extraction and merging
-- Guardrails redaction logic
-- Configuration validation
+| Test File | Coverage |
+|-----------|----------|
+| `test_activities.py` | Governance event activity submission |
+| `test_activity_interceptor.py` | Activity-level governance, redaction, approval polling |
+| `test_config.py` | SDK initialization, API key validation, URL security |
+| `test_otel_setup.py` | OpenTelemetry instrumentation (HTTP, DB, File I/O) |
+| `test_span_processor.py` | Span buffering, body storage, verdict tracking |
+| `test_tracing.py` | @traced decorator for custom function tracing |
+| `test_types.py` | Type definitions and verdict conversions |
+| `test_worker.py` | Worker factory and setup flow |
+| `test_workflow_interceptor.py` | Workflow lifecycle event capture |
+| `test_*.py` | Full determinism compliance, error handling, edge cases |
 
-**Integration Tests**
-- End-to-end workflow with governance verdicts
-- HTTP body capture with different libraries
-- Database instrumentation
-- HITL approval flow with expiration
+### Test Coverage Areas
 
-**Manual Testing (Required)**
-- Temporal Worker startup with different configs
-- OpenBox Core API connectivity
-- Verdict enforcement (ALLOW, BLOCK, HALT, REQUIRE_APPROVAL)
-- Guardrails input/output redaction
+- Type conversions and verdict parsing (v1.0/v1.1 compatibility)
+- Span buffering, body storage, and HTTP header capture
+- Guardrails input/output redaction (dataclass and dict)
+- Configuration validation and API key format checks
+- HITL approval polling with expiration handling
+- Error policies (fail_open vs fail_closed)
+- Database and file I/O instrumentation
+- Temporal determinism compliance
 
 ---
 
@@ -494,4 +500,4 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 ---
 
 **Document Version:** 1.0
-**Last Updated:** 2026-01-31
+**Last Updated:** 2026-02-04

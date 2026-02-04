@@ -3,8 +3,8 @@
 **Project Name:** OpenBox SDK for Temporal Workflows
 **Version:** 1.0.0
 **Status:** Alpha
-**Last Updated:** 2026-01-31
-**Total LOC:** 3,539 (across 10 Python files)
+**Last Updated:** 2026-02-04
+**Total LOC:** 3,583 (across 10 Python files)
 
 ---
 
@@ -353,5 +353,5 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 **Document Version**: 1.0
 **Prepared By**: OpenBox Documentation System
-**Date**: 2026-01-31
-**Test Status**: No test directory exists yet (known gap, needs implementation)
+**Date**: 2026-02-04
+**Test Status**: 10 test files implemented (see `./tests/` directory)
