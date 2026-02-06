@@ -614,7 +614,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
                     json=payload,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "User-Agent": "OpenBox-SDK/1.0",
+                    },
                 )
                 # Check for HTTP errors
                 if response.status_code >= 400:
@@ -700,7 +703,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/approval",
                     json=payload,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    headers={
+                        "Authorization": f"Bearer {self._api_key}",
+                        "User-Agent": "OpenBox-SDK/1.0",
+                    },
                 )
 
                 if response.status_code == 200:

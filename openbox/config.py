@@ -174,6 +174,7 @@ def _validate_api_key_with_server(api_url: str, api_key: str, timeout: float) ->
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "OpenBox-SDK/1.0",
             },
             method="GET",
         )
