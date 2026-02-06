@@ -103,6 +103,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
+                    "User-Agent": "OpenBox-SDK/1.0",
                 },
             )
 

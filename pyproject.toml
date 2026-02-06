@@ -1,6 +1,6 @@
 [project]
 name = "openbox-temporal-sdk-python"
-version = "1.0.0"
+version = "1.0.1"
 description = "OpenBox SDK - Governance and observability for Temporal workflows"
 authors = [
     { name = "OpenBox Team", email = "tino@openbox.ai" },
