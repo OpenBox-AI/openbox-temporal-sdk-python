@@ -117,7 +117,7 @@ jobs:
           cat qg.md >> "$GITHUB_STEP_SUMMARY"
           echo "STATUS=${STATUS}"   >> "$GITHUB_ENV"
           echo "QG_NAME=${QG_NAME}" >> "$GITHUB_ENV"
-          echo "PNAME=${PNAME}"     >> "$GITHUB_ENV"   # truyền sang bước sau
+          echo "PNAME=${PNAME}"     >> "$GITHUB_ENV"
         
       # (2) Upsert Issue cho
       - name: Comment (or create) Issue with QG report
