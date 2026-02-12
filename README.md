@@ -91,7 +91,8 @@ worker = create_openbox_worker(
 
     # Database instrumentation
     instrument_databases=True,
-    db_libraries={"psycopg2", "redis"},  # None = all available
+    db_libraries={"psycopg2", "sqlalchemy"},  # None = all available
+    sqlalchemy_engine=engine,  # pass pre-existing engine for query capture
 
     # File I/O instrumentation
     instrument_file_io=False,  # disabled by default
@@ -189,6 +190,18 @@ Configure error policy via `on_api_error`:
 - Redis: `redis`
 - ORM: `sqlalchemy`
 
+**SQLAlchemy Note:** If your SQLAlchemy engine is created before `create_openbox_worker()` runs (e.g., at module import time), you must pass it via the `sqlalchemy_engine` parameter. Without this, `SQLAlchemyInstrumentor` only patches future `create_engine()` calls and won't capture queries on pre-existing engines.
+
+```python
+from db.engine import engine
+
+worker = create_openbox_worker(
+    ...,
+    db_libraries={"psycopg2", "sqlalchemy"},
+    sqlalchemy_engine=engine,
+)
+```
+
 ### File I/O
 - `open()`, `read()`, `write()`, `readline()`, `readlines()`
 - Skips system paths (`/dev/`, `/proc/`, `/sys/`, `__pycache__`)
@@ -235,7 +248,10 @@ span_processor = WorkflowSpanProcessor(
 )
 
 # 3. Setup OTel instrumentation
-setup_opentelemetry_for_governance(span_processor)
+setup_opentelemetry_for_governance(
+    span_processor,
+    sqlalchemy_engine=engine,  # optional: instrument pre-existing engine
+)
 
 # 4. Create governance config
 config = GovernanceConfig(
@@ -306,4 +322,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** 1.0.0 | **Last Updated:** 2026-02-04
+**Version:** 1.0.1 | **Last Updated:** 2026-02-12
