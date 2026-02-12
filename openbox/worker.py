@@ -57,6 +57,7 @@ def create_openbox_worker(
     # Database instrumentation
     instrument_databases: bool = True,
     db_libraries: Optional[set] = None,
+    sqlalchemy_engine: Optional[Any] = None,
     # File I/O instrumentation
     instrument_file_io: bool = False,
     # Standard Worker options
@@ -117,6 +118,10 @@ def create_openbox_worker(
         db_libraries: Set of database libraries to instrument (None = all available).
                       Valid values: "psycopg2", "asyncpg", "mysql", "pymysql",
                       "pymongo", "redis", "sqlalchemy"
+        sqlalchemy_engine: SQLAlchemy Engine instance to instrument. Pass this when
+                          the engine is created before create_openbox_worker() runs
+                          (e.g., at module import time). This ensures query-level
+                          instrumentation works on pre-existing engines.
 
         # File I/O instrumentation
         instrument_file_io: Instrument file I/O operations (default: False)
@@ -171,6 +176,7 @@ def create_openbox_worker(
         instrument_databases=instrument_databases,
         db_libraries=db_libraries,
         instrument_file_io=instrument_file_io,
+        sqlalchemy_engine=sqlalchemy_engine,
     )
 
     # 4. Create governance config

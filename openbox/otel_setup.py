@@ -22,7 +22,7 @@ Supported database libraries:
 - sqlalchemy (ORM)
 """
 
-from typing import TYPE_CHECKING, Optional, Set, List
+from typing import TYPE_CHECKING, Any, Optional, Set, List
 import logging
 
 if TYPE_CHECKING:
@@ -70,6 +70,7 @@ def setup_opentelemetry_for_governance(
     instrument_databases: bool = True,
     db_libraries: Optional[Set[str]] = None,
     instrument_file_io: bool = False,
+    sqlalchemy_engine: Optional[Any] = None,
 ) -> None:
     """
     Setup OpenTelemetry instrumentors with body capture hooks.
@@ -87,6 +88,10 @@ def setup_opentelemetry_for_governance(
                       Valid values: "psycopg2", "asyncpg", "mysql", "pymysql",
                       "pymongo", "redis", "sqlalchemy"
         instrument_file_io: Whether to instrument file I/O operations (default: False)
+        sqlalchemy_engine: Optional SQLAlchemy Engine instance to instrument. Required
+                          when the engine is created before instrumentation runs (e.g.,
+                          at module import time). If not provided, only future engines
+                          created via create_engine() will be instrumented.
     """
     global _span_processor, _ignored_url_prefixes
     _span_processor = span_processor
@@ -172,8 +177,13 @@ def setup_opentelemetry_for_governance(
     logger.info(f"OpenTelemetry HTTP instrumentation complete. Instrumented: {instrumented}")
 
     # 6. Database instrumentation (optional)
+    if sqlalchemy_engine is not None and not instrument_databases:
+        logger.warning(
+            "sqlalchemy_engine was provided but instrument_databases=False; "
+            "engine will not be instrumented"
+        )
     if instrument_databases:
-        db_instrumented = setup_database_instrumentation(db_libraries)
+        db_instrumented = setup_database_instrumentation(db_libraries, sqlalchemy_engine)
         if db_instrumented:
             instrumented.extend(db_instrumented)
 
@@ -334,6 +344,7 @@ def uninstrument_file_io() -> None:
 
 def setup_database_instrumentation(
     db_libraries: Optional[Set[str]] = None,
+    sqlalchemy_engine: Optional[Any] = None,
 ) -> List[str]:
     """
     Setup OpenTelemetry database instrumentors.
@@ -351,6 +362,10 @@ def setup_database_instrumentation(
                       - "pymongo" (MongoDB)
                       - "redis"
                       - "sqlalchemy" (ORM)
+        sqlalchemy_engine: Optional SQLAlchemy Engine instance to instrument. When
+                          provided, registers event listeners on this engine to capture
+                          queries. Without this, only engines created after this call
+                          (via patched create_engine) will be instrumented.
 
     Returns:
         List of successfully instrumented library names
@@ -424,13 +439,36 @@ def setup_database_instrumentation(
             logger.debug("redis instrumentation not available")
 
     # sqlalchemy (ORM)
+    if sqlalchemy_engine is not None and db_libraries is not None and "sqlalchemy" not in db_libraries:
+        logger.warning(
+            "sqlalchemy_engine was provided but 'sqlalchemy' is not in db_libraries; "
+            "engine will not be instrumented"
+        )
     if db_libraries is None or "sqlalchemy" in db_libraries:
         try:
             from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
-            SQLAlchemyInstrumentor().instrument()
+            if sqlalchemy_engine is not None:
+                # Validate engine type before passing to instrumentor
+                try:
+                    from sqlalchemy.engine import Engine as _SAEngine
+                except ImportError:
+                    raise TypeError(
+                        "sqlalchemy_engine was provided but sqlalchemy is not installed"
+                    )
+                if not isinstance(sqlalchemy_engine, _SAEngine):
+                    raise TypeError(
+                        f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "
+                        f"got {type(sqlalchemy_engine).__name__}"
+                    )
+                # Instrument the existing engine directly (registers event listeners)
+                SQLAlchemyInstrumentor().instrument(engine=sqlalchemy_engine)
+                logger.info("Instrumented: sqlalchemy (existing engine)")
+            else:
+                # Patch create_engine() for future engines only
+                SQLAlchemyInstrumentor().instrument()
+                logger.info("Instrumented: sqlalchemy (future engines)")
             instrumented.append("sqlalchemy")
-            logger.info("Instrumented: sqlalchemy")
         except ImportError:
             logger.debug("sqlalchemy instrumentation not available")
 

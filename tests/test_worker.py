@@ -135,6 +135,7 @@ class TestCreateOpenboxWorkerWithConfig:
             instrument_databases=True,
             db_libraries={"psycopg2", "redis"},
             instrument_file_io=True,
+            sqlalchemy_engine=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -1379,6 +1380,78 @@ class TestConfigurationOptions:
         mock_setup_otel.assert_called_once()
         call_kwargs = mock_setup_otel.call_args[1]
         assert call_kwargs["instrument_file_io"] is True
+
+    @patch("openbox.worker.Worker")
+    @patch("openbox.worker.validate_api_key")
+    @patch("openbox.worker.WorkflowSpanProcessor")
+    @patch("openbox.worker.GovernanceConfig")
+    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
+    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
+    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
+    @patch("openbox.activities.send_governance_event")
+    def test_sqlalchemy_engine_passed_to_setup(
+        self,
+        mock_send_governance_event,
+        mock_activity_interceptor,
+        mock_governance_interceptor,
+        mock_setup_otel,
+        mock_governance_config,
+        mock_span_processor_class,
+        mock_validate_api_key,
+        mock_worker_class,
+    ):
+        """Test sqlalchemy_engine is passed to setup_opentelemetry_for_governance."""
+        from openbox.worker import create_openbox_worker
+
+        mock_client = Mock()
+        mock_engine = Mock()
+
+        create_openbox_worker(
+            client=mock_client,
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+            sqlalchemy_engine=mock_engine,
+        )
+
+        mock_setup_otel.assert_called_once()
+        call_kwargs = mock_setup_otel.call_args[1]
+        assert call_kwargs["sqlalchemy_engine"] is mock_engine
+
+    @patch("openbox.worker.Worker")
+    @patch("openbox.worker.validate_api_key")
+    @patch("openbox.worker.WorkflowSpanProcessor")
+    @patch("openbox.worker.GovernanceConfig")
+    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
+    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
+    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
+    @patch("openbox.activities.send_governance_event")
+    def test_sqlalchemy_engine_defaults_to_none(
+        self,
+        mock_send_governance_event,
+        mock_activity_interceptor,
+        mock_governance_interceptor,
+        mock_setup_otel,
+        mock_governance_config,
+        mock_span_processor_class,
+        mock_validate_api_key,
+        mock_worker_class,
+    ):
+        """Test sqlalchemy_engine defaults to None when not provided."""
+        from openbox.worker import create_openbox_worker
+
+        mock_client = Mock()
+
+        create_openbox_worker(
+            client=mock_client,
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+        )
+
+        mock_setup_otel.assert_called_once()
+        call_kwargs = mock_setup_otel.call_args[1]
+        assert call_kwargs["sqlalchemy_engine"] is None
 
 
 # ===============================================================================

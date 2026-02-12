@@ -462,7 +462,7 @@ class TestSetupOpentelemetryForGovernance:
                         instrument_file_io=False,
                     )
 
-                    mock_db_setup.assert_called_once_with({"psycopg2"})
+                    mock_db_setup.assert_called_once_with({"psycopg2"}, None)
 
     def test_calls_setup_file_io_instrumentation_when_enabled(self, mock_span_processor):
         """Should call setup_file_io_instrumentation when instrument_file_io=True."""
@@ -868,7 +868,7 @@ class TestSetupDatabaseInstrumentation:
             assert "redis" in result
 
     def test_instruments_sqlalchemy(self):
-        """Should instrument sqlalchemy library."""
+        """Should instrument sqlalchemy library (future engines path)."""
         from openbox.otel_setup import setup_database_instrumentation
 
         with patch('opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor') as mock_sqlalchemy:
@@ -877,8 +877,125 @@ class TestSetupDatabaseInstrumentation:
 
             result = setup_database_instrumentation(db_libraries={"sqlalchemy"})
 
-            mock_instance.instrument.assert_called_once()
+            mock_instance.instrument.assert_called_once_with()
             assert "sqlalchemy" in result
+
+    def test_instruments_sqlalchemy_with_existing_engine(self):
+        """Should instrument sqlalchemy with existing engine when provided."""
+        from openbox.otel_setup import setup_database_instrumentation
+
+        with patch('opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor') as mock_sqlalchemy:
+            mock_instance = MagicMock()
+            mock_sqlalchemy.return_value = mock_instance
+
+            # Create a mock that passes the isinstance check
+            with patch('openbox.otel_setup.setup_database_instrumentation') as _:
+                pass  # just to show we need a real-ish engine
+
+            # Use a mock Engine that passes isinstance check
+            from unittest.mock import create_autospec
+            try:
+                from sqlalchemy.engine import Engine
+                mock_engine = create_autospec(Engine, instance=True)
+            except ImportError:
+                pytest.skip("sqlalchemy not installed")
+
+            result = setup_database_instrumentation(
+                db_libraries={"sqlalchemy"},
+                sqlalchemy_engine=mock_engine,
+            )
+
+            mock_instance.instrument.assert_called_once_with(engine=mock_engine)
+            assert "sqlalchemy" in result
+
+    def test_sqlalchemy_engine_rejects_non_engine_type(self):
+        """Should raise TypeError when sqlalchemy_engine is not an Engine instance."""
+        from openbox.otel_setup import setup_database_instrumentation
+
+        try:
+            import sqlalchemy  # noqa
+        except ImportError:
+            pytest.skip("sqlalchemy not installed")
+
+        with patch('opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor'):
+            with pytest.raises(TypeError, match="must be a sqlalchemy.engine.Engine instance"):
+                setup_database_instrumentation(
+                    db_libraries={"sqlalchemy"},
+                    sqlalchemy_engine="not-an-engine",
+                )
+
+    def test_sqlalchemy_engine_rejects_when_sqlalchemy_not_installed(self):
+        """Should raise TypeError when engine provided but sqlalchemy not installed."""
+        from openbox.otel_setup import setup_database_instrumentation
+
+        with patch('opentelemetry.instrumentation.sqlalchemy.SQLAlchemyInstrumentor'):
+            with patch.dict('sys.modules', {'sqlalchemy': None, 'sqlalchemy.engine': None}):
+                with pytest.raises(TypeError, match="sqlalchemy is not installed"):
+                    setup_database_instrumentation(
+                        db_libraries={"sqlalchemy"},
+                        sqlalchemy_engine=MagicMock(),
+                    )
+
+    def test_warns_when_engine_provided_but_sqlalchemy_not_in_db_libraries(self):
+        """Should warn when sqlalchemy_engine provided but 'sqlalchemy' not in db_libraries."""
+        from openbox.otel_setup import setup_database_instrumentation
+        import logging
+
+        with patch('opentelemetry.instrumentation.psycopg2.Psycopg2Instrumentor') as mock_psycopg2:
+            mock_psycopg2.return_value = MagicMock()
+
+            with patch.object(logging.getLogger('openbox.otel_setup'), 'warning') as mock_warn:
+                setup_database_instrumentation(
+                    db_libraries={"psycopg2"},
+                    sqlalchemy_engine=MagicMock(),
+                )
+
+                mock_warn.assert_called_once()
+                assert "not in db_libraries" in mock_warn.call_args[0][0]
+
+    def test_warns_when_engine_provided_but_databases_disabled(self, mock_span_processor):
+        """Should warn when sqlalchemy_engine provided but instrument_databases=False."""
+        import openbox.otel_setup as otel_setup
+        import logging
+
+        with patch.object(otel_setup, 'setup_httpx_body_capture'):
+            with patch('opentelemetry.trace.get_tracer_provider') as mock_get_provider:
+                mock_provider = MagicMock()
+                mock_get_provider.return_value = mock_provider
+
+                with patch.object(logging.getLogger('openbox.otel_setup'), 'warning') as mock_warn:
+                    otel_setup.setup_opentelemetry_for_governance(
+                        span_processor=mock_span_processor,
+                        instrument_databases=False,
+                        instrument_file_io=False,
+                        sqlalchemy_engine=MagicMock(),
+                    )
+
+                    mock_warn.assert_called_once()
+                    assert "instrument_databases=False" in mock_warn.call_args[0][0]
+
+    def test_sqlalchemy_engine_passthrough_from_setup_governance(self, mock_span_processor):
+        """Should pass sqlalchemy_engine through to setup_database_instrumentation."""
+        import openbox.otel_setup as otel_setup
+
+        mock_engine = MagicMock()
+
+        with patch.object(otel_setup, 'setup_httpx_body_capture'):
+            with patch.object(otel_setup, 'setup_database_instrumentation') as mock_db_setup:
+                mock_db_setup.return_value = ["sqlalchemy"]
+                with patch('opentelemetry.trace.get_tracer_provider') as mock_get_provider:
+                    mock_provider = MagicMock()
+                    mock_get_provider.return_value = mock_provider
+
+                    otel_setup.setup_opentelemetry_for_governance(
+                        span_processor=mock_span_processor,
+                        instrument_databases=True,
+                        db_libraries={"sqlalchemy"},
+                        instrument_file_io=False,
+                        sqlalchemy_engine=mock_engine,
+                    )
+
+                    mock_db_setup.assert_called_once_with({"sqlalchemy"}, mock_engine)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
