@@ -322,4 +322,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** 1.0.1 | **Last Updated:** 2026-02-12
+**Version:** 1.0.2 | **Last Updated:** 2026-02-12
