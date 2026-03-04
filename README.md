@@ -5,6 +5,7 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 **Key Features:**
 - 6 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted)
 - 5-tier verdict system (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
+- **Hook-level governance** — per-HTTP-request evaluation with started/completed stages
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
@@ -208,6 +209,28 @@ worker = create_openbox_worker(
 
 ---
 
+## Hook-Level Governance
+
+Every HTTP request made during an activity is evaluated by OpenBox Core in real-time at two stages:
+
+| Stage | Trigger | Data Available |
+|-------|---------|----------------|
+| `started` | Before request is sent | Method, URL, request headers, request body |
+| `completed` | After response received | All of above + response headers, response body, status code |
+
+**How it works:**
+
+1. OTel httpx instrumentation fires a **request hook** → SDK sends `started` governance evaluation with request data
+2. If verdict is BLOCK/HALT → request is aborted before it leaves the process
+3. After response arrives → SDK sends `completed` governance evaluation with full request+response data
+4. If verdict is BLOCK/HALT → `GovernanceBlockedError` is raised, activity fails with `GovernanceStop`
+
+Each HTTP request produces exactly **2 span entries** in the governance payload (started + completed). The `stage` field distinguishes them.
+
+**Governed span tracking:** When hook-level governance is active, the SDK marks HTTP spans as "governed" so the OTel `on_end` processor skips buffering them — preventing duplicate spans.
+
+---
+
 ## Architecture
 
 See [System Architecture](./docs/system-architecture.md) for detailed component design.
@@ -220,6 +243,10 @@ Workflow/Activity → Interceptors → Span Processor → OpenBox Core API
                                             Returns Verdict
                                                     ↓
                                     (ALLOW, BLOCK, HALT, etc.)
+
+Hook-Level (per HTTP request):
+Activity HTTP Call → OTel Hook → Governance API (started) → Allow/Block
+                   → Response  → Governance API (completed) → Allow/Block
 ```
 
 ---
@@ -247,9 +274,11 @@ span_processor = WorkflowSpanProcessor(
     ignored_url_prefixes=["http://localhost:8086"]
 )
 
-# 3. Setup OTel instrumentation
+# 3. Setup OTel instrumentation (governance always enabled)
 setup_opentelemetry_for_governance(
     span_processor,
+    api_url="http://localhost:8086",
+    api_key="obx_test_key_1",
     sqlalchemy_engine=engine,  # optional: instrument pre-existing engine
 )
 
@@ -322,4 +351,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** 1.0.2 | **Last Updated:** 2026-02-12
+**Version:** 1.0.3 | **Last Updated:** 2026-03-04
