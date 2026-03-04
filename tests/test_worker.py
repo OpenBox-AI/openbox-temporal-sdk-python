@@ -136,6 +136,10 @@ class TestCreateOpenboxWorkerWithConfig:
             db_libraries={"psycopg2", "redis"},
             instrument_file_io=True,
             sqlalchemy_engine=None,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            api_timeout=30.0,
+            on_api_error="fail_open",
         )
 
     @patch("openbox.worker.Worker")

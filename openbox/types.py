@@ -6,6 +6,16 @@ from typing import List, Dict, Any, Optional, Union
 from enum import Enum
 
 
+class GovernanceBlockedError(Exception):
+    """Raised by OTel hooks when governance blocks an HTTP request."""
+
+    def __init__(self, verdict: str, reason: str, url: str = ""):
+        self.verdict = verdict
+        self.reason = reason
+        self.url = url
+        super().__init__(f"Governance {verdict}: {reason}")
+
+
 class WorkflowEventType(str, Enum):
     """Workflow lifecycle events for governance."""
 

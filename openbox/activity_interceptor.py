@@ -71,14 +71,14 @@ from opentelemetry import trace
 
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
-from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict
+from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
 
 
 def _serialize_value(value: Any) -> Any:
     """Convert a value to JSON-serializable format."""
     if value is None:
         return None
-    if isinstance(value, (str, int, float, bool, int)):
+    if isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, bytes):
         # Try to decode bytes as UTF-8, fallback to base64
@@ -305,6 +305,24 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
             )
 
+        # Buffer activity context for hook-level governance (OTel request hooks)
+        _activity_event_context = {
+            "source": "workflow-telemetry",
+            "event_type": WorkflowEventType.ACTIVITY_STARTED.value,
+            "workflow_id": info.workflow_id,
+            "run_id": info.workflow_run_id,
+            "workflow_type": info.workflow_type,
+            "activity_id": info.activity_id,
+            "activity_type": info.activity_type,
+            "task_queue": info.task_queue,
+            "attempt": info.attempt,
+            "activity_input": activity_input,
+            "activity_output": None,
+        }
+        self._span_processor.set_activity_context(
+            info.workflow_id, info.activity_id, _activity_event_context
+        )
+
         # If governance returned BLOCK/HALT, fail the activity before it runs
         if governance_verdict and governance_verdict.verdict.should_stop():
             from temporalio.exceptions import ApplicationError
@@ -440,12 +458,24 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 result = await self.next.execute_activity(input)
                 # Serialize activity output on success
                 activity_output = _serialize_value(result)
+            except GovernanceBlockedError as e:
+                status = "failed"
+                error = {"type": "GovernanceBlockedError", "message": str(e), "verdict": e.verdict, "url": e.url}
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"HTTP request blocked by governance: {e.reason}",
+                    type="GovernanceStop",
+                    non_retryable=True,
+                )
             except Exception as e:
                 status = "failed"
                 error = {"type": type(e).__name__, "message": str(e)}
                 raise
             finally:
                 end_time = time.time()
+
+                # Clear buffered activity context (hook governance no longer needed)
+                self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
 
                 # Get activity spans from buffer
                 # Filter by activity_id (stored in span_data by span_processor)
