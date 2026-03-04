@@ -5,7 +5,7 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 **Key Features:**
 - 6 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted)
 - 5-tier verdict system (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
-- **Hook-level governance** — per-HTTP-request evaluation with started/completed stages
+- **Hook-level governance** — per-operation evaluation (HTTP requests + file I/O) with started/completed stages
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
@@ -167,7 +167,7 @@ OpenBox Core can validate and redact sensitive data before/after activity execut
 
 ## Error Handling
 
-Configure error policy via `on_api_error`:
+Configure error policy via `on_api_error` (constants available as `hook_governance.FAIL_OPEN` / `FAIL_CLOSED`):
 
 | Policy | Behavior |
 |--------|----------|
@@ -211,21 +211,50 @@ worker = create_openbox_worker(
 
 ## Hook-Level Governance
 
-Every HTTP request made during an activity is evaluated by OpenBox Core in real-time at two stages:
+Every HTTP request and file operation made during an activity is evaluated by OpenBox Core in real-time at two stages:
+
+### HTTP Requests
 
 | Stage | Trigger | Data Available |
 |-------|---------|----------------|
 | `started` | Before request is sent | Method, URL, request headers, request body |
 | `completed` | After response received | All of above + response headers, response body, status code |
 
-**How it works:**
+### File Operations
+
+Per-operation governance evaluates **every** `read()`/`write()`/`readline()`/`readlines()`/`writelines()` call, not just open/close:
+
+| Operation | Stage | Trigger | Data Available |
+|-----------|-------|---------|----------------|
+| `open` | `started` | Before file is opened | File path, open mode |
+| `read` | `started` | Before read executes | File path, mode |
+| `read` | `completed` | After read returns | data (content read), bytes_read |
+| `readline` | `started` | Before readline executes | File path, mode |
+| `readline` | `completed` | After readline returns | data (line read), bytes_read |
+| `readlines` | `started` | Before readlines executes | File path, mode |
+| `readlines` | `completed` | After readlines returns | data (lines read), bytes_read, lines_count |
+| `write` | `started` | Before write executes | File path, mode |
+| `write` | `completed` | After write returns | data (content written), bytes_written |
+| `writelines` | `started` | Before writelines executes | File path, mode |
+| `writelines` | `completed` | After writelines returns | data (lines written), bytes_written, lines_count |
+| `close` | `completed` | After file is closed | bytes_read, bytes_written, operations list |
+
+**How it works (HTTP):**
 
 1. OTel httpx instrumentation fires a **request hook** → SDK sends `started` governance evaluation with request data
 2. If verdict is BLOCK/HALT → request is aborted before it leaves the process
 3. After response arrives → SDK sends `completed` governance evaluation with full request+response data
 4. If verdict is BLOCK/HALT → `GovernanceBlockedError` is raised, activity fails with `GovernanceStop`
 
-Each HTTP request produces exactly **2 span entries** in the governance payload (started + completed). The `stage` field distinguishes them.
+**How it works (File I/O):**
+
+1. Activity calls `open()` → SDK sends `started` governance evaluation with file path and mode
+2. If verdict is BLOCK/HALT → file is never opened, `GovernanceBlockedError` is raised
+3. Each `read()`/`write()`/`readline()`/`readlines()`/`writelines()` call sends `started` (before) and `completed` (after) governance evaluations — enabling content-based policy enforcement
+4. After file is closed → SDK sends `completed` governance with lifecycle summary (total bytes, operations list)
+5. File governance requires `instrument_file_io=True` (disabled by default)
+
+A simple open-read-close produces **4 governance evaluations**: open(started) → read(started) → read(completed) → close(completed).
 
 **Governed span tracking:** When hook-level governance is active, the SDK marks HTTP spans as "governed" so the OTel `on_end` processor skips buffering them — preventing duplicate spans.
 
@@ -245,9 +274,21 @@ Workflow/Activity → Interceptors → Span Processor → OpenBox Core API
                                     (ALLOW, BLOCK, HALT, etc.)
 
 Hook-Level (per HTTP request):
-Activity HTTP Call → OTel Hook → Governance API (started) → Allow/Block
-                   → Response  → Governance API (completed) → Allow/Block
+Activity HTTP Call → OTel Hook → hook_governance → API (started) → Allow/Block
+                   → Response  → hook_governance → API (completed) → Allow/Block
+
+Hook-Level (per file operation):
+Activity open()       → hook_governance → API (started)   → Allow/Block
+Activity read/write() → hook_governance → API (started)   → Allow/Block
+                      → hook_governance → API (completed) → Allow/Block
+Activity close()      → hook_governance → API (completed) → Allow/Block
 ```
+
+**Module responsibilities:**
+- `otel_setup.py` — OTel instrumentation, hooks, TracedFile wrapper
+- `hook_governance.py` — Shared governance evaluator (payload building, API calls, verdict handling)
+- `span_processor.py` — Span buffering, activity context tracking
+- `activity_interceptor.py` — Activity lifecycle governance events
 
 ---
 
@@ -265,6 +306,7 @@ from openbox import (
 from openbox.otel_setup import setup_opentelemetry_for_governance
 from openbox.activity_interceptor import ActivityGovernanceInterceptor
 from openbox.activities import send_governance_event
+from openbox.hook_governance import FAIL_OPEN, FAIL_CLOSED  # error policy constants
 
 # 1. Initialize SDK
 initialize(api_url="http://localhost:8086", api_key="obx_test_key_1")
@@ -328,13 +370,13 @@ worker = Worker(
 
 ## Testing
 
-The SDK includes comprehensive test coverage with 10 test files:
+The SDK includes comprehensive test coverage with 12 test files:
 
 ```bash
 pytest tests/
 ```
 
-Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_otel_setup.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
+Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
 
 ---
 
