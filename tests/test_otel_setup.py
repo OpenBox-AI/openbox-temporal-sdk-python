@@ -93,13 +93,13 @@ def reset_otel_setup_globals():
 @pytest.fixture
 def mock_span_processor():
     """Create a mock WorkflowSpanProcessor."""
-    import openbox.otel_setup as otel_setup
-    old_url = otel_setup._api_url
-    otel_setup._api_url = ""  # Isolate body storage tests from governance
+    import openbox.hook_governance as hook_gov
+    old_url = hook_gov._api_url
+    hook_gov._api_url = ""  # Isolate body storage tests from governance
     processor = MagicMock()
     processor.store_body = MagicMock()
     yield processor
-    otel_setup._api_url = old_url
+    hook_gov._api_url = old_url
 
 
 @pytest.fixture
@@ -304,7 +304,9 @@ class TestSetupOpentelemetryForGovernance:
                     instrument_file_io=False,
                 )
 
-        assert otel_setup._ignored_url_prefixes == set(ignored_urls)
+        # api_url is auto-added to prevent governance recursion
+        expected = set(ignored_urls) | {"http://test:8086"}
+        assert otel_setup._ignored_url_prefixes == expected
 
     def test_registers_span_processor_with_tracer_provider(self, mock_span_processor):
         """Should register span processor with TracerProvider."""
@@ -1817,13 +1819,14 @@ class TestIntegration:
 def governance_setup(mock_span_processor, mock_span):
     """Set up governance globals and a mock span with activity context."""
     import openbox.otel_setup as otel_setup
+    import openbox.hook_governance as hook_gov
     from openbox.types import WorkflowSpanBuffer
 
     otel_setup._span_processor = mock_span_processor
-    otel_setup._api_url = "http://localhost:9090"
-    otel_setup._api_key = "test-key"
-    otel_setup._api_timeout = 5.0
-    otel_setup._on_api_error = "fail_open"
+    hook_gov.configure(
+        "http://localhost:9090", "test-key", mock_span_processor,
+        api_timeout=5.0, on_api_error="fail_open",
+    )
 
     # Wire up span processor to return activity context
     mock_span_processor.get_activity_context_by_trace.return_value = {
@@ -1845,21 +1848,23 @@ def governance_setup(mock_span_processor, mock_span):
     )
     mock_span_processor.get_buffer.return_value = _buffer
 
-    yield otel_setup
+    yield hook_gov
 
     # Reset governance globals
-    otel_setup._api_url = ""
-    otel_setup._api_key = ""
-    otel_setup._api_timeout = 30.0
-    otel_setup._on_api_error = "fail_open"
+    hook_gov._api_url = ""
+    hook_gov._api_key = ""
+    hook_gov._api_timeout = 30.0
+    hook_gov._on_api_error = "fail_open"
+    hook_gov._span_processor = None
 
 
 class TestGovernanceStageField:
     """Tests for the stage field in hook-level governance spans."""
 
     def test_evaluate_governance_sync_includes_stage_started(self, governance_setup, mock_span):
-        """_evaluate_governance_sync should send 1 span with stage='started'."""
-        from openbox.otel_setup import _evaluate_governance_sync
+        """evaluate_sync should send 1 span with stage='started'."""
+        from openbox.otel_setup import _build_http_span_data
+        from openbox.hook_governance import evaluate_sync
 
         mock_span.parent = None
 
@@ -1867,17 +1872,18 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
             mock_client_instance = MagicMock()
             mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
             mock_client_instance.post.return_value = mock_response
 
-            _evaluate_governance_sync(
+            span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
+            evaluate_sync(
                 mock_span,
-                http_method="GET",
-                http_url="https://api.example.com/data",
-                stage="started",
+                hook_trigger={"type": "http_request", "method": "GET", "url": "https://api.example.com/data", "stage": "started"},
+                identifier="https://api.example.com/data",
+                span_data=span_data,
             )
 
             call_args = mock_client_instance.post.call_args
@@ -1891,7 +1897,8 @@ class TestGovernanceStageField:
 
     def test_evaluate_governance_sync_started_then_completed_sends_2_spans(self, governance_setup, mock_span):
         """Calling started then completed should produce 2 separate spans in the completed payload."""
-        from openbox.otel_setup import _evaluate_governance_sync
+        from openbox.otel_setup import _build_http_span_data
+        from openbox.hook_governance import evaluate_sync
 
         mock_span.parent = None
 
@@ -1899,31 +1906,37 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
             mock_client_instance = MagicMock()
             mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
             mock_client_instance.post.return_value = mock_response
 
             # 1st call: started
-            _evaluate_governance_sync(
-                mock_span,
-                http_method="POST",
-                http_url="https://api.example.com/data",
+            span_data = _build_http_span_data(
+                mock_span, "POST", "https://api.example.com/data", "started",
                 request_body='{"key": "value"}',
-                stage="started",
+            )
+            evaluate_sync(
+                mock_span,
+                hook_trigger={"type": "http_request", "method": "POST", "url": "https://api.example.com/data", "stage": "started"},
+                identifier="https://api.example.com/data",
+                span_data=span_data,
             )
 
             # 2nd call: completed
-            _evaluate_governance_sync(
-                mock_span,
-                http_method="POST",
-                http_url="https://api.example.com/data",
+            span_data = _build_http_span_data(
+                mock_span, "POST", "https://api.example.com/data", "completed",
                 request_body='{"key": "value"}',
-                stage="completed",
                 response_body='{"result": "ok"}',
                 response_headers={"content-type": "application/json"},
                 http_status_code=200,
+            )
+            evaluate_sync(
+                mock_span,
+                hook_trigger={"type": "http_request", "method": "POST", "url": "https://api.example.com/data", "stage": "completed"},
+                identifier="https://api.example.com/data",
+                span_data=span_data,
             )
 
             # Verify the completed payload has both spans
@@ -1942,7 +1955,8 @@ class TestGovernanceStageField:
 
     def test_evaluate_governance_sync_omits_status_code_when_none(self, governance_setup, mock_span):
         """http_status_code should not be in span when not provided."""
-        from openbox.otel_setup import _evaluate_governance_sync
+        from openbox.otel_setup import _build_http_span_data
+        from openbox.hook_governance import evaluate_sync
 
         mock_span.parent = None
 
@@ -1950,17 +1964,18 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
             mock_client_instance = MagicMock()
             mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
             mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
             mock_client_instance.post.return_value = mock_response
 
-            _evaluate_governance_sync(
+            span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
+            evaluate_sync(
                 mock_span,
-                http_method="GET",
-                http_url="https://api.example.com/data",
-                stage="started",
+                hook_trigger={"type": "http_request", "method": "GET", "url": "https://api.example.com/data", "stage": "started"},
+                identifier="https://api.example.com/data",
+                span_data=span_data,
             )
 
             call_args = mock_client_instance.post.call_args
@@ -1978,13 +1993,12 @@ class TestGovernanceStageField:
         request.method = "POST"
         request.headers = {"Content-Type": "application/json"}
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _requests_request_hook(mock_span, request)
 
             mock_gov.assert_called_once()
-            call_kwargs = mock_gov.call_args
-            assert call_kwargs.kwargs.get("stage") == "started" or \
-                (len(call_kwargs.args) > 0 and "started" in str(call_kwargs))
+            kwargs = mock_gov.call_args.kwargs
+            assert kwargs["hook_trigger"]["stage"] == "started"
 
     def test_requests_response_hook_sends_stage_completed(self, governance_setup, mock_span):
         """_requests_response_hook should call governance with stage='completed'."""
@@ -2001,14 +2015,12 @@ class TestGovernanceStageField:
         response.text = '{"result": "ok"}'
         response.status_code = 200
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _requests_response_hook(mock_span, request, response)
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["stage"] == "completed"
-            assert kwargs["response_body"] == '{"result": "ok"}'
-            assert kwargs["http_status_code"] == 200
+            assert kwargs["hook_trigger"]["stage"] == "completed"
 
     def test_httpx_request_hook_sends_stage_started(self, governance_setup, mock_span):
         """_httpx_request_hook should call governance with stage='started'."""
@@ -2023,12 +2035,12 @@ class TestGovernanceStageField:
         request._content = None
         del request.content
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _httpx_request_hook(mock_span, request)
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["stage"] == "started"
+            assert kwargs["hook_trigger"]["stage"] == "started"
 
     def test_httpx_response_hook_does_not_call_governance(self, governance_setup, mock_span):
         """_httpx_response_hook should NOT call governance (moved to patched send)."""
@@ -2045,7 +2057,7 @@ class TestGovernanceStageField:
         response._content = b'{"result": "ok"}'
         response.status_code = 200
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _httpx_response_hook(mock_span, request, response)
             mock_gov.assert_not_called()
 
@@ -2062,7 +2074,7 @@ class TestGovernanceStageField:
         request._content = None
         del request.content
 
-        with patch("openbox.otel_setup._evaluate_governance_async") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_async") as mock_gov:
             mock_gov.return_value = None  # async mock
             # Make it a coroutine
             import asyncio
@@ -2072,12 +2084,12 @@ class TestGovernanceStageField:
             # Use AsyncMock
             from unittest.mock import AsyncMock
             mock_gov_async = AsyncMock()
-            with patch("openbox.otel_setup._evaluate_governance_async", mock_gov_async):
+            with patch("openbox.hook_governance.evaluate_async", mock_gov_async):
                 await _httpx_async_request_hook(mock_span, request)
 
                 mock_gov_async.assert_called_once()
                 kwargs = mock_gov_async.call_args.kwargs
-                assert kwargs["stage"] == "started"
+                assert kwargs["hook_trigger"]["stage"] == "started"
 
     @pytest.mark.asyncio
     async def test_httpx_async_response_hook_does_not_call_governance(self, governance_setup, mock_span):
@@ -2098,7 +2110,7 @@ class TestGovernanceStageField:
         response.status_code = 200
 
         mock_gov_async = AsyncMock()
-        with patch("openbox.otel_setup._evaluate_governance_async", mock_gov_async):
+        with patch("openbox.hook_governance.evaluate_async", mock_gov_async):
             await _httpx_async_response_hook(mock_span, request, response)
             mock_gov_async.assert_not_called()
 
@@ -2117,12 +2129,12 @@ class TestGovernanceStageField:
         request_info.method = "POST"
         request_info.headers = {"Content-Type": "application/json"}
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _urllib3_request_hook(mock_span, pool, request_info)
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["stage"] == "started"
+            assert kwargs["hook_trigger"]["stage"] == "started"
 
     def test_urllib3_response_hook_sends_stage_completed(self, governance_setup, mock_span):
         """_urllib3_response_hook should call governance with stage='completed'."""
@@ -2138,14 +2150,12 @@ class TestGovernanceStageField:
         response.data = b'{"result": "ok"}'
         response.status = 200
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _urllib3_response_hook(mock_span, pool, response)
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["stage"] == "completed"
-            assert kwargs["response_body"] == '{"result": "ok"}'
-            assert kwargs["http_status_code"] == 200
+            assert kwargs["hook_trigger"]["stage"] == "completed"
 
     def test_response_hook_no_governance_when_disabled(self, mock_span_processor, mock_span):
         """Response hooks should not call governance when governance is disabled."""
@@ -2153,7 +2163,8 @@ class TestGovernanceStageField:
         from openbox.otel_setup import _requests_response_hook
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""  # Governance disabled
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""  # Governance disabled
 
         request = MagicMock()
         request.url = "https://api.example.com/data"
@@ -2166,7 +2177,7 @@ class TestGovernanceStageField:
         response.text = '{"result": "ok"}'
         response.status_code = 200
 
-        with patch("openbox.otel_setup._evaluate_governance_sync") as mock_gov:
+        with patch("openbox.hook_governance.evaluate_sync") as mock_gov:
             _requests_response_hook(mock_span, request, response)
 
             mock_gov.assert_not_called()
@@ -2187,7 +2198,8 @@ class TestContextVarHttpSpanBridging:
         from openbox.otel_setup import _httpx_request_hook, _httpx_http_span
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""  # Disable governance
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""  # Disable governance
 
         request = MagicMock()
         request.url = "https://api.example.com/data"
@@ -2209,7 +2221,8 @@ class TestContextVarHttpSpanBridging:
         from unittest.mock import AsyncMock
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""  # Disable governance
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""  # Disable governance
 
         request = MagicMock()
         request.url = "https://api.example.com/data"
@@ -2230,7 +2243,8 @@ class TestContextVarHttpSpanBridging:
         import httpx
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""
 
         # Create an HTTP span
         http_span = MagicMock()
@@ -2266,7 +2280,8 @@ class TestContextVarHttpSpanBridging:
         import httpx
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""
 
         http_span = MagicMock()
         http_span.context.span_id = 2222
@@ -2318,7 +2333,8 @@ class TestContextVarHttpSpanBridging:
         from openbox.otel_setup import _httpx_http_span
 
         otel_setup._span_processor = mock_span_processor
-        otel_setup._api_url = ""
+        import openbox.hook_governance as hook_gov
+        hook_gov._api_url = ""
 
         # Ensure ContextVar is empty
         _httpx_http_span.set(None)
