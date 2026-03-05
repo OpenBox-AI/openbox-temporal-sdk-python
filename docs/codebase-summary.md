@@ -1,8 +1,8 @@
 # Codebase Summary
 
-**Generated:** 2026-02-04
+**Generated:** 2026-03-05
 **Repository:** openbox-temporal-sdk-python
-**Version:** 1.0.0 (Alpha)
+**Version:** 1.1.0 (Alpha)
 **Total LOC:** 3,583 (across 10 Python files)
 
 ---
@@ -27,6 +27,7 @@ openbox-temporal-sdk-python/
 │   ├── activities.py          # Governance event activity
 │   ├── span_processor.py      # OTel span buffering and body storage
 │   ├── otel_setup.py          # HTTP/DB/File instrumentation setup
+│   ├── db_governance_hooks.py # Per-library DB governance wrappers
 │   └── tracing.py             # @traced decorator for function tracing
 ├── README.md                  # User-facing documentation
 ├── pyproject.toml             # Package metadata and dependencies
@@ -314,6 +315,12 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - `_urllib3_request_hook()` / `_urllib3_response_hook()`
 - `_urllib_request_hook()`
 
+**Hook-Level Governance Integration:**
+- Request hooks call `mark_governed()` once at started stage
+- Both started + completed stages build span_data via `_build_http_span_data()`
+- Calls `_hook_gov.evaluate_sync()` or `evaluate_async()` with span_data parameter
+- Span data includes: http.method, http.url, http.status_code, request/response bodies, headers
+
 **Body Capture:**
 - Only text content types (`text/*`, `application/json`, `application/xml`, etc.)
 - Bodies stored via `span_processor.store_body(span_id, request_body=..., response_body=...)`
@@ -344,9 +351,16 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - `file.read`, `file.readline`, `file.readlines` - Read operations
 - `file.write`, `file.writelines` - Write operations
 
+**Hook-Level Governance Integration:**
+- `_evaluate_governance()` method on TracedFile handles started/completed stages
+- Calls `mark_governed()` once at started stage to prevent double-buffering
+- Both stages build span_data via `_build_file_span_data()` and call governance evaluate
+- Can block file operations (open, read, write) if governance returns BLOCK/HALT
+
 **Attributes:**
 - `file.path`, `file.mode`, `file.operation`, `file.bytes`, `file.lines`
 - `file.total_bytes_read`, `file.total_bytes_written` (on close)
+- `openbox.governance.error` (if governance error occurs)
 
 **Skipped Paths:** `/dev/`, `/proc/`, `/sys/`, `__pycache__`, `.pyc`, `.pyo`, `.so`, `.dylib`
 
@@ -354,16 +368,78 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 10. Function Tracing (`tracing.py`)
+### 10. DB Governance Hooks (`db_governance_hooks.py`)
 
-**Purpose:** `@traced` decorator for custom function tracing
+**Purpose:** Per-library database governance wrappers for started/completed stages
 **Key Components:**
+
+#### Global Configuration
+- `configure(span_processor)` — Store span_processor reference for mark_governed() and span data building
+
+#### Span Data Builder
+- `_build_db_span_data()` — Creates span data dict with consistent format:
+  - `stage` at root level (started/completed)
+  - `span_id`, `trace_id`, `parent_span_id` (hex strings)
+  - `end_time`: actual timestamp for completed, None for started
+  - `status.code`: "ERROR" if error, "UNSET" otherwise
+  - Attributes: db.system, db.operation, db.statement, server info, rowcount, duration_ms
+
+#### Hook Installation Functions
+- `setup_psycopg2_hooks()` — wrapt on `cursor.execute/executemany`
+- `setup_asyncpg_hooks()` — wrapt on `Connection.execute/fetch/fetchrow/fetchval`
+- `setup_mysql_hooks()` — wrapt on `MySQLCursor.execute`
+- `setup_pymysql_hooks()` — wrapt on `Cursor.execute`
+- `setup_pymongo_hooks()` — wrapt on `Collection` methods (find, insert_one, etc.)
+- `setup_redis_hooks()` — returns `(request_hook, response_hook)` for OTel RedisInstrumentor
+- `setup_sqlalchemy_hooks(engine)` — SQLAlchemy `before/after_cursor_execute` + `handle_error` events
+
+#### Shared Helpers
+- `_classify_sql(query)` — Extract SQL verb (SELECT, INSERT, etc.)
+- `_evaluate_started()` / `_evaluate_started_async()` — Send started governance (can block)
+  - Calls `mark_governed()` once at started stage to prevent double-buffering
+  - Passes `span_data=` parameter with structured span info
+- `_evaluate_completed()` / `_evaluate_completed_async()` — Send completed governance
+  - Passes `span_data=` parameter with duration and result metadata
+
+#### Ordering
+- wrapt hooks **must** be installed BEFORE OTel instrumentors
+- Our hook → OTel wrapper → raw DB method
+
+#### C Extension Handling
+- Some libraries (psycopg2) have C extension types that `wrapt` cannot patch
+- `TypeError` caught gracefully — hooks silently skipped, OTel spans still work
+
+**Lines of Code:** ~850 (including new span data builder and consistent governance pattern)
+
+---
+
+### 11. Function Tracing (`tracing.py`)
+
+**Purpose:** `@traced` decorator for custom function tracing with hook-level governance
+**Key Components:**
+
+#### Span Data Builder
+- `_build_traced_span_data()` — Creates span data dict with consistent format:
+  - `stage` at root level (started/completed)
+  - `span_id`, `trace_id`, `parent_span_id` (hex strings, handles NonRecordingSpan)
+  - `end_time`: actual timestamp for completed, None for started
+  - `status.code`: "ERROR" if error, "UNSET" otherwise
+  - Attributes: code.function, code.namespace, openbox.governance.error
 
 #### @traced Decorator
 - Supports sync and async functions
 - Creates OTel span with function name as span name
 - Captures arguments and return values (configurable)
 - Handles exceptions with error attributes
+- **Sends hook-level governance evaluations** at `started` and `completed` stages (when `hook_governance` is configured)
+
+**Governance Integration:**
+- Calls `mark_governed()` once at started stage to prevent double-buffering
+- Both started + completed stages pass `span_data=` parameter to evaluate functions
+- `started` stage: Function name, module, arguments (if enabled)
+- `completed` stage: Result or error info (if enabled)
+- Can be blocked at either stage via BLOCK/HALT verdicts
+- Zero overhead when `hook_governance` is not configured
 
 **Parameters:**
 - `name` - Custom span name (default: function name)
@@ -384,7 +460,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - Manual span creation context manager
 - Allows custom attributes and nested spans
 
-**Lines of Code:** 228
+**Lines of Code:** 420 (including new span data builder and governance integration)
 
 ---
 
@@ -396,29 +472,38 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - **Lazy imports**: httpx, datetime, logging imported only in activity context
 - **Version gates**: `workflow.patched()` for safe rollout
 
-### 2. Privacy-First Body Capture
+### 2. Hook-Level Governance Span Data Pattern
+- **Consistent builders**: All hook types (`_build_http_span_data`, `_build_file_span_data`, `_build_db_span_data`, `_build_traced_span_data`) follow same format
+- **Stage at root**: `stage` field indicates "started" or "completed"
+- **Timing**: `start_time` (always), `end_time` (completed only), `duration_ns` (if available)
+- **Error tracking**: `status.code` = "ERROR" if error, "UNSET" otherwise
+- **Safe span context**: Handles NonRecordingSpan + MagicMock fallback for testing
+- **Double-buffering prevention**: `mark_governed()` called once at started stage
+- **Staged evaluation**: Both started + completed stages pass `span_data=` parameter
+
+### 3. Privacy-First Body Capture
 - Bodies stored in `WorkflowSpanProcessor._body_data`, NOT in OTel span attributes
 - Bodies merged into span dict only when sent to OpenBox Core
 - Optional fallback OTel processor receives spans WITHOUT bodies
 
-### 3. Verdict Priority System
+### 4. Verdict Priority System
 - Verdicts have numeric priority (HALT=5, BLOCK=4, REQUIRE_APPROVAL=3, CONSTRAIN=2, ALLOW=1)
 - `Verdict.highest_priority()` aggregates multiple verdicts
 - Used when multiple policies apply to same event
 
-### 4. Guardrails Deep Redaction
+### 5. Guardrails Deep Redaction
 - `_deep_update_dataclass()` recursively updates nested dataclass fields
 - Preserves type information while applying redactions
 - Supports both dataclass and dict structures
 
-### 5. HITL Approval Polling
+### 6. HITL Approval Polling
 - Pending approval stored in `WorkflowSpanBuffer.pending_approval`
 - Activity raises retryable error on REQUIRE_APPROVAL verdict
 - On retry, polls `/api/v1/governance/approval` endpoint
 - Expiration time checked against UTC timestamp
 - Cleared on approval/rejection/expiration
 
-### 6. Verdict Staleness Prevention
+### 7. Verdict Staleness Prevention
 - Verdicts stored with `run_id` to detect workflow restarts
 - Stale verdicts cleared when `run_id` mismatch detected
 - Prevents verdicts from previous run affecting new run
@@ -437,23 +522,25 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 | `activity_interceptor.py` | 754 | Activity events |
 | `activities.py` | 163 | Governance activity |
 | `span_processor.py` | 361 | Span buffering |
-| `otel_setup.py` | 968 | Instrumentation |
-| `tracing.py` | 228 | @traced decorator |
-| **Total** | **3,583** | **Core SDK** |
+| `otel_setup.py` | 1,100+ | Instrumentation + span data builders + file governance |
+| `db_governance_hooks.py` | 850+ | DB governance hooks + span data builder |
+| `tracing.py` | 420+ | @traced decorator + span data builder |
+| **Total** | **~4,700+** | **Core SDK** |
 
 ---
 
 ## Testing Status
 
-**IMPORTANT:** Comprehensive test suite implemented with 10 test files.
+**IMPORTANT:** Comprehensive test suite implemented with 13 test files.
 
-### Test Files (10 total)
+### Test Files (13 total)
 
 | Test File | Coverage |
 |-----------|----------|
 | `test_activities.py` | Governance event activity submission |
 | `test_activity_interceptor.py` | Activity-level governance, redaction, approval polling |
 | `test_config.py` | SDK initialization, API key validation, URL security |
+| `test_db_governance_hooks.py` | DB governance hooks: redis, sqlalchemy, fail policies, schema |
 | `test_otel_setup.py` | OpenTelemetry instrumentation (HTTP, DB, File I/O) |
 | `test_span_processor.py` | Span buffering, body storage, verdict tracking |
 | `test_tracing.py` | @traced decorator for custom function tracing |
@@ -470,7 +557,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - Configuration validation and API key format checks
 - HITL approval polling with expiration handling
 - Error policies (fail_open vs fail_closed)
-- Database and file I/O instrumentation
+- Database governance hooks (started/completed), file I/O instrumentation
 - Temporal determinism compliance
 
 ---
@@ -499,5 +586,5 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-02-04
+**Document Version:** 1.1
+**Last Updated:** 2026-03-05

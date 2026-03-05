@@ -90,13 +90,18 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Disabled by default (noisy), opt-in via `instrument_file_io=True`
 
 #### FR-6: Function Tracing Decorator
-- **Requirement**: Allow developers to trace custom functions as spans
+- **Requirement**: Allow developers to trace custom functions as spans with optional hook-level governance
 - **Usage**: `@traced` decorator in `tracing.py`
+- **Governance Integration**:
+  - Functions evaluated at `started` stage (before execution) — can be blocked
+  - Functions evaluated at `completed` stage (after execution or error) — can be blocked
+  - Triggered automatically when `hook_governance` is configured, zero overhead otherwise
 - **Acceptance Criteria**:
   - Supports sync and async functions
-  - Captures function arguments and return values
+  - Captures function arguments and return values (configurable)
   - Configurable argument length truncation (default: 2000 chars)
   - Exception details captured on error
+  - BLOCK/HALT verdicts raise `GovernanceBlockedError` and prevent/interrupt execution
 
 #### FR-7: Governance Verdict Handling
 - **Requirement**: Process governance verdicts and enforce actions

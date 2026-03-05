@@ -39,6 +39,7 @@ _ignored_url_prefixes: Set[str] = set()
 
 # Hook-level governance is handled by hook_governance module
 from . import hook_governance as _hook_gov
+from . import db_governance_hooks as _db_gov
 
 # ContextVar to pass HTTP child span from OTel request hooks to _patched_send.
 # Request hooks receive the correct HTTP span; we store it here so _patched_send
@@ -95,9 +96,7 @@ def _build_http_span_data(
     """
     import time as _time
 
-    parent_span_id = None
-    if span.parent and hasattr(span.parent, 'span_id') and isinstance(getattr(span.parent, 'span_id', None), int):
-        parent_span_id = format(span.parent.span_id, "016x")
+    span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
 
     attrs = dict(span.attributes) if hasattr(span, 'attributes') and span.attributes else {
         "http.method": http_method,
@@ -115,18 +114,25 @@ def _build_http_span_data(
     if http_status_code is not None:
         attrs["http.response.status_code"] = http_status_code
 
+    now_ns = _time.time_ns()
+
+    # Derive error from HTTP status code (4xx/5xx)
+    error = None
+    if http_status_code is not None and http_status_code >= 400:
+        error = f"HTTP {http_status_code}"
+
     span_data = {
-        "span_id": format(span.context.span_id, "016x"),
-        "trace_id": format(span.context.trace_id, "032x"),
+        "span_id": span_id_hex,
+        "trace_id": trace_id_hex,
         "parent_span_id": parent_span_id,
         "name": span.name if hasattr(span, 'name') and span.name else f"HTTP {http_method}",
         "kind": "CLIENT",
         "stage": stage,
-        "start_time": _time.time_ns(),
-        "end_time": None,
+        "start_time": now_ns,
+        "end_time": now_ns if stage == "completed" else None,
         "duration_ns": None,
         "attributes": attrs,
-        "status": {"code": "UNSET", "description": None},
+        "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
         "request_body": request_body,
         "response_body": response_body,
@@ -136,6 +142,52 @@ def _build_http_span_data(
     if http_status_code is not None:
         span_data["http_status_code"] = http_status_code
     return span_data
+
+
+def _build_file_span_data(
+    span,
+    file_path: str,
+    file_mode: str,
+    operation: str,
+    stage: str,
+    error: Optional[str] = None,
+) -> dict:
+    """Build span data dict for a file operation (used by governance hooks).
+
+    Creates a span data structure matching _extract_span_data() output,
+    enriched with file operation context for governance evaluation.
+    Handles both recording spans and NonRecordingSpan (no-op tracer).
+    """
+    import time as _time
+
+    span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
+
+    raw_attrs = getattr(span, 'attributes', None)
+    attrs = dict(raw_attrs) if raw_attrs else {
+        "file.path": file_path,
+        "file.mode": file_mode,
+        "file.operation": operation,
+    }
+    if error:
+        attrs["openbox.governance.error"] = error
+
+    span_name = getattr(span, 'name', None) or f"file.{operation}"
+    now_ns = _time.time_ns()
+
+    return {
+        "span_id": span_id_hex,
+        "trace_id": trace_id_hex,
+        "parent_span_id": parent_span_id,
+        "name": span_name,
+        "kind": "INTERNAL",
+        "stage": stage,
+        "start_time": now_ns,
+        "end_time": now_ns if stage == "completed" else None,
+        "duration_ns": None,
+        "attributes": attrs,
+        "status": {"code": "ERROR" if error else "UNSET", "description": error},
+        "events": [],
+    }
 
 
 def setup_opentelemetry_for_governance(
@@ -185,6 +237,7 @@ def setup_opentelemetry_for_governance(
         api_url, api_key, span_processor,
         api_timeout=api_timeout, on_api_error=on_api_error,
     )
+    _db_gov.configure(span_processor)
 
     # Register span processor with OTel tracer provider
     # This ensures on_end() is called when spans complete
@@ -325,11 +378,22 @@ def setup_file_io_instrumentation() -> bool:
             self._bytes_written = 0
             self._operations: list = []  # Track operations for governance payload
 
-        def _evaluate_governance(self, operation: str, stage: str, **extra):
-            """Send governance evaluation for a file operation stage."""
+        def _evaluate_governance(self, operation: str, stage: str, span=None, **extra):
+            """Send governance evaluation for a file operation stage.
+
+            Args:
+                operation: File operation name (read, write, close, etc.)
+                stage: Governance stage (started, completed)
+                span: OTel span for this operation. Falls back to parent span.
+                **extra: Additional trigger fields (data, bytes_read, etc.)
+            """
             if not _hook_gov.is_configured():
                 return
             from .types import GovernanceBlockedError
+            active_span = span or self._parent_span
+            # Mark governed on started stage — we create our own span entries
+            if stage == "started":
+                _hook_gov.mark_span_governed(active_span)
             try:
                 trigger = {
                     "type": "file_operation",
@@ -339,10 +403,14 @@ def setup_file_io_instrumentation() -> bool:
                     "stage": stage,
                     **extra,
                 }
+                span_data = _build_file_span_data(
+                    active_span, self._file_path, self._mode, operation, stage,
+                )
                 _hook_gov.evaluate_sync(
-                    self._parent_span,
+                    active_span,
                     hook_trigger=trigger,
                     identifier=self._file_path,
+                    span_data=span_data,
                 )
             except GovernanceBlockedError:
                 raise
@@ -353,7 +421,7 @@ def setup_file_io_instrumentation() -> bool:
             with _tracer.start_as_current_span("file.read") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "read")
-                self._evaluate_governance("read", "started")
+                self._evaluate_governance("read", "started", span=span)
 
                 data = self._file.read(size)
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
@@ -361,14 +429,14 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("read")
                 span.set_attribute("file.bytes", bytes_count)
 
-                self._evaluate_governance("read", "completed", data=data, bytes_read=bytes_count)
+                self._evaluate_governance("read", "completed", span=span, data=data, bytes_read=bytes_count)
                 return data
 
         def readline(self):
             with _tracer.start_as_current_span("file.readline") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "readline")
-                self._evaluate_governance("readline", "started")
+                self._evaluate_governance("readline", "started", span=span)
 
                 data = self._file.readline()
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
@@ -376,14 +444,14 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("readline")
                 span.set_attribute("file.bytes", bytes_count)
 
-                self._evaluate_governance("readline", "completed", data=data, bytes_read=bytes_count)
+                self._evaluate_governance("readline", "completed", span=span, data=data, bytes_read=bytes_count)
                 return data
 
         def readlines(self):
             with _tracer.start_as_current_span("file.readlines") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "readlines")
-                self._evaluate_governance("readlines", "started")
+                self._evaluate_governance("readlines", "started", span=span)
 
                 data = self._file.readlines()
                 bytes_count = sum(len(line) for line in data) if data else 0
@@ -393,7 +461,7 @@ def setup_file_io_instrumentation() -> bool:
                 span.set_attribute("file.lines", len(data) if data else 0)
 
                 self._evaluate_governance(
-                    "readlines", "completed",
+                    "readlines", "completed", span=span,
                     data=data, bytes_read=bytes_count,
                     lines_count=len(data) if data else 0,
                 )
@@ -403,7 +471,7 @@ def setup_file_io_instrumentation() -> bool:
             with _tracer.start_as_current_span("file.write") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "write")
-                self._evaluate_governance("write", "started")
+                self._evaluate_governance("write", "started", span=span)
 
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
                 span.set_attribute("file.bytes", bytes_count)
@@ -411,14 +479,14 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("write")
                 result = self._file.write(data)
 
-                self._evaluate_governance("write", "completed", data=data, bytes_written=bytes_count)
+                self._evaluate_governance("write", "completed", span=span, data=data, bytes_written=bytes_count)
                 return result
 
         def writelines(self, lines):
             with _tracer.start_as_current_span("file.writelines") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "writelines")
-                self._evaluate_governance("writelines", "started")
+                self._evaluate_governance("writelines", "started", span=span)
 
                 bytes_count = sum(len(line) for line in lines) if lines else 0
                 span.set_attribute("file.bytes", bytes_count)
@@ -428,7 +496,7 @@ def setup_file_io_instrumentation() -> bool:
                 result = self._file.writelines(lines)
 
                 self._evaluate_governance(
-                    "writelines", "completed",
+                    "writelines", "completed", span=span,
                     data=lines, bytes_written=bytes_count,
                     lines_count=len(lines) if lines else 0,
                 )
@@ -441,7 +509,7 @@ def setup_file_io_instrumentation() -> bool:
             gov_error = None
             try:
                 self._evaluate_governance(
-                    "close", "completed",
+                    "close", "completed", span=self._parent_span,
                     bytes_read=self._bytes_read,
                     bytes_written=self._bytes_written,
                     operations=self._operations,
@@ -493,6 +561,11 @@ def setup_file_io_instrumentation() -> bool:
         if _hook_gov.is_configured():
             from .types import GovernanceBlockedError
             try:
+                # Mark governed — we create our own started/completed span entries
+                _hook_gov.mark_span_governed(span)
+                open_span_data = _build_file_span_data(
+                    span, file_str, mode, "open", "started",
+                )
                 _hook_gov.evaluate_sync(
                     span,
                     hook_trigger={
@@ -503,6 +576,7 @@ def setup_file_io_instrumentation() -> bool:
                         "stage": "started",
                     },
                     identifier=file_str,
+                    span_data=open_span_data,
                 )
             except GovernanceBlockedError:
                 span.set_attribute("error", True)
@@ -566,67 +640,66 @@ def setup_database_instrumentation(
     """
     instrumented = []
 
-    # psycopg2 (PostgreSQL sync)
+    # ── pymongo CommandListener first (must register before MongoClient creation) ──
+    if db_libraries is None or "pymongo" in db_libraries:
+        _db_gov.setup_pymongo_hooks()
+
+    # ── OTel dbapi instrumentors (governance via CursorTracer patch below) ──
     if db_libraries is None or "psycopg2" in db_libraries:
         try:
             from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
-
             Psycopg2Instrumentor().instrument()
             instrumented.append("psycopg2")
             logger.info("Instrumented: psycopg2")
         except ImportError:
-            logger.debug("psycopg2 instrumentation not available")
+            logger.debug("psycopg2 OTel instrumentation not available")
 
-    # asyncpg (PostgreSQL async)
     if db_libraries is None or "asyncpg" in db_libraries:
         try:
             from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-
             AsyncPGInstrumentor().instrument()
             instrumented.append("asyncpg")
             logger.info("Instrumented: asyncpg")
         except ImportError:
-            logger.debug("asyncpg instrumentation not available")
+            logger.debug("asyncpg OTel instrumentation not available")
 
-    # mysql-connector-python
     if db_libraries is None or "mysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.mysql import MySQLInstrumentor
-
             MySQLInstrumentor().instrument()
             instrumented.append("mysql")
             logger.info("Instrumented: mysql")
         except ImportError:
-            logger.debug("mysql instrumentation not available")
+            logger.debug("mysql OTel instrumentation not available")
 
-    # pymysql
     if db_libraries is None or "pymysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
-
             PyMySQLInstrumentor().instrument()
             instrumented.append("pymysql")
             logger.info("Instrumented: pymysql")
         except ImportError:
-            logger.debug("pymysql instrumentation not available")
+            logger.debug("pymysql OTel instrumentation not available")
 
-    # pymongo (MongoDB)
+    # pymongo OTel (CommandListener already registered above)
     if db_libraries is None or "pymongo" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
-
             PymongoInstrumentor().instrument()
             instrumented.append("pymongo")
             logger.info("Instrumented: pymongo")
         except ImportError:
-            logger.debug("pymongo instrumentation not available")
+            logger.debug("pymongo OTel instrumentation not available")
 
-    # redis
+    # redis — pass governance hooks to OTel instrumentor (native support)
     if db_libraries is None or "redis" in db_libraries:
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
 
-            RedisInstrumentor().instrument()
+            req_hook, resp_hook = _db_gov.setup_redis_hooks()
+            RedisInstrumentor().instrument(
+                request_hook=req_hook, response_hook=resp_hook,
+            )
             instrumented.append("redis")
             logger.info("Instrumented: redis")
         except ImportError:
@@ -655,6 +728,8 @@ def setup_database_instrumentation(
                         f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "
                         f"got {type(sqlalchemy_engine).__name__}"
                     )
+                # Governance hooks on engine events
+                _db_gov.setup_sqlalchemy_hooks(sqlalchemy_engine)
                 # Instrument the existing engine directly (registers event listeners)
                 SQLAlchemyInstrumentor().instrument(engine=sqlalchemy_engine)
                 logger.info("Instrumented: sqlalchemy (existing engine)")
@@ -665,6 +740,19 @@ def setup_database_instrumentation(
             instrumented.append("sqlalchemy")
         except ImportError:
             logger.debug("sqlalchemy instrumentation not available")
+
+    # ── Governance hooks for dbapi libs (must be AFTER instrumentors) ──
+    # OTel dbapi instrumentors silently discard request_hook/response_hook kwargs.
+    # Instead, we patch CursorTracer.traced_execution to inject governance hooks
+    # around the query_method call (runs inside the OTel span context).
+    dbapi_libs = {"psycopg2", "mysql", "pymysql"}
+    if any(lib in instrumented for lib in dbapi_libs):
+        if _db_gov.install_cursor_tracer_hooks():
+            logger.info("CursorTracer governance hooks installed for dbapi libs")
+
+    # asyncpg uses its own _do_execute (not CursorTracer) — needs separate wrapt hooks
+    if "asyncpg" in instrumented:
+        _db_gov.install_asyncpg_hooks()
 
     if instrumented:
         logger.info(f"Database instrumentation complete. Instrumented: {instrumented}")
@@ -724,6 +812,9 @@ def uninstrument_databases() -> None:
         SQLAlchemyInstrumentor().uninstrument()
     except (ImportError, Exception):
         pass
+
+    # Clean up DB governance hooks
+    _db_gov.uninstrument_all()
 
 
 def uninstrument_all() -> None:

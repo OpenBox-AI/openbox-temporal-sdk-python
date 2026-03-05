@@ -345,6 +345,16 @@ class WorkflowSpanProcessor:
                 self._governed_span_ids.discard(span_id)
                 self._body_data.pop(span_id, None)
 
+            # Skip OTel pymongo spans when wrapt governance wrapper is active —
+            # wrapt creates its own governance span entries with unique span_ids.
+            if not is_governed and span.attributes and span.attributes.get("db.system") == "mongodb":
+                try:
+                    from . import db_governance_hooks
+                    if db_governance_hooks.is_pymongo_wrapt_active():
+                        is_governed = True
+                except ImportError:
+                    pass
+
             buffer = self._buffers.get(workflow_id) if workflow_id and not is_governed else None
             body_data = self._body_data.pop(span_id, None) if buffer else None
 
@@ -404,7 +414,12 @@ class WorkflowSpanProcessor:
         if span.end_time and span.start_time:
             duration_ns = span.end_time - span.start_time
 
-        return {
+        attributes = dict(span.attributes) if span.attributes else {}
+
+        # Promote governance stage to root level (OpenBox Core expects it there)
+        stage = attributes.pop("openbox.governance.stage", None)
+
+        result = {
             "span_id": span_id_hex,
             "trace_id": trace_id_hex,
             "parent_span_id": parent_span_id,
@@ -413,11 +428,14 @@ class WorkflowSpanProcessor:
             "start_time": span.start_time,
             "end_time": span.end_time,
             "duration_ns": duration_ns,
-            "attributes": dict(span.attributes) if span.attributes else {},
+            "attributes": attributes,
             "status": status,
             "events": events,
             # request_body and response_body will be merged from _body_data
         }
+        if stage:
+            result["stage"] = stage
+        return result
 
     def shutdown(self) -> None:
         """Shutdown the processor."""
