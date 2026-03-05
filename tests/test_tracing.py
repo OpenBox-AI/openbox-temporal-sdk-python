@@ -12,10 +12,12 @@ Tests cover:
 
 import asyncio
 import json
-from unittest.mock import MagicMock, patch, call
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
+import openbox.hook_governance as hook_gov
 from openbox.tracing import (
     _safe_serialize,
     _is_async_function,
@@ -24,6 +26,7 @@ from openbox.tracing import (
     create_span,
     _get_tracer,
 )
+from openbox.types import GovernanceBlockedError, WorkflowSpanBuffer
 
 
 # =============================================================================
@@ -866,3 +869,384 @@ class TestTracedIntegration:
         assert "code.namespace" in attr_names
         assert "function.arg.0" not in attr_names
         assert "function.result" not in attr_names
+
+
+# =============================================================================
+# Governance test helpers
+# =============================================================================
+
+
+@pytest.fixture
+def cleanup_governance():
+    """Reset hook_governance module state after each test."""
+    yield
+    hook_gov._api_url = ""
+    hook_gov._api_key = ""
+    hook_gov._span_processor = None
+
+
+def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
+    """Set up hook_governance with a mock span processor."""
+    processor = MagicMock()
+    processor.get_activity_context_by_trace.return_value = {
+        "workflow_id": "wf-traced-1",
+        "activity_id": "act-traced-1",
+    }
+    buffer = WorkflowSpanBuffer(
+        workflow_id="wf-traced-1", run_id="run-1",
+        workflow_type="TracedWorkflow", task_queue="traced-queue",
+    )
+    processor.get_buffer.return_value = buffer
+
+    hook_gov.configure(
+        "http://localhost:9090", "test-key", processor,
+        api_timeout=5.0, on_api_error=on_api_error,
+    )
+    return processor
+
+
+@contextmanager
+def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
+    """Mock httpx.Client for governance API calls."""
+    response = MagicMock()
+    response.status_code = 200
+    response_data = {"verdict": verdict}
+    if reason:
+        response_data["reason"] = reason
+    response.json.return_value = response_data
+
+    mock_instance = MagicMock()
+    if side_effect:
+        mock_instance.__enter__ = MagicMock(side_effect=side_effect)
+    else:
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.post.return_value = response
+    mock_instance.__exit__ = MagicMock(return_value=False)
+
+    with patch("openbox.hook_governance.httpx.Client", return_value=mock_instance):
+        yield mock_instance
+
+
+@contextmanager
+def _mock_httpx_async_client(verdict="allow", reason=None, side_effect=None):
+    """Mock httpx.AsyncClient for async governance API calls."""
+    response = MagicMock()
+    response.status_code = 200
+    response_data = {"verdict": verdict}
+    if reason:
+        response_data["reason"] = reason
+    response.json.return_value = response_data
+
+    mock_instance = MagicMock()
+    if side_effect:
+        mock_instance.__aenter__ = AsyncMock(side_effect=side_effect)
+    else:
+        mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+        mock_instance.post = AsyncMock(return_value=response)
+    mock_instance.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("openbox.hook_governance.httpx.AsyncClient", return_value=mock_instance):
+        yield mock_instance
+
+
+# =============================================================================
+# Tests for @traced governance: started stage
+# =============================================================================
+
+
+class TestTracedGovernanceStarted:
+    """Tests for governance 'started' stage on @traced decorator."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cleanup_governance):
+        """Set up governance for each test."""
+        pass
+
+    def test_governed_sends_started_before_execution(self):
+        """Verify started hook_trigger is sent with function name, module, stage."""
+        _setup_governance()
+        executed = []
+
+        @traced
+        def my_func(x):
+            executed.append(True)
+            return x * 2
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            result = my_func(5)
+
+        assert result == 10
+        assert executed == [True]
+
+        # Should have 2 governance calls (started + completed)
+        calls = mock_client.post.call_args_list
+        assert len(calls) == 2
+
+        # Check started payload
+        started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
+        trigger = started_payload["hook_trigger"]
+        assert trigger["type"] == "function_call"
+        assert trigger["function"] == "my_func"
+        assert trigger["stage"] == "started"
+
+    def test_governed_started_block_prevents_execution(self):
+        """BLOCK verdict at started → function never runs."""
+        _setup_governance()
+        executed = []
+
+        @traced
+        def blocked_func():
+            executed.append(True)
+            return "should not return"
+
+        with _mock_httpx_client(verdict="block", reason="Policy violation"):
+            with pytest.raises(GovernanceBlockedError) as exc_info:
+                blocked_func()
+
+        assert executed == []
+        assert "block" in exc_info.value.verdict
+
+    def test_governed_started_halt_prevents_execution(self):
+        """HALT verdict at started → function never runs."""
+        _setup_governance()
+        executed = []
+
+        @traced
+        def halted_func():
+            executed.append(True)
+
+        with _mock_httpx_client(verdict="halt"):
+            with pytest.raises(GovernanceBlockedError) as exc_info:
+                halted_func()
+
+        assert executed == []
+        assert "halt" in exc_info.value.verdict
+
+    def test_governed_started_includes_args(self):
+        """When capture_args=True, args appear in hook_trigger."""
+        _setup_governance()
+
+        @traced(capture_args=True)
+        def func_with_args(a, b):
+            return a + b
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            func_with_args(1, 2)
+
+        calls = mock_client.post.call_args_list
+        started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
+        trigger = started_payload["hook_trigger"]
+        assert "args" in trigger
+
+
+# =============================================================================
+# Tests for @traced governance: completed stage
+# =============================================================================
+
+
+class TestTracedGovernanceCompleted:
+    """Tests for governance 'completed' stage on @traced decorator."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cleanup_governance):
+        pass
+
+    def test_governed_sends_completed_after_execution(self):
+        """Verify completed hook_trigger sent after execution."""
+        _setup_governance()
+
+        @traced
+        def my_func():
+            return "done"
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            my_func()
+
+        calls = mock_client.post.call_args_list
+        assert len(calls) == 2
+
+        completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        trigger = completed_payload["hook_trigger"]
+        assert trigger["type"] == "function_call"
+        assert trigger["stage"] == "completed"
+
+    def test_governed_completed_includes_result(self):
+        """When capture_result=True, result appears in completed hook_trigger."""
+        _setup_governance()
+
+        @traced(capture_result=True)
+        def func_with_result():
+            return {"status": "ok"}
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            func_with_result()
+
+        calls = mock_client.post.call_args_list
+        completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        trigger = completed_payload["hook_trigger"]
+        assert "result" in trigger
+
+    def test_governed_completed_includes_error_on_exception(self):
+        """Error info in completed hook_trigger when function raises."""
+        _setup_governance()
+
+        @traced
+        def failing_func():
+            raise ValueError("test error")
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            with pytest.raises(ValueError, match="test error"):
+                failing_func()
+
+        calls = mock_client.post.call_args_list
+        assert len(calls) == 2
+
+        error_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        trigger = error_payload["hook_trigger"]
+        assert trigger["stage"] == "completed"
+        assert trigger["error"]["type"] == "ValueError"
+        assert trigger["error"]["message"] == "test error"
+
+    def test_governed_started_and_completed_both_sent(self):
+        """2 governance calls per invocation (started + completed)."""
+        _setup_governance()
+
+        @traced
+        def simple_func():
+            return 42
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            simple_func()
+
+        calls = mock_client.post.call_args_list
+        assert len(calls) == 2
+
+        stages = []
+        for c in calls:
+            payload = c.kwargs.get("json") or c[1].get("json")
+            stages.append(payload["hook_trigger"]["stage"])
+        assert stages == ["started", "completed"]
+
+
+# =============================================================================
+# Tests for @traced governance: async path
+# =============================================================================
+
+
+class TestTracedGovernanceAsync:
+    """Tests for governance on async @traced functions."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cleanup_governance):
+        pass
+
+    async def test_async_governed_sends_started_and_completed(self):
+        """Async path sends both started and completed stages."""
+        _setup_governance()
+
+        @traced
+        async def async_func():
+            return "async result"
+
+        with _mock_httpx_async_client(verdict="allow") as mock_client:
+            result = await async_func()
+
+        assert result == "async result"
+        calls = mock_client.post.call_args_list
+        assert len(calls) == 2
+
+        stages = []
+        for c in calls:
+            payload = c[0][1] if len(c[0]) > 1 else c.kwargs.get("json")
+            stages.append(payload["hook_trigger"]["stage"])
+        assert stages == ["started", "completed"]
+
+    async def test_async_governed_block_prevents_execution(self):
+        """Async BLOCK at started prevents execution."""
+        _setup_governance()
+        executed = []
+
+        @traced
+        async def blocked_async():
+            executed.append(True)
+            return "should not return"
+
+        with _mock_httpx_async_client(verdict="block"):
+            with pytest.raises(GovernanceBlockedError):
+                await blocked_async()
+
+        assert executed == []
+
+
+# =============================================================================
+# Tests for @traced governance: not configured
+# =============================================================================
+
+
+class TestTracedGovernanceNotConfigured:
+    """Tests for @traced when governance is not configured."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cleanup_governance):
+        pass
+
+    def test_no_governance_calls_when_not_configured(self):
+        """No governance calls when hook_governance not configured."""
+        # Don't call _setup_governance() — leave unconfigured
+
+        @traced
+        def my_func():
+            return "no governance"
+
+        with _mock_httpx_client(verdict="allow") as mock_client:
+            result = my_func()
+
+        assert result == "no governance"
+        mock_client.post.assert_not_called()
+
+    def test_existing_traced_behavior_unchanged(self):
+        """Existing @traced behavior works identically without governance."""
+        @traced
+        def add(a, b):
+            return a + b
+
+        assert add(2, 3) == 5
+        assert add(-1, 1) == 0
+
+
+# =============================================================================
+# Tests for @traced governance: fail policies
+# =============================================================================
+
+
+class TestTracedGovernanceFailPolicy:
+    """Tests for fail_open/fail_closed policies on @traced governance."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self, cleanup_governance):
+        pass
+
+    def test_governed_fail_open_allows_on_api_error(self):
+        """fail_open: function runs despite API error."""
+        _setup_governance(on_api_error="fail_open")
+
+        @traced
+        def my_func():
+            return "success"
+
+        with _mock_httpx_client(side_effect=ConnectionError("API down")):
+            result = my_func()
+
+        assert result == "success"
+
+    def test_governed_fail_closed_blocks_on_api_error(self):
+        """fail_closed: GovernanceBlockedError on API error."""
+        _setup_governance(on_api_error="fail_closed")
+
+        @traced
+        def my_func():
+            return "should not return"
+
+        with _mock_httpx_client(side_effect=ConnectionError("API down")):
+            with pytest.raises(GovernanceBlockedError):
+                my_func()

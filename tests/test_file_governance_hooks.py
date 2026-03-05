@@ -624,3 +624,95 @@ class TestFileGovernanceCompletedData:
                     assert "data" not in call.kwargs["json"]["hook_trigger"]
         finally:
             os.unlink(tmp_path)
+
+
+class TestFileGovernanceSpanData:
+    """Tests verifying span_data is included in governance payloads."""
+
+    def test_open_payload_has_non_empty_spans(self):
+        """Governance payload for open should include span data in spans array."""
+        tmp_path = _make_temp_file(b"test data")
+        _setup_governance()
+
+        try:
+            with _mock_httpx_client() as mock:
+                with open(tmp_path, "r") as f:
+                    f.read()
+
+                # First call is open(started) — should have spans with file span data
+                payload = mock.post.call_args_list[0].kwargs["json"]
+                assert len(payload["spans"]) >= 1
+                span_entry = payload["spans"][0]
+                assert "span_id" in span_entry
+                assert "trace_id" in span_entry
+                assert span_entry["kind"] == "INTERNAL"
+                assert span_entry["stage"] == "started"
+                assert span_entry["attributes"]["file.path"] == tmp_path
+        finally:
+            os.unlink(tmp_path)
+
+    def test_read_payload_has_spans(self):
+        """Governance payload for read operations should include span data."""
+        tmp_path = _make_temp_file(b"read me")
+        _setup_governance()
+
+        try:
+            with _mock_httpx_client() as mock:
+                with open(tmp_path, "r") as f:
+                    f.read()
+
+                # Find read started call (2nd call: open, read_started, ...)
+                read_started = [
+                    c for c in mock.post.call_args_list
+                    if c.kwargs["json"]["hook_trigger"]["operation"] == "read"
+                    and c.kwargs["json"]["hook_trigger"]["stage"] == "started"
+                ]
+                assert len(read_started) == 1
+                payload = read_started[0].kwargs["json"]
+                assert payload["span_count"] >= 1
+                # Spans should accumulate (open span + read span)
+                assert len(payload["spans"]) >= 2
+        finally:
+            os.unlink(tmp_path)
+
+    def test_span_data_has_correct_structure(self):
+        """Span data entries should have required fields."""
+        tmp_path = _make_temp_file(b"struct check")
+        _setup_governance()
+
+        try:
+            with _mock_httpx_client() as mock:
+                with open(tmp_path, "r") as f:
+                    f.read()
+
+                # Check any span entry for required fields
+                payload = mock.post.call_args_list[0].kwargs["json"]
+                span_entry = payload["spans"][0]
+                required_fields = [
+                    "span_id", "trace_id", "parent_span_id", "name",
+                    "kind", "stage", "start_time", "attributes", "status",
+                ]
+                for field in required_fields:
+                    assert field in span_entry, f"Missing field: {field}"
+        finally:
+            os.unlink(tmp_path)
+
+    def test_write_payload_has_spans(self):
+        """Governance payload for write operations should include span data."""
+        tmp_path = _make_temp_file()
+        _setup_governance()
+
+        try:
+            with _mock_httpx_client() as mock:
+                with open(tmp_path, "w") as f:
+                    f.write("data")
+
+                write_calls = [
+                    c for c in mock.post.call_args_list
+                    if c.kwargs["json"]["hook_trigger"]["operation"] == "write"
+                ]
+                assert len(write_calls) >= 1
+                payload = write_calls[0].kwargs["json"]
+                assert len(payload["spans"]) >= 1
+        finally:
+            os.unlink(tmp_path)

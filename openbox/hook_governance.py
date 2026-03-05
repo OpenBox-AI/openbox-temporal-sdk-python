@@ -70,6 +70,50 @@ def is_configured() -> bool:
     return bool(_api_url and _span_processor is not None)
 
 
+def get_span_processor() -> "WorkflowSpanProcessor | None":
+    """Return the configured span processor (or None)."""
+    return _span_processor
+
+
+def mark_span_governed(span) -> None:
+    """Mark a span as governed if the span processor is configured and span is recording.
+
+    Consolidates the hasattr/get_span_context/mark_governed boilerplate
+    used by all governance hook types.
+    """
+    if _span_processor is None:
+        return
+    if not (hasattr(span, 'is_recording') and span.is_recording()):
+        return
+    ctx = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
+    if ctx and isinstance(getattr(ctx, 'span_id', None), int):
+        _span_processor.mark_governed(ctx.span_id)
+
+
+def extract_span_context(span) -> tuple:
+    """Extract (span_id_hex, trace_id_hex, parent_span_id_hex) from a span.
+
+    Handles NonRecordingSpan, MagicMock, and missing attributes safely.
+    Returns 16-char hex span_id, 32-char hex trace_id, and parent_span_id (or None).
+    """
+    span_ctx = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
+    try:
+        span_id = format(span_ctx.span_id, "016x") if span_ctx and isinstance(span_ctx.span_id, int) else "0" * 16
+    except (AttributeError, TypeError):
+        span_id = "0" * 16
+    try:
+        trace_id = format(span_ctx.trace_id, "032x") if span_ctx and isinstance(span_ctx.trace_id, int) else "0" * 32
+    except (AttributeError, TypeError):
+        trace_id = "0" * 32
+
+    parent_span_id = None
+    parent = getattr(span, 'parent', None)
+    if parent and hasattr(parent, 'span_id') and isinstance(getattr(parent, 'span_id', None), int):
+        parent_span_id = format(parent.span_id, "016x")
+
+    return span_id, trace_id, parent_span_id
+
+
 def _auth_headers() -> dict:
     """Build standard auth headers for governance API calls."""
     return {
@@ -93,14 +137,19 @@ def _build_payload(
         span_data: Optional span data dict to store in the buffer
     """
     if _span_processor is None:
+        logger.debug("[GOV] _build_payload: span_processor is None — skipping")
         return None
 
     # Look up activity context by trace_id
     # Use get_span_context() for compatibility with both _Span and NonRecordingSpan
     span_context = span.get_span_context() if hasattr(span, 'get_span_context') else span.context
-    activity_context = _span_processor.get_activity_context_by_trace(span_context.trace_id)
+    trace_id = span_context.trace_id
+    logger.debug(f"[GOV] _build_payload: looking up trace_id={trace_id}")
+    activity_context = _span_processor.get_activity_context_by_trace(trace_id)
     if activity_context is None:
+        logger.debug(f"[GOV] _build_payload: NO activity context for trace_id={trace_id} — skipping")
         return None
+    logger.debug(f"[GOV] _build_payload: found activity context wf={activity_context.get('workflow_id')}")
 
     workflow_id = activity_context.get("workflow_id")
     activity_id = activity_context.get("activity_id")
