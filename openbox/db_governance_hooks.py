@@ -188,6 +188,7 @@ def _evaluate_started(
         "db_statement": db_statement,
         "server_address": server_address,
         "server_port": int(server_port) if server_port else None,
+        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
     }
     identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
     _hook_gov.evaluate_sync(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
@@ -220,6 +221,7 @@ def _evaluate_completed(
         "server_port": int(server_port) if server_port else None,
         "duration_ms": round(duration_ms, 2),
         "error": error,
+        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
     }
     identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
     try:
@@ -252,6 +254,7 @@ async def _evaluate_started_async(
         "db_statement": db_statement,
         "server_address": server_address,
         "server_port": int(server_port) if server_port else None,
+        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
     }
     identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
     await _hook_gov.evaluate_async(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
@@ -284,6 +287,7 @@ async def _evaluate_completed_async(
         "server_port": int(server_port) if server_port else None,
         "duration_ms": round(duration_ms, 2),
         "error": error,
+        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
     }
     identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
     try:
