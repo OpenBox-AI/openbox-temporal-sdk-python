@@ -263,9 +263,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         non_retryable=False,
                     )
 
+        # Clear any stale abort flag from previous attempt
+        self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
+
         # Ensure buffer is registered for this workflow (needed for span collection)
         # The span processor's on_end() will add spans to this buffer
-        if not self._span_processor.get_buffer(info.workflow_id):
+        buffer = self._span_processor.get_buffer(info.workflow_id)
+        if buffer:
+            # Clear stale spans from previous attempt (prevents leaking into retry)
+            buffer.spans.clear()
+        else:
             buffer = WorkflowSpanBuffer(
                 workflow_id=info.workflow_id,
                 run_id=info.workflow_run_id,
@@ -462,8 +469,29 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 status = "failed"
                 error = {"type": "GovernanceBlockedError", "message": str(e), "verdict": e.verdict, "url": e.url}
                 from temporalio.exceptions import ApplicationError
+
+                # REQUIRE_APPROVAL → retryable, reuse HITL polling flow
+                if (
+                    self._config.hitl_enabled
+                    and e.verdict in ("require_approval", "request_approval")
+                    and info.activity_type not in self._config.skip_hitl_activity_types
+                ):
+                    buffer = self._span_processor.get_buffer(info.workflow_id)
+                    if buffer:
+                        buffer.pending_approval = True
+                        activity.logger.info(
+                            f"Hook REQUIRE_APPROVAL: pending approval for {info.activity_type} "
+                            f"(resource: {e.url})"
+                        )
+                    raise ApplicationError(
+                        f"Approval required: {e.reason}",
+                        type="ApprovalPending",
+                        non_retryable=False,
+                    )
+
+                # BLOCK/HALT → non-retryable, activity dies
                 raise ApplicationError(
-                    f"HTTP request blocked by governance: {e.reason}",
+                    f"Hook governance blocked: {e.reason}",
                     type="GovernanceStop",
                     non_retryable=True,
                 )
@@ -474,54 +502,36 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             finally:
                 end_time = time.time()
 
-                # Clear buffered activity context (hook governance no longer needed)
+                # Check abort flag before clearing (determines if we skip ActivityCompleted)
+                was_aborted = self._span_processor.get_activity_abort(info.workflow_id, info.activity_id) is not None
+                # Clear abort flag and buffered activity context
+                self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
                 self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
 
-                # Get activity spans from buffer
-                # Filter by activity_id (stored in span_data by span_processor)
-                buffer = self._span_processor.get_buffer(info.workflow_id)
-                spans = []
+                # OTel spans not collected — hook-level governance evaluates each
+                # operation individually, so bundling spans is redundant.
 
-                # Get pending body data from span processor
-                # This data is stored by patched httpx.send but not yet merged to spans
-                # (because the activity span hasn't ended yet)
-                activity_span_id = span.get_span_context().span_id
-                pending_body = self._span_processor.get_pending_body(activity_span_id)
-
-                if buffer:
-                    for s in buffer.spans:
-                        # Check if this span belongs to this activity
-                        if (s.get("activity_id") == info.activity_id
-                            or s.get("attributes", {}).get("temporal.activity_id") == info.activity_id):
-                            spans.append(s)
-
-                    # If we have pending body/header data, propagate to child HTTP spans
-                    if pending_body:
-                        for s in spans:
-                            if "request_body" not in s and pending_body.get("request_body"):
-                                s["request_body"] = pending_body["request_body"]
-                            if "response_body" not in s and pending_body.get("response_body"):
-                                s["response_body"] = pending_body["response_body"]
-                            if "request_headers" not in s and pending_body.get("request_headers"):
-                                s["request_headers"] = pending_body["request_headers"]
-                            if "response_headers" not in s and pending_body.get("response_headers"):
-                                s["response_headers"] = pending_body["response_headers"]
-
-                # Send ActivityCompleted event (with input and output)
-                # Always send for observability, but skip governance verdict check if already approved
-                completed_verdict = await self._send_activity_event(
-                    info,
-                    WorkflowEventType.ACTIVITY_COMPLETED.value,
-                    status=status,
-                    start_time=start_time,
-                    end_time=end_time,
-                    duration_ms=(end_time - start_time) * 1000,
-                    span_count=len(spans),
-                    spans=spans,
-                    activity_input=activity_input,
-                    activity_output=activity_output,
-                    error=error,
-                )
+                # Skip ActivityCompleted when activity was aborted by hook governance
+                # (e.g., require_approval) — activity didn't actually run, will retry
+                completed_verdict = None
+                if was_aborted:
+                    activity.logger.info(
+                        f"Skipping ActivityCompleted event — activity aborted by hook governance"
+                    )
+                else:
+                    completed_verdict = await self._send_activity_event(
+                        info,
+                        WorkflowEventType.ACTIVITY_COMPLETED.value,
+                        status=status,
+                        start_time=start_time,
+                        end_time=end_time,
+                        duration_ms=(end_time - start_time) * 1000,
+                        span_count=0,
+                        spans=[],
+                        activity_input=activity_input,
+                        activity_output=activity_output,
+                        error=error,
+                    )
 
                 # If governance returned BLOCK/HALT, fail the activity after it completes
                 if completed_verdict and completed_verdict.verdict.should_stop():

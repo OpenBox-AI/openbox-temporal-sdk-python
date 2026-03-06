@@ -5,7 +5,7 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 **Key Features:**
 - 6 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted)
 - 5-tier verdict system (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
-- **Hook-level governance** — per-operation evaluation (HTTP requests + file I/O) with started/completed stages
+- **Hook-level governance** — per-operation evaluation (HTTP requests, file I/O, database queries, function tracing) with started/completed stages
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
@@ -185,11 +185,15 @@ Configure error policy via `on_api_error` (constants available as `hook_governan
 - `urllib` - request body only
 
 ### Databases
-- PostgreSQL: `psycopg2`, `asyncpg`
-- MySQL: `mysql-connector-python`, `pymysql`
-- MongoDB: `pymongo`
-- Redis: `redis`
-- ORM: `sqlalchemy`
+
+**Fully supported** — any dbapi-compatible library using OTel's `CursorTracer.traced_execution()`:
+- `psycopg2`, `pymysql`, `mysql-connector-python`, and other dbapi-compliant drivers
+
+**Custom hooks (best-effort)** — these libraries use non-dbapi instrumentation paths; governance hooks may not work correctly in all scenarios:
+- `asyncpg` — wrapt wrapper on Connection methods (governance runs outside OTel span context)
+- `pymongo` — CommandListener monitoring + wrapt Collection wrappers (dedup via thread-local flag; some internal commands like `endSessions` only produce `completed` stage)
+- `redis` — native OTel `request_hook`/`response_hook`
+- `sqlalchemy` — `before/after_cursor_execute` event listeners
 
 **SQLAlchemy Note:** If your SQLAlchemy engine is created before `create_openbox_worker()` runs (e.g., at module import time), you must pass it via the `sqlalchemy_engine` parameter. Without this, `SQLAlchemyInstrumentor` only patches future `create_engine()` calls and won't capture queries on pre-existing engines.
 
@@ -211,7 +215,7 @@ worker = create_openbox_worker(
 
 ## Hook-Level Governance
 
-Every HTTP request and file operation made during an activity is evaluated by OpenBox Core in real-time at two stages:
+Every HTTP request, file operation, and database query made during an activity is evaluated by OpenBox Core in real-time at two stages:
 
 ### HTTP Requests
 
@@ -256,6 +260,62 @@ Per-operation governance evaluates **every** `read()`/`write()`/`readline()`/`re
 
 A simple open-read-close produces **4 governance evaluations**: open(started) → read(started) → read(completed) → close(completed).
 
+### Database Queries
+
+Every database operation is evaluated at `started` (pre-query, can block) and `completed` (post-query, reports outcome):
+
+| Field | Started | Completed |
+|-------|---------|-----------|
+| `type` | `"db_query"` | `"db_query"` |
+| `stage` | `"started"` | `"completed"` |
+| `db_system` | postgresql, mysql, mongodb, redis, sqlite | same |
+| `db_name` | Database name | same |
+| `db_operation` | SQL verb or command (SELECT, INSERT, GET, etc.) | same |
+| `db_statement` | Query string or command | same |
+| `server_address` | Host | same |
+| `server_port` | Port | same |
+| `duration_ms` | — | Query duration in ms |
+| `error` | — | Error message or None |
+
+**How it works:**
+
+1. Activity executes a DB query (via any supported library)
+2. SDK governance hook intercepts **before** the query → sends `started` evaluation
+3. If verdict is BLOCK/HALT → query is aborted, `GovernanceBlockedError` raised
+4. Query executes normally → SDK sends `completed` evaluation with duration and error status
+5. DB governance is automatic when `instrument_databases=True` (default)
+
+**Per-library strategy:**
+
+| Library | Hook Method | Can Block? | Reliability |
+|---------|------------|------------|-------------|
+| psycopg2, pymysql, mysql-connector-python | `CursorTracer.traced_execution` patch | Yes | Fully supported |
+| asyncpg | `wrapt` wrapper on Connection methods | Yes | Best-effort |
+| pymongo | CommandListener + `wrapt` Collection wrappers | Yes (wrapt only) | Best-effort |
+| redis | Native OTel `request_hook`/`response_hook` | Yes | Best-effort |
+| sqlalchemy | `before/after_cursor_execute` events | Yes | Best-effort |
+
+> **Note:** Libraries marked "Fully supported" use OTel's `CursorTracer`, which guarantees governance hooks run inside the OTel span context. Best-effort libraries use custom hooks that may produce inconsistencies (e.g., missing stages for internal commands). Some C extension types (e.g., `psycopg2.extensions.cursor`) cannot be patched with `wrapt` — in those cases governance hooks are silently skipped, but OTel span capture still works normally.
+
+### Function Tracing
+
+Functions decorated with `@traced` are automatically governed when `hook_governance` is configured:
+
+| Stage | Trigger | Data Available |
+|-------|---------|----------------|
+| `started` | Before function executes | Function name, module, arguments (if `capture_args=True`) |
+| `completed` | After function returns/raises | All of above + result (if `capture_result=True`) or error info |
+
+**How it works (Function Tracing):**
+
+1. `@traced` decorator wrapper starts OTel span
+2. → SDK sends `started` governance evaluation with function name and module
+3. If verdict is BLOCK/HALT → `GovernanceBlockedError` raised, function never executes
+4. Function executes normally
+5. → SDK sends `completed` governance evaluation with result or error info
+6. If verdict is BLOCK/HALT → `GovernanceBlockedError` raised after execution
+7. When `hook_governance` is not configured → zero overhead, no governance calls
+
 **Governed span tracking:** When hook-level governance is active, the SDK marks HTTP spans as "governed" so the OTel `on_end` processor skips buffering them — preventing duplicate spans.
 
 ---
@@ -282,11 +342,20 @@ Activity open()       → hook_governance → API (started)   → Allow/Block
 Activity read/write() → hook_governance → API (started)   → Allow/Block
                       → hook_governance → API (completed) → Allow/Block
 Activity close()      → hook_governance → API (completed) → Allow/Block
+
+Hook-Level (per DB query):
+Activity DB Call → db_governance_hooks → hook_governance → API (started) → Allow/Block
+                → Query executes     → hook_governance → API (completed)
+
+Hook-Level (per @traced function):
+@traced call    → hook_governance → API (started) → Allow/Block
+                → Function runs  → hook_governance → API (completed)
 ```
 
 **Module responsibilities:**
 - `otel_setup.py` — OTel instrumentation, hooks, TracedFile wrapper
 - `hook_governance.py` — Shared governance evaluator (payload building, API calls, verdict handling)
+- `db_governance_hooks.py` — Per-library DB governance wrappers (wrapt, OTel hooks, SQLAlchemy events)
 - `span_processor.py` — Span buffering, activity context tracking
 - `activity_interceptor.py` — Activity lifecycle governance events
 
@@ -370,13 +439,13 @@ worker = Worker(
 
 ## Testing
 
-The SDK includes comprehensive test coverage with 12 test files:
+The SDK includes comprehensive test coverage with 13 test files:
 
 ```bash
 pytest tests/
 ```
 
-Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
+Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_db_governance_hooks.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
 
 ---
 

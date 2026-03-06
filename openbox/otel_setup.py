@@ -401,6 +401,7 @@ def setup_file_io_instrumentation() -> bool:
                     "file_path": self._file_path,
                     "file_mode": self._mode,
                     "stage": stage,
+                    "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
                     **extra,
                 }
                 span_data = _build_file_span_data(
@@ -574,6 +575,7 @@ def setup_file_io_instrumentation() -> bool:
                         "file_path": file_str,
                         "file_mode": mode,
                         "stage": "started",
+                        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
                     },
                     identifier=file_str,
                     span_data=open_span_data,
@@ -896,7 +898,7 @@ def _requests_request_hook(span, request) -> None:
             span_data = _build_http_span_data(span, method, url, "started", request_body=body, request_headers=headers)
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started"},
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -947,7 +949,7 @@ def _requests_response_hook(span, request, response) -> None:
             )
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "completed"},
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -1031,7 +1033,7 @@ def _httpx_request_hook(span, request) -> None:
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
         _hook_gov.evaluate_sync(
             span,
-            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started"},
+            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
             identifier=url,
             span_data=span_data,
         )
@@ -1152,7 +1154,7 @@ async def _httpx_async_request_hook(span, request) -> None:
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
         await _hook_gov.evaluate_async(
             span,
-            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started"},
+            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
             identifier=url,
             span_data=span_data,
         )
@@ -1311,7 +1313,7 @@ def _prepare_completed_governance(http_span, request, url, request_body, request
         response_body=response_body, response_headers=response_headers,
         http_status_code=status_code,
     )
-    hook_trigger = {"type": "http_request", "method": method, "url": url, "stage": "completed"}
+    hook_trigger = {"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP}
     return http_span, hook_trigger, url, span_data
 
 
@@ -1423,7 +1425,7 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
             span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=headers)
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started"},
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -1476,7 +1478,7 @@ def _urllib3_response_hook(span, pool, response) -> None:
             )
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": "UNKNOWN", "url": url, "stage": "completed"},
+                hook_trigger={"type": "http_request", "method": "UNKNOWN", "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )

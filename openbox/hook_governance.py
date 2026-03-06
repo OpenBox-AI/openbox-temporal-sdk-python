@@ -17,6 +17,7 @@ Shared by all operation types (HTTP, file I/O, future: database queries).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 # Error policy constants
 FAIL_OPEN = "fail_open"
 FAIL_CLOSED = "fail_closed"
+
+# Attribute keys used by OpenBox Core for span deduplication across retries.
+# Each hook type has different keys that uniquely identify the operation.
+DEDUP_KEYS_HTTP = ["http.method", "http.url"]
+DEDUP_KEYS_FILE = ["file.path", "file.operation"]
+DEDUP_KEYS_DB = ["db.system", "db.operation", "db.statement"]
+DEDUP_KEYS_FUNCTION = ["code.function", "code.namespace"]
 
 # Module-level config (set once by configure())
 _api_url: str = ""
@@ -170,47 +178,101 @@ def _build_payload(
                 or s.get("attributes", {}).get("temporal.activity_id") == activity_id)
         ]
 
-    # Assemble payload
+    # Assemble payload — ensure JSON-serializable (Temporal Payload objects slip through)
     payload = dict(activity_context)
     payload["spans"] = all_activity_spans
     payload["span_count"] = len(all_activity_spans)
     payload["hook_trigger"] = hook_trigger
     from .activities import _rfc3339_now
     payload["timestamp"] = _rfc3339_now()
+
+    # Ensure JSON-serializable (Temporal Payload objects slip through)
+    try:
+        json.dumps(payload)
+    except (TypeError, ValueError):
+        payload = json.loads(json.dumps(payload, default=str))
+
     return payload
 
 
-def _handle_verdict(data: Dict[str, Any], identifier: str) -> None:
+def _resolve_activity_ids(span) -> Optional[tuple]:
+    """Resolve span → (workflow_id, activity_id) via trace_id lookup.
+
+    Returns (workflow_id, activity_id) tuple or None if resolution fails.
+    Handles NonRecordingSpan, MagicMock, and missing attributes safely.
+    """
+    if _span_processor is None:
+        return None
+    span_context = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
+    if not span_context or not isinstance(getattr(span_context, 'trace_id', None), int):
+        return None
+    activity_ctx = _span_processor.get_activity_context_by_trace(span_context.trace_id)
+    if not activity_ctx or not isinstance(activity_ctx, dict):
+        return None
+    return activity_ctx.get("workflow_id", ""), activity_ctx.get("activity_id", "")
+
+
+def _check_activity_abort(span) -> Optional[str]:
+    """Check if the activity owning this span has been aborted.
+
+    Returns abort reason if aborted, None otherwise.
+    """
+    # Skip if span_processor lacks abort method (MagicMock/old processors)
+    if not hasattr(_span_processor, 'get_activity_abort') or not callable(getattr(_span_processor, 'get_activity_abort', None)):
+        return None
+    ids = _resolve_activity_ids(span)
+    if not ids:
+        return None
+    result = _span_processor.get_activity_abort(ids[0], ids[1])
+    # Ensure result is actually a string (not a MagicMock or other truthy object)
+    return result if isinstance(result, str) else None
+
+
+def _set_activity_abort(span, reason: str) -> None:
+    """Set abort flag for the activity owning this span."""
+    ids = _resolve_activity_ids(span)
+    if not ids:
+        return
+    _span_processor.set_activity_abort(ids[0], ids[1], reason)
+
+
+def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> None:
     """Check API response verdict and raise GovernanceBlockedError if blocked.
 
     Args:
         data: Parsed JSON response from governance API
         identifier: Resource identifier for error context (URL or file path)
+        span: OTel span (used to set abort flag on require_approval)
     """
     from .types import GovernanceBlockedError
 
     verdict_str = (data.get("verdict") or data.get("action", "continue")).lower().replace("-", "_")
     if verdict_str in ("stop", "block", "halt"):
+        if span:
+            _set_activity_abort(span, data.get("reason", "Blocked by governance"))
         raise GovernanceBlockedError(
             verdict_str, data.get("reason", "Blocked by governance"), identifier
         )
     if verdict_str in ("require_approval", "request_approval"):
+        if span:
+            _set_activity_abort(span, data.get("reason", "Approval required"))
         raise GovernanceBlockedError(
             verdict_str, data.get("reason", "Approval required - blocked at hook level"), identifier
         )
 
 
-def _send_and_handle(response: Any, identifier: str) -> None:
+def _send_and_handle(response: Any, identifier: str, span: Any = None) -> None:
     """Handle governance API response (shared between sync/async).
 
     Args:
         response: httpx Response object
         identifier: Resource identifier for error context
+        span: OTel span (passed to _handle_verdict for abort flag)
     """
     from .types import GovernanceBlockedError
 
     if response.status_code == 200:
-        _handle_verdict(response.json(), identifier)
+        _handle_verdict(response.json(), identifier, span=span)
     elif response.status_code >= 400:
         logger.warning(f"Hook governance API error: HTTP {response.status_code}")
         if _on_api_error == FAIL_CLOSED:
@@ -228,6 +290,7 @@ def evaluate_sync(
     """Synchronous governance evaluation. Blocks until verdict is received.
 
     Raises GovernanceBlockedError if verdict is BLOCK, HALT, or REQUIRE_APPROVAL.
+    Short-circuits immediately if the activity has been aborted by a prior hook.
 
     Args:
         span: OTel span for the current operation
@@ -238,11 +301,16 @@ def evaluate_sync(
     if not is_configured():
         return
 
+    from .types import GovernanceBlockedError
+
+    # Short-circuit if activity already aborted by a prior hook verdict
+    abort_reason = _check_activity_abort(span)
+    if abort_reason:
+        raise GovernanceBlockedError("require_approval", abort_reason, identifier)
+
     payload = _build_payload(span, hook_trigger, span_data)
     if payload is None:
         return
-
-    from .types import GovernanceBlockedError
 
     try:
         with httpx.Client(timeout=_api_timeout) as client:
@@ -251,7 +319,7 @@ def evaluate_sync(
                 json=payload,
                 headers=_auth_headers(),
             )
-        _send_and_handle(response, identifier)
+        _send_and_handle(response, identifier, span=span)
 
     except GovernanceBlockedError:
         raise
@@ -270,6 +338,7 @@ async def evaluate_async(
     """Async governance evaluation. Awaits until verdict is received.
 
     Raises GovernanceBlockedError if verdict is BLOCK, HALT, or REQUIRE_APPROVAL.
+    Short-circuits immediately if the activity has been aborted by a prior hook.
 
     Args:
         span: OTel span for the current operation
@@ -280,11 +349,16 @@ async def evaluate_async(
     if not is_configured():
         return
 
+    from .types import GovernanceBlockedError
+
+    # Short-circuit if activity already aborted by a prior hook verdict
+    abort_reason = _check_activity_abort(span)
+    if abort_reason:
+        raise GovernanceBlockedError("require_approval", abort_reason, identifier)
+
     payload = _build_payload(span, hook_trigger, span_data)
     if payload is None:
         return
-
-    from .types import GovernanceBlockedError
 
     try:
         async with httpx.AsyncClient(timeout=_api_timeout) as client:
@@ -293,7 +367,7 @@ async def evaluate_async(
                 json=payload,
                 headers=_auth_headers(),
             )
-        _send_and_handle(response, identifier)
+        _send_and_handle(response, identifier, span=span)
 
     except GovernanceBlockedError:
         raise

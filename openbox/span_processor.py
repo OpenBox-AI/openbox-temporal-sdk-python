@@ -67,6 +67,7 @@ class WorkflowSpanProcessor:
         self._verdicts: Dict[str, dict] = {}  # workflow_id -> {"verdict": Verdict, "reason": str}
         self._activity_context: Dict[str, dict] = {}  # "{workflow_id}:{activity_id}" -> event data
         self._governed_span_ids: set = set()  # span_ids with governance hooks (skip on_end buffering)
+        self._aborted_activities: Dict[str, str] = {}  # "{workflow_id}:{activity_id}" → abort reason
         self._lock = threading.Lock()
 
     def _should_ignore_span(self, span: "ReadableSpan") -> bool:
@@ -157,6 +158,10 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._buffers.pop(workflow_id, None)
             self._verdicts.pop(workflow_id, None)
+            # Clean abort flags for this workflow (prevent memory leak)
+            stale = [k for k in self._aborted_activities if k.startswith(f"{workflow_id}:")]
+            for k in stale:
+                del self._aborted_activities[k]
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Verdict Storage (called by workflow interceptor for SignalReceived stop)
@@ -231,6 +236,25 @@ class WorkflowSpanProcessor:
         with self._lock:
             key = f"{workflow_id}:{activity_id}"
             self._activity_context.pop(key, None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Activity Abort Signal (block subsequent hooks after require_approval)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_activity_abort(self, workflow_id: str, activity_id: str, reason: str) -> None:
+        """Set abort flag for an activity. Subsequent hooks will raise immediately."""
+        with self._lock:
+            self._aborted_activities[f"{workflow_id}:{activity_id}"] = reason
+
+    def get_activity_abort(self, workflow_id: str, activity_id: str) -> Optional[str]:
+        """Check if activity is aborted. Returns reason string or None."""
+        with self._lock:
+            return self._aborted_activities.get(f"{workflow_id}:{activity_id}")
+
+    def clear_activity_abort(self, workflow_id: str, activity_id: str) -> None:
+        """Clear abort flag for an activity (on retry or completion)."""
+        with self._lock:
+            self._aborted_activities.pop(f"{workflow_id}:{activity_id}", None)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Governed Span Tracking (skip on_end buffering for governance-handled spans)

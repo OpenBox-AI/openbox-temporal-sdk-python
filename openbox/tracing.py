@@ -159,6 +159,7 @@ def traced(
                             "function": func.__name__,
                             "module": func.__module__,
                             "stage": "started",
+                            "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                         }
                         if capture_args:
                             started_trigger["args"] = _safe_serialize(
@@ -185,6 +186,7 @@ def traced(
                                 "function": func.__name__,
                                 "module": func.__module__,
                                 "stage": "completed",
+                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                             }
                             if capture_result:
                                 completed_trigger["result"] = _safe_serialize(
@@ -214,6 +216,7 @@ def traced(
                                     "type": type(e).__name__,
                                     "message": str(e),
                                 },
+                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                             }
                             error_sd = _build_traced_span_data(
                                 span, func.__name__, func.__module__, "completed", error=str(e)
@@ -247,6 +250,7 @@ def traced(
                             "function": func.__name__,
                             "module": func.__module__,
                             "stage": "started",
+                            "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                         }
                         if capture_args:
                             started_trigger["args"] = _safe_serialize(
@@ -273,6 +277,7 @@ def traced(
                                 "function": func.__name__,
                                 "module": func.__module__,
                                 "stage": "completed",
+                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                             }
                             if capture_result:
                                 completed_trigger["result"] = _safe_serialize(
@@ -302,6 +307,7 @@ def traced(
                                     "type": type(e).__name__,
                                     "message": str(e),
                                 },
+                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
                             }
                             error_sd = _build_traced_span_data(
                                 span, func.__name__, func.__module__, "completed", error=str(e)
