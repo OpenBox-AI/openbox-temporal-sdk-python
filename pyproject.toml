@@ -26,13 +26,13 @@ dependencies = [
     "temporalio>=1.8.0,<2",
     "httpx>=0.28.0,<1",
     # OpenTelemetry core
-    "opentelemetry-api>=1.38.0",
-    "opentelemetry-sdk>=1.38.0",
+    "opentelemetry-api>=1.38.0,<1.40.0",
+    "opentelemetry-sdk>=1.38.0,<1.40.0",
     # HTTP instrumentation
-    "opentelemetry-instrumentation-httpx>=0.59b0",
-    "opentelemetry-instrumentation-requests>=0.59b0",
-    "opentelemetry-instrumentation-urllib3>=0.59b0",
-    "opentelemetry-instrumentation-urllib>=0.59b0",
+    "opentelemetry-instrumentation-httpx>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-requests>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-urllib3>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-urllib>=0.59b0,<0.61b0",
     # Database drivers
     "psycopg2-binary>=2.9.10",
     "asyncpg>=0.29.0",
@@ -42,13 +42,13 @@ dependencies = [
     "redis>=5.0.0",
     "sqlalchemy>=2.0.0",
     # Database instrumentation
-    "opentelemetry-instrumentation-psycopg2>=0.59b0",
-    "opentelemetry-instrumentation-asyncpg>=0.59b0",
-    "opentelemetry-instrumentation-mysql>=0.59b0",
-    "opentelemetry-instrumentation-pymysql>=0.59b0",
-    "opentelemetry-instrumentation-pymongo>=0.59b0",
-    "opentelemetry-instrumentation-redis>=0.59b0",
-    "opentelemetry-instrumentation-sqlalchemy>=0.59b0",
+    "opentelemetry-instrumentation-psycopg2>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-asyncpg>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-mysql>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-pymysql>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-pymongo>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-redis>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
 ]
 
 [project.urls]
