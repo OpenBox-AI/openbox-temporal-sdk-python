@@ -1,7 +1,7 @@
 # System Architecture
 
-**Last Updated:** 2026-02-04
-**Version:** 1.0.0
+**Last Updated:** 2026-03-05
+**Version:** 1.1.0
 **Total LOC:** 3,583 (across 10 Python files)
 
 ---
@@ -228,7 +228,22 @@ class WorkflowSpanProcessor:
    )
    ```
 
-2. **Custom Hooks** - Capture bodies/headers via `span_processor.store_body()`
+2. **Hook-Level Governance** (request hook) - started stage governance evaluation
+   - Calls `mark_governed()` once to prevent double-buffering
+   - Builds span data and calls governance evaluate_sync/evaluate_async
+   - Span data includes: http.method, http.url, http.status_code, request/response bodies
+   - Can block HTTP request if governance returns BLOCK/HALT
+   ```python
+   def _httpx_request_hook(span, request):
+       # Mark governed at started stage
+       _span_processor.mark_governed(span.context.span_id)
+       # Build span data matching governance span format
+       span_data = _build_http_span_data(span, method, url, "started", request_body=body)
+       # Evaluate governance
+       _hook_gov.evaluate_sync(span, hook_trigger={...}, span_data=span_data)
+   ```
+
+3. **Custom Hooks** - Capture bodies/headers via `span_processor.store_body()`
    ```python
    def _httpx_request_hook(span, request):
        body = extract_body(request)
@@ -240,7 +255,12 @@ class WorkflowSpanProcessor:
        )
    ```
 
-3. **Client.send Patching** (httpx only) - Reliable body capture
+4. **Response Hook** (completed stage) - Governance evaluation with response
+   - Builds span data with response body and status code
+   - Calls governance evaluate_sync/evaluate_async with completed stage
+   - Status set to "ERROR" if http_status_code >= 400
+
+5. **Client.send Patching** (httpx only) - Reliable body capture
    ```python
    def _patched_async_send(self, request, *args, **kwargs):
        request_body = request.content
@@ -248,6 +268,25 @@ class WorkflowSpanProcessor:
        response_body = response.text
        span_processor.store_body(span_id, request_body=..., response_body=...)
        return response
+   ```
+
+6. **Span Data Format** (for governance evaluation)
+   ```
+   stage: "started" | "completed"
+   span_id: hex string (16 chars)
+   trace_id: hex string (32 chars)
+   parent_span_id: hex string or null
+   name: "HTTP {METHOD}" (e.g., "HTTP GET")
+   kind: "CLIENT"
+   start_time: nanosecond timestamp
+   end_time: nanosecond timestamp (completed only), None for started
+   status: {code: "ERROR" if status >= 400, "UNSET", description: error}
+   attributes: {http.method, http.url, http.status_code, http.request.header.*, http.response.header.*}
+   request_body: request body (text only)
+   response_body: response body (text only)
+   request_headers: dict of request headers
+   response_headers: dict of response headers
+   http_status_code: HTTP status code
    ```
 
 **Code Location:** `openbox/otel_setup.py` (lines 1-898)
@@ -263,13 +302,17 @@ class WorkflowSpanProcessor:
 
 **Instrumentation Strategy:**
 
-1. **OTel Instrumentors** - Create spans with db.* attributes
+1. **DB Governance Hooks** (installed BEFORE OTel) — per-query started/completed governance
    ```python
-   from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
-   Psycopg2Instrumentor().instrument()
+   # db_governance_hooks.py installs wrapt/event hooks before OTel instrumentors
+   _db_gov.setup_psycopg2_hooks()       # wrapt on cursor.execute
+   Psycopg2Instrumentor().instrument()   # OTel span creation
    ```
+   - Calls `mark_governed()` once at started stage to prevent double-buffering
+   - Both started + completed stages call governance evaluate with `span_data=` parameter
+   - Span data includes: db.system, db.operation, db.statement, status, duration
 
-2. **Span Capture** - Automatically buffered by WorkflowSpanProcessor
+2. **OTel Instrumentors** - Create spans with db.* attributes
    ```python
    # Span attributes:
    {
@@ -280,7 +323,31 @@ class WorkflowSpanProcessor:
    }
    ```
 
-**Code Location:** `openbox/otel_setup.py` (lines 335-443)
+3. **Span Data Format** (for governance evaluation)
+   ```
+   stage: "started" | "completed"
+   span_id: hex string (16 chars)
+   trace_id: hex string (32 chars)
+   parent_span_id: hex string or null
+   name: "{OPERATION} {SYSTEM}" (e.g., "SELECT postgresql")
+   kind: "CLIENT"
+   start_time: nanosecond timestamp
+   end_time: nanosecond timestamp (completed only), None for started
+   status: {code: "ERROR" if error, "UNSET", description: error or null}
+   attributes: {db.system, db.operation, db.statement, db.name, server.address, server.port, rowcount}
+   ```
+
+4. **Span Capture** - Automatically buffered by WorkflowSpanProcessor
+
+**Per-library hook strategy:**
+
+| Library | Method | Notes |
+|---------|--------|-------|
+| redis | Native OTel `request_hook`/`response_hook` | Passed to `RedisInstrumentor().instrument()` |
+| sqlalchemy | `before/after_cursor_execute` + `handle_error` events | Requires engine reference |
+| psycopg2, asyncpg, mysql, pymysql, pymongo | `wrapt` monkey-patching | C extensions may be immutable (silently skipped) |
+
+**Code Location:** `openbox/db_governance_hooks.py`, `openbox/otel_setup.py`
 
 #### File I/O Instrumentation
 
@@ -298,19 +365,107 @@ class WorkflowSpanProcessor:
        return TracedFile(file_obj, file_path, mode, span)
    ```
 
-2. **Wrap File Operations** - Trace each read/write
+2. **Hook-Level Governance** (on open, read, write) - started/completed stages
+   - Calls `mark_governed()` once at started stage to prevent double-buffering
+   - Builds span data with file path, mode, operation
+   - Both started + completed stages call governance evaluate_sync with span_data
+   - Can block file access (open, read, write) if governance returns BLOCK/HALT
+   ```python
+   def _evaluate_governance(self, operation: str, stage: str, span=None):
+       if stage == "started":
+           _span_processor.mark_governed(span.context.span_id)
+       span_data = _build_file_span_data(span, file_path, mode, operation, stage)
+       _hook_gov.evaluate_sync(span, hook_trigger={...}, span_data=span_data)
+   ```
+
+3. **Wrap File Operations** - Trace each read/write
    ```python
    class TracedFile:
        def read(self, size=-1):
            with tracer.start_as_current_span("file.read") as span:
+               # Governance started stage
+               self._evaluate_governance("read", "started", span=span)
                data = self._file.read(size)
                span.set_attribute("file.bytes", len(data))
+               # Governance completed stage
+               self._evaluate_governance("read", "completed", span=span, data=data)
                return data
+   ```
+
+4. **Span Data Format** (for governance evaluation)
+   ```
+   stage: "started" | "completed"
+   span_id: hex string (16 chars)
+   trace_id: hex string (32 chars)
+   parent_span_id: hex string or null
+   name: "file.{operation}" (e.g., "file.read")
+   kind: "INTERNAL"
+   start_time: nanosecond timestamp
+   end_time: nanosecond timestamp (completed only), None for started
+   status: {code: "ERROR" if error, "UNSET", description: error}
+   attributes: {file.path, file.mode, file.operation, openbox.governance.error}
    ```
 
 **Skipped Paths:** `/dev/`, `/proc/`, `/sys/`, `__pycache__`, `.pyc`, `.so`
 
 **Code Location:** `openbox/otel_setup.py` (lines 188-332)
+
+#### Function Tracing Instrumentation
+
+**Implementation:** `@traced` decorator in `tracing.py`
+
+**Decorator Features:**
+- Supports sync and async functions
+- Creates OTel span with configurable name
+- Captures function arguments, return values, exceptions
+- Serializes args/results safely with max length limits
+- Hook-level governance at started and completed stages
+
+**Instrumentation Strategy:**
+
+1. **Decorator Wrapper** - Wraps function execution
+   ```python
+   @traced
+   def my_function(arg1, arg2):
+       return do_something(arg1, arg2)
+
+   @traced(name="custom-name", capture_args=True, capture_result=True)
+   async def my_async_function(data):
+       return await process(data)
+   ```
+
+2. **Hook-Level Governance** - When `hook_governance` is configured
+   - `started` stage: Before function executes (can block)
+   - `completed` stage: After function returns or raises (can block/halt)
+   - Calls `mark_governed()` once at started stage to prevent double-buffering
+   - Both stages pass `span_data=` parameter with structured span info
+   - Zero overhead when governance not configured
+
+3. **Span Data Format** (for governance evaluation)
+   ```
+   stage: "started" | "completed"
+   span_id: hex string (16 chars)
+   trace_id: hex string (32 chars)
+   parent_span_id: hex string or null
+   name: function name or custom span name
+   kind: "INTERNAL"
+   start_time: nanosecond timestamp
+   end_time: nanosecond timestamp (completed only), None for started
+   status: {code: "ERROR" | "UNSET", description: error message or null}
+   attributes: {code.function, code.namespace, ...function args, result, errors}
+   ```
+
+4. **Span Attributes**
+   ```
+   code.function = function name
+   code.namespace = module name
+   function.arg.N = positional args (JSON)
+   function.kwarg.X = keyword args (JSON)
+   function.result = return value (JSON)
+   error / error.type / error.message = exception details
+   ```
+
+**Code Location:** `openbox/tracing.py`
 
 ---
 
@@ -754,7 +909,7 @@ Authorization: Bearer {api_key}
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-02-04
+**Document Version:** 1.1
+**Last Updated:** 2026-03-05
 
 See `./docs/project-roadmap.md` for future enhancements and planned features.

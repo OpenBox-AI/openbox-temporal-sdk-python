@@ -23,6 +23,7 @@ Supported database libraries:
 """
 
 from typing import TYPE_CHECKING, Any, Optional, Set, List
+import contextvars
 import logging
 
 if TYPE_CHECKING:
@@ -35,6 +36,18 @@ _span_processor: Optional["WorkflowSpanProcessor"] = None
 
 # URLs to ignore (e.g., OpenBox Core API - we don't want to capture governance events)
 _ignored_url_prefixes: Set[str] = set()
+
+# Hook-level governance is handled by hook_governance module
+from . import hook_governance as _hook_gov
+from . import db_governance_hooks as _db_gov
+
+# ContextVar to pass HTTP child span from OTel request hooks to _patched_send.
+# Request hooks receive the correct HTTP span; we store it here so _patched_send
+# can use it after _original_send() returns (when the HTTP span has ended and
+# trace.get_current_span() would return the parent activity span).
+_httpx_http_span: contextvars.ContextVar = contextvars.ContextVar(
+    '_httpx_http_span', default=None
+)
 
 # Text content types that are safe to capture as body
 _TEXT_CONTENT_TYPES = (
@@ -64,13 +77,131 @@ def _is_text_content_type(content_type: Optional[str]) -> bool:
     return any(content_type.startswith(t) for t in _TEXT_CONTENT_TYPES)
 
 
+
+def _build_http_span_data(
+    span,
+    http_method: str,
+    http_url: str,
+    stage: str,
+    request_body: Optional[str] = None,
+    request_headers: Optional[dict] = None,
+    response_body: Optional[str] = None,
+    response_headers: Optional[dict] = None,
+    http_status_code: Optional[int] = None,
+) -> dict:
+    """Build span data dict for an HTTP request (used by governance hooks).
+
+    Creates a span data structure matching _extract_span_data() output,
+    enriched with HTTP body/header data for governance evaluation.
+    """
+    import time as _time
+
+    span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
+
+    attrs = dict(span.attributes) if hasattr(span, 'attributes') and span.attributes else {
+        "http.method": http_method,
+        "http.url": http_url,
+    }
+    # Enrich attributes with body/header data for governance evaluation
+    if request_headers is not None:
+        attrs["http.request.headers"] = request_headers
+    if request_body is not None:
+        attrs["http.request.body"] = request_body
+    if response_headers is not None:
+        attrs["http.response.headers"] = response_headers
+    if response_body is not None:
+        attrs["http.response.body"] = response_body
+    if http_status_code is not None:
+        attrs["http.response.status_code"] = http_status_code
+
+    now_ns = _time.time_ns()
+
+    # Derive error from HTTP status code (4xx/5xx)
+    error = None
+    if http_status_code is not None and http_status_code >= 400:
+        error = f"HTTP {http_status_code}"
+
+    span_data = {
+        "span_id": span_id_hex,
+        "trace_id": trace_id_hex,
+        "parent_span_id": parent_span_id,
+        "name": span.name if hasattr(span, 'name') and span.name else f"HTTP {http_method}",
+        "kind": "CLIENT",
+        "stage": stage,
+        "start_time": now_ns,
+        "end_time": now_ns if stage == "completed" else None,
+        "duration_ns": None,
+        "attributes": attrs,
+        "status": {"code": "ERROR" if error else "UNSET", "description": error},
+        "events": [],
+        "request_body": request_body,
+        "response_body": response_body,
+        "request_headers": request_headers,
+        "response_headers": response_headers,
+    }
+    if http_status_code is not None:
+        span_data["http_status_code"] = http_status_code
+    return span_data
+
+
+def _build_file_span_data(
+    span,
+    file_path: str,
+    file_mode: str,
+    operation: str,
+    stage: str,
+    error: Optional[str] = None,
+) -> dict:
+    """Build span data dict for a file operation (used by governance hooks).
+
+    Creates a span data structure matching _extract_span_data() output,
+    enriched with file operation context for governance evaluation.
+    Handles both recording spans and NonRecordingSpan (no-op tracer).
+    """
+    import time as _time
+
+    span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
+
+    raw_attrs = getattr(span, 'attributes', None)
+    attrs = dict(raw_attrs) if raw_attrs else {
+        "file.path": file_path,
+        "file.mode": file_mode,
+        "file.operation": operation,
+    }
+    if error:
+        attrs["openbox.governance.error"] = error
+
+    span_name = getattr(span, 'name', None) or f"file.{operation}"
+    now_ns = _time.time_ns()
+
+    return {
+        "span_id": span_id_hex,
+        "trace_id": trace_id_hex,
+        "parent_span_id": parent_span_id,
+        "name": span_name,
+        "kind": "INTERNAL",
+        "stage": stage,
+        "start_time": now_ns,
+        "end_time": now_ns if stage == "completed" else None,
+        "duration_ns": None,
+        "attributes": attrs,
+        "status": {"code": "ERROR" if error else "UNSET", "description": error},
+        "events": [],
+    }
+
+
 def setup_opentelemetry_for_governance(
     span_processor: "WorkflowSpanProcessor",
+    api_url: str,
+    api_key: str,
+    *,
     ignored_urls: Optional[list] = None,
     instrument_databases: bool = True,
     db_libraries: Optional[Set[str]] = None,
     instrument_file_io: bool = False,
     sqlalchemy_engine: Optional[Any] = None,
+    api_timeout: float = 30.0,
+    on_api_error: str = "fail_open",
 ) -> None:
     """
     Setup OpenTelemetry instrumentors with body capture hooks.
@@ -96,10 +227,17 @@ def setup_opentelemetry_for_governance(
     global _span_processor, _ignored_url_prefixes
     _span_processor = span_processor
 
-    # Set ignored URL prefixes
-    if ignored_urls:
-        _ignored_url_prefixes = set(ignored_urls)
-        logger.info(f"Ignoring URLs with prefixes: {_ignored_url_prefixes}")
+    # Set ignored URL prefixes (always include api_url to prevent recursion)
+    _ignored_url_prefixes = set(ignored_urls) if ignored_urls else set()
+    _ignored_url_prefixes.add(api_url.rstrip("/"))
+    logger.info(f"Ignoring URLs with prefixes: {_ignored_url_prefixes}")
+
+    # Configure hook-level governance module (always enabled)
+    _hook_gov.configure(
+        api_url, api_key, span_processor,
+        api_timeout=api_timeout, on_api_error=on_api_error,
+    )
+    _db_gov.configure(span_processor)
 
     # Register span processor with OTel tracer provider
     # This ensures on_end() is called when spans complete
@@ -224,7 +362,12 @@ def setup_file_io_instrumentation() -> bool:
     _skip_patterns = ('/dev/', '/proc/', '/sys/', '__pycache__', '.pyc', '.pyo', '.so', '.dylib')
 
     class TracedFile:
-        """Wrapper around file object to trace read/write operations."""
+        """Wrapper around file object to trace read/write operations.
+
+        Also sends hook-level governance evaluations:
+        - "started" on open (can block file access)
+        - "completed" on close (reports summary of operations performed)
+        """
 
         def __init__(self, file_obj, file_path: str, mode: str, parent_span):
             self._file = file_obj
@@ -233,69 +376,166 @@ def setup_file_io_instrumentation() -> bool:
             self._parent_span = parent_span
             self._bytes_read = 0
             self._bytes_written = 0
+            self._operations: list = []  # Track operations for governance payload
+
+        def _evaluate_governance(self, operation: str, stage: str, span=None, **extra):
+            """Send governance evaluation for a file operation stage.
+
+            Args:
+                operation: File operation name (read, write, close, etc.)
+                stage: Governance stage (started, completed)
+                span: OTel span for this operation. Falls back to parent span.
+                **extra: Additional trigger fields (data, bytes_read, etc.)
+            """
+            if not _hook_gov.is_configured():
+                return
+            from .types import GovernanceBlockedError
+            active_span = span or self._parent_span
+            # Mark governed on started stage — we create our own span entries
+            if stage == "started":
+                _hook_gov.mark_span_governed(active_span)
+            try:
+                trigger = {
+                    "type": "file_operation",
+                    "operation": operation,
+                    "file_path": self._file_path,
+                    "file_mode": self._mode,
+                    "stage": stage,
+                    "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
+                    **extra,
+                }
+                span_data = _build_file_span_data(
+                    active_span, self._file_path, self._mode, operation, stage,
+                )
+                _hook_gov.evaluate_sync(
+                    active_span,
+                    hook_trigger=trigger,
+                    identifier=self._file_path,
+                    span_data=span_data,
+                )
+            except GovernanceBlockedError:
+                raise
+            except Exception:
+                pass  # fail_open handled inside evaluate_sync
 
         def read(self, size=-1):
             with _tracer.start_as_current_span("file.read") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "read")
+                self._evaluate_governance("read", "started", span=span)
+
                 data = self._file.read(size)
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
                 self._bytes_read += bytes_count
+                self._operations.append("read")
                 span.set_attribute("file.bytes", bytes_count)
+
+                self._evaluate_governance("read", "completed", span=span, data=data, bytes_read=bytes_count)
                 return data
 
         def readline(self):
             with _tracer.start_as_current_span("file.readline") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "readline")
+                self._evaluate_governance("readline", "started", span=span)
+
                 data = self._file.readline()
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
                 self._bytes_read += bytes_count
+                self._operations.append("readline")
                 span.set_attribute("file.bytes", bytes_count)
+
+                self._evaluate_governance("readline", "completed", span=span, data=data, bytes_read=bytes_count)
                 return data
 
         def readlines(self):
             with _tracer.start_as_current_span("file.readlines") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "readlines")
+                self._evaluate_governance("readlines", "started", span=span)
+
                 data = self._file.readlines()
                 bytes_count = sum(len(line) for line in data) if data else 0
                 self._bytes_read += bytes_count
+                self._operations.append("readlines")
                 span.set_attribute("file.bytes", bytes_count)
                 span.set_attribute("file.lines", len(data) if data else 0)
+
+                self._evaluate_governance(
+                    "readlines", "completed", span=span,
+                    data=data, bytes_read=bytes_count,
+                    lines_count=len(data) if data else 0,
+                )
                 return data
 
         def write(self, data):
             with _tracer.start_as_current_span("file.write") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "write")
+                self._evaluate_governance("write", "started", span=span)
+
                 bytes_count = len(data) if isinstance(data, (str, bytes)) else 0
                 span.set_attribute("file.bytes", bytes_count)
                 self._bytes_written += bytes_count
-                return self._file.write(data)
+                self._operations.append("write")
+                result = self._file.write(data)
+
+                self._evaluate_governance("write", "completed", span=span, data=data, bytes_written=bytes_count)
+                return result
 
         def writelines(self, lines):
             with _tracer.start_as_current_span("file.writelines") as span:
                 span.set_attribute("file.path", self._file_path)
                 span.set_attribute("file.operation", "writelines")
+                self._evaluate_governance("writelines", "started", span=span)
+
                 bytes_count = sum(len(line) for line in lines) if lines else 0
                 span.set_attribute("file.bytes", bytes_count)
                 span.set_attribute("file.lines", len(lines) if lines else 0)
                 self._bytes_written += bytes_count
-                return self._file.writelines(lines)
+                self._operations.append("writelines")
+                result = self._file.writelines(lines)
+
+                self._evaluate_governance(
+                    "writelines", "completed", span=span,
+                    data=lines, bytes_written=bytes_count,
+                    lines_count=len(lines) if lines else 0,
+                )
+                return result
 
         def close(self):
-            if self._parent_span:
-                self._parent_span.set_attribute("file.total_bytes_read", self._bytes_read)
-                self._parent_span.set_attribute("file.total_bytes_written", self._bytes_written)
-                self._parent_span.end()
-            return self._file.close()
+            # Governance "completed" — reports what happened during file lifecycle
+            # Use try/finally to ensure file handle and span are always cleaned up
+            from .types import GovernanceBlockedError
+            gov_error = None
+            try:
+                self._evaluate_governance(
+                    "close", "completed", span=self._parent_span,
+                    bytes_read=self._bytes_read,
+                    bytes_written=self._bytes_written,
+                    operations=self._operations,
+                )
+            except GovernanceBlockedError as e:
+                gov_error = e
+            finally:
+                if self._parent_span:
+                    self._parent_span.set_attribute("file.total_bytes_read", self._bytes_read)
+                    self._parent_span.set_attribute("file.total_bytes_written", self._bytes_written)
+                    self._parent_span.end()
+                self._file.close()
+            if gov_error:
+                raise gov_error
 
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc_val, exc_tb):
-            self.close()
+            # Don't mask the original exception if close() also raises
+            try:
+                self.close()
+            except Exception:
+                if exc_type is None:
+                    raise
             return False
 
         def __iter__(self):
@@ -317,6 +557,36 @@ def setup_file_io_instrumentation() -> bool:
         span = _tracer.start_span("file.open")
         span.set_attribute("file.path", file_str)
         span.set_attribute("file.mode", mode)
+
+        # Governance "started" — can block file access before it happens
+        if _hook_gov.is_configured():
+            from .types import GovernanceBlockedError
+            try:
+                # Mark governed — we create our own started/completed span entries
+                _hook_gov.mark_span_governed(span)
+                open_span_data = _build_file_span_data(
+                    span, file_str, mode, "open", "started",
+                )
+                _hook_gov.evaluate_sync(
+                    span,
+                    hook_trigger={
+                        "type": "file_operation",
+                        "operation": "open",
+                        "file_path": file_str,
+                        "file_mode": mode,
+                        "stage": "started",
+                        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
+                    },
+                    identifier=file_str,
+                    span_data=open_span_data,
+                )
+            except GovernanceBlockedError:
+                span.set_attribute("error", True)
+                span.set_attribute("governance.blocked", True)
+                span.end()
+                raise
+            except Exception:
+                pass  # Non-governance errors are swallowed (fail_open handled inside evaluate_sync)
 
         try:
             file_obj = _original_open(file, mode, *args, **kwargs)
@@ -372,67 +642,66 @@ def setup_database_instrumentation(
     """
     instrumented = []
 
-    # psycopg2 (PostgreSQL sync)
+    # ── pymongo CommandListener first (must register before MongoClient creation) ──
+    if db_libraries is None or "pymongo" in db_libraries:
+        _db_gov.setup_pymongo_hooks()
+
+    # ── OTel dbapi instrumentors (governance via CursorTracer patch below) ──
     if db_libraries is None or "psycopg2" in db_libraries:
         try:
             from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
-
             Psycopg2Instrumentor().instrument()
             instrumented.append("psycopg2")
             logger.info("Instrumented: psycopg2")
         except ImportError:
-            logger.debug("psycopg2 instrumentation not available")
+            logger.debug("psycopg2 OTel instrumentation not available")
 
-    # asyncpg (PostgreSQL async)
     if db_libraries is None or "asyncpg" in db_libraries:
         try:
             from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-
             AsyncPGInstrumentor().instrument()
             instrumented.append("asyncpg")
             logger.info("Instrumented: asyncpg")
         except ImportError:
-            logger.debug("asyncpg instrumentation not available")
+            logger.debug("asyncpg OTel instrumentation not available")
 
-    # mysql-connector-python
     if db_libraries is None or "mysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.mysql import MySQLInstrumentor
-
             MySQLInstrumentor().instrument()
             instrumented.append("mysql")
             logger.info("Instrumented: mysql")
         except ImportError:
-            logger.debug("mysql instrumentation not available")
+            logger.debug("mysql OTel instrumentation not available")
 
-    # pymysql
     if db_libraries is None or "pymysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
-
             PyMySQLInstrumentor().instrument()
             instrumented.append("pymysql")
             logger.info("Instrumented: pymysql")
         except ImportError:
-            logger.debug("pymysql instrumentation not available")
+            logger.debug("pymysql OTel instrumentation not available")
 
-    # pymongo (MongoDB)
+    # pymongo OTel (CommandListener already registered above)
     if db_libraries is None or "pymongo" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
-
             PymongoInstrumentor().instrument()
             instrumented.append("pymongo")
             logger.info("Instrumented: pymongo")
         except ImportError:
-            logger.debug("pymongo instrumentation not available")
+            logger.debug("pymongo OTel instrumentation not available")
 
-    # redis
+    # redis — pass governance hooks to OTel instrumentor (native support)
     if db_libraries is None or "redis" in db_libraries:
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
 
-            RedisInstrumentor().instrument()
+            req_hook, resp_hook = _db_gov.setup_redis_hooks()
+            RedisInstrumentor().instrument(
+                request_hook=req_hook, response_hook=resp_hook,
+            )
             instrumented.append("redis")
             logger.info("Instrumented: redis")
         except ImportError:
@@ -461,6 +730,8 @@ def setup_database_instrumentation(
                         f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "
                         f"got {type(sqlalchemy_engine).__name__}"
                     )
+                # Governance hooks on engine events
+                _db_gov.setup_sqlalchemy_hooks(sqlalchemy_engine)
                 # Instrument the existing engine directly (registers event listeners)
                 SQLAlchemyInstrumentor().instrument(engine=sqlalchemy_engine)
                 logger.info("Instrumented: sqlalchemy (existing engine)")
@@ -471,6 +742,19 @@ def setup_database_instrumentation(
             instrumented.append("sqlalchemy")
         except ImportError:
             logger.debug("sqlalchemy instrumentation not available")
+
+    # ── Governance hooks for dbapi libs (must be AFTER instrumentors) ──
+    # OTel dbapi instrumentors silently discard request_hook/response_hook kwargs.
+    # Instead, we patch CursorTracer.traced_execution to inject governance hooks
+    # around the query_method call (runs inside the OTel span context).
+    dbapi_libs = {"psycopg2", "mysql", "pymysql"}
+    if any(lib in instrumented for lib in dbapi_libs):
+        if _db_gov.install_cursor_tracer_hooks():
+            logger.info("CursorTracer governance hooks installed for dbapi libs")
+
+    # asyncpg uses its own _do_execute (not CursorTracer) — needs separate wrapt hooks
+    if "asyncpg" in instrumented:
+        _db_gov.install_asyncpg_hooks()
 
     if instrumented:
         logger.info(f"Database instrumentation complete. Instrumented: {instrumented}")
@@ -530,6 +814,9 @@ def uninstrument_databases() -> None:
         SQLAlchemyInstrumentor().uninstrument()
     except (ImportError, Exception):
         pass
+
+    # Clean up DB governance hooks
+    _db_gov.uninstrument_all()
 
 
 def uninstrument_all() -> None:
@@ -601,6 +888,21 @@ def _requests_request_hook(span, request) -> None:
     if body:
         _span_processor.store_body(span.context.span_id, request_body=body)
 
+    # Hook-level governance evaluation
+    if _hook_gov.is_configured():
+        url = str(request.url) if hasattr(request, 'url') else None
+        if url and not _should_ignore_url(url):
+            _span_processor.mark_governed(span.context.span_id)
+            headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
+            method = request.method or "UNKNOWN"
+            span_data = _build_http_span_data(span, method, url, "started", request_body=body, request_headers=headers)
+            _hook_gov.evaluate_sync(
+                span,
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+                identifier=url,
+                span_data=span_data,
+            )
+
 
 def _requests_response_hook(span, request, response) -> None:
     """
@@ -614,12 +916,43 @@ def _requests_response_hook(span, request, response) -> None:
     if _span_processor is None:
         return
 
+    resp_body = None
+    resp_headers = None
     try:
+        resp_headers = dict(response.headers) if hasattr(response, 'headers') and response.headers else None
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
-            _span_processor.store_body(span.context.span_id, response_body=response.text)
+            resp_body = response.text
+            _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass
+
+    # Hook-level governance evaluation (response stage)
+    if _hook_gov.is_configured():
+        url = str(request.url) if hasattr(request, 'url') else None
+        if url and not _should_ignore_url(url):
+            req_headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
+            req_body = None
+            try:
+                if request.body:
+                    req_body = request.body
+                    if isinstance(req_body, bytes):
+                        req_body = req_body.decode("utf-8", errors="ignore")
+            except Exception:
+                pass
+            method = request.method or "UNKNOWN"
+            span_data = _build_http_span_data(
+                span, method, url, "completed",
+                request_body=req_body, request_headers=req_headers,
+                response_body=resp_body, response_headers=resp_headers,
+                http_status_code=getattr(response, 'status_code', None),
+            )
+            _hook_gov.evaluate_sync(
+                span,
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+                identifier=url,
+                span_data=span_data,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -646,6 +979,8 @@ def _httpx_request_hook(span, request) -> None:
     if url and _should_ignore_url(url):
         return
 
+    body = None
+    request_headers = None
     try:
         # Capture request headers from RequestInfo namedtuple
         if hasattr(request, 'headers') and request.headers:
@@ -653,10 +988,12 @@ def _httpx_request_hook(span, request) -> None:
             _span_processor.store_body(span.context.span_id, request_headers=request_headers)
 
         # Try to get request body - RequestInfo has a 'stream' attribute
-        body = None
+        # httpx ByteStream stores body in _stream (not body or _body)
         if hasattr(request, 'stream'):
             stream = request.stream
-            if hasattr(stream, 'body'):
+            if hasattr(stream, '_stream') and isinstance(stream._stream, bytes):
+                body = stream._stream
+            elif hasattr(stream, 'body'):
                 body = stream.body
             elif hasattr(stream, '_body'):
                 body = stream._body
@@ -685,6 +1022,22 @@ def _httpx_request_hook(span, request) -> None:
     except Exception:
         pass  # Best effort
 
+    # Store HTTP child span so _patched_send can use it for governance
+    _httpx_http_span.set(span)
+
+    # Hook-level governance evaluation
+    if _hook_gov.is_configured() and url:
+        _span_processor.mark_governed(span.context.span_id)
+        method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+        req_body = body if isinstance(body, str) else None
+        span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
+        _hook_gov.evaluate_sync(
+            span,
+            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+            identifier=url,
+            span_data=span_data,
+        )
+
 
 def _httpx_response_hook(span, request, response) -> None:
     """
@@ -707,11 +1060,13 @@ def _httpx_response_hook(span, request, response) -> None:
     if url and _should_ignore_url(url):
         return
 
+    resp_body = None
+    resp_headers = None
     try:
         # Capture response headers first (always available even for streaming)
         if hasattr(response, 'headers') and response.headers:
-            response_headers = dict(response.headers)
-            _span_processor.store_body(span.context.span_id, response_headers=response_headers)
+            resp_headers = dict(response.headers)
+            _span_processor.store_body(span.context.span_id, response_headers=resp_headers)
 
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
@@ -730,14 +1085,79 @@ def _httpx_response_hook(span, request, response) -> None:
             if body:
                 if isinstance(body, bytes):
                     body = body.decode("utf-8", errors="ignore")
-                _span_processor.store_body(span.context.span_id, response_body=body)
+                resp_body = body
+                _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass  # Best effort
 
+    # NOTE: "completed" governance evaluation is handled in _patched_send
+    # where request/response bodies are guaranteed to be available.
+
 
 async def _httpx_async_request_hook(span, request) -> None:
-    """Async version of request hook."""
-    _httpx_request_hook(span, request)
+    """Async version of request hook with async governance evaluation."""
+    if _span_processor is None:
+        return
+
+    # Check if URL should be ignored
+    url = str(request.url) if hasattr(request, 'url') else None
+    if url and _should_ignore_url(url):
+        return
+
+    body = None
+    request_headers = None
+    try:
+        # Capture request headers
+        if hasattr(request, 'headers') and request.headers:
+            request_headers = dict(request.headers)
+            _span_processor.store_body(span.context.span_id, request_headers=request_headers)
+
+        # Try to get request body
+        if hasattr(request, 'stream'):
+            stream = request.stream
+            if hasattr(stream, 'body'):
+                body = stream.body
+            elif hasattr(stream, '_body'):
+                body = stream._body
+            elif isinstance(stream, bytes):
+                body = stream
+
+        if not body and hasattr(request, '_content') and request._content:
+            body = request._content
+
+        if not body and hasattr(request, 'content'):
+            try:
+                content = request.content
+                if content:
+                    body = content
+            except Exception:
+                pass
+
+        if body:
+            if isinstance(body, bytes):
+                body = body.decode("utf-8", errors="ignore")
+            elif not isinstance(body, str):
+                body = str(body)
+            _span_processor.store_body(span.context.span_id, request_body=body)
+
+    except Exception:
+        pass  # Best effort
+
+    # Store HTTP child span so _patched_async_send can use it for governance
+    _httpx_http_span.set(span)
+
+    # Async hook-level governance evaluation
+    if _hook_gov.is_configured() and url:
+        _span_processor.mark_governed(span.context.span_id)
+        method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+        req_body = body if isinstance(body, str) else None
+        span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
+        await _hook_gov.evaluate_async(
+            span,
+            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+            identifier=url,
+            span_data=span_data,
+        )
 
 
 async def _httpx_async_response_hook(span, request, response) -> None:
@@ -750,11 +1170,13 @@ async def _httpx_async_response_hook(span, request, response) -> None:
     if url and _should_ignore_url(url):
         return
 
+    resp_body = None
+    resp_headers = None
     try:
         # Capture response headers
         if hasattr(response, 'headers') and response.headers:
-            response_headers = dict(response.headers)
-            _span_processor.store_body(span.context.span_id, response_headers=response_headers)
+            resp_headers = dict(response.headers)
+            _span_processor.store_body(span.context.span_id, response_headers=resp_headers)
 
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
@@ -778,7 +1200,8 @@ async def _httpx_async_response_hook(span, request, response) -> None:
                     pass
 
             if body:
-                _span_processor.store_body(span.context.span_id, response_body=body)
+                resp_body = body
+                _span_processor.store_body(span.context.span_id, response_body=resp_body)
 
         # Also try to get request body from the stream
         request_body = None
@@ -797,10 +1220,101 @@ async def _httpx_async_response_hook(span, request, response) -> None:
     except Exception:
         pass  # Best effort
 
+    # NOTE: "completed" governance evaluation is handled in _patched_async_send
+    # where request/response bodies are guaranteed to be available.
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # httpx body capture (patches Client.send)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _capture_httpx_request_data(request) -> tuple:
+    """Extract request body and headers from an httpx request.
+
+    Returns:
+        (request_body, request_headers) tuple. Either may be None.
+    """
+    request_body = None
+    request_headers = None
+    try:
+        if hasattr(request, '_content') and request._content:
+            request_body = request._content
+            if isinstance(request_body, bytes):
+                request_body = request_body.decode("utf-8", errors="ignore")
+        elif hasattr(request, 'content') and request.content:
+            request_body = request.content
+            if isinstance(request_body, bytes):
+                request_body = request_body.decode("utf-8", errors="ignore")
+        if hasattr(request, 'headers') and request.headers:
+            request_headers = dict(request.headers)
+    except Exception as e:
+        logger.debug(f"Failed to capture request body/headers: {e}")
+    return request_body, request_headers
+
+
+def _capture_httpx_response_data(response) -> tuple:
+    """Extract response body and headers from an httpx response.
+
+    Returns:
+        (response_body, response_headers) tuple. Either may be None.
+    """
+    response_body = None
+    response_headers = None
+    content_type = response.headers.get("content-type", "")
+    try:
+        if hasattr(response, 'headers') and response.headers:
+            response_headers = dict(response.headers)
+        if _is_text_content_type(content_type):
+            response_body = response.text
+    except (UnicodeDecodeError, Exception) as e:
+        logger.debug(f"Failed to capture response body: {e}")
+    return response_body, response_headers
+
+
+def _get_httpx_http_span():
+    """Retrieve and reset the HTTP span stored by request hooks.
+
+    Falls back to the current OTel span if no stored span is found.
+    """
+    http_span = _httpx_http_span.get(None)
+    _httpx_http_span.set(None)
+    if http_span is None:
+        from opentelemetry import trace
+        http_span = trace.get_current_span()
+    return http_span
+
+
+def _store_body_data(span_processor, http_span, request_body, request_headers,
+                     response_body, response_headers) -> None:
+    """Store captured HTTP body/header data against the span."""
+    try:
+        if http_span and hasattr(http_span, 'context') and http_span.context.span_id:
+            span_processor.store_body(
+                http_span.context.span_id,
+                request_body=request_body or None,
+                response_body=response_body or None,
+                request_headers=request_headers or None,
+                response_headers=response_headers or None,
+            )
+    except Exception as e:
+        logger.debug(f"Failed to store body: {e}")
+
+
+def _prepare_completed_governance(http_span, request, url, request_body, request_headers,
+                                  response_body, response_headers, status_code):
+    """Build 'completed' governance args. Returns tuple or None if not applicable."""
+    if not (_hook_gov.is_configured() and url and http_span):
+        return None
+    method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+    span_data = _build_http_span_data(
+        http_span, method, url, "completed",
+        request_body=request_body, request_headers=request_headers,
+        response_body=response_body, response_headers=response_headers,
+        http_status_code=status_code,
+    )
+    hook_trigger = {"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP}
+    return http_span, hook_trigger, url, span_data
 
 
 def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
@@ -817,114 +1331,43 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
         _original_async_send = httpx.AsyncClient.send
 
         def _patched_send(self, request, *args, **kwargs):
-            # Check if URL should be ignored
             url = str(request.url) if hasattr(request, 'url') else None
             if url and _should_ignore_url(url):
                 return _original_send(self, request, *args, **kwargs)
 
-            # Capture request body BEFORE sending
-            request_body = None
-            try:
-                if hasattr(request, '_content') and request._content:
-                    request_body = request._content
-                    if isinstance(request_body, bytes):
-                        request_body = request_body.decode("utf-8", errors="ignore")
-                elif hasattr(request, 'content') and request.content:
-                    request_body = request.content
-                    if isinstance(request_body, bytes):
-                        request_body = request_body.decode("utf-8", errors="ignore")
-            except Exception as e:
-                logger.debug(f"Failed to capture request body: {e}")
-
+            request_body, request_headers = _capture_httpx_request_data(request)
             response = _original_send(self, request, *args, **kwargs)
+            http_span = _get_httpx_http_span()
+            response_body, response_headers = _capture_httpx_response_data(response)
 
-            # Capture response body AFTER receiving (skip binary)
-            response_body = None
-            content_type = response.headers.get("content-type", "")
-            if _is_text_content_type(content_type):
-                try:
-                    response_body = response.text
-                except (UnicodeDecodeError, Exception) as e:
-                    logger.debug(f"Failed to capture response body: {e}")
-
-            # Store bodies if we have an active span
-            try:
-                from opentelemetry import trace
-
-                span = trace.get_current_span()
-                if span and hasattr(span, 'context') and span.context.span_id:
-                    if request_body:
-                        span_processor.store_body(span.context.span_id, request_body=request_body)
-                        logger.debug(f"Stored request body for span {span.context.span_id}")
-                    if response_body:
-                        span_processor.store_body(span.context.span_id, response_body=response_body)
-                        logger.debug(f"Stored response body for span {span.context.span_id}")
-            except Exception as e:
-                logger.debug(f"Failed to store body: {e}")
-
+            _store_body_data(span_processor, http_span, request_body, request_headers,
+                             response_body, response_headers)
+            gov_args = _prepare_completed_governance(
+                http_span, request, url, request_body, request_headers,
+                response_body, response_headers, getattr(response, 'status_code', None),
+            )
+            if gov_args:
+                _hook_gov.evaluate_sync(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
             return response
 
         async def _patched_async_send(self, request, *args, **kwargs):
-            # Check if URL should be ignored
             url = str(request.url) if hasattr(request, 'url') else None
             if url and _should_ignore_url(url):
                 return await _original_async_send(self, request, *args, **kwargs)
 
-            # Capture request body and headers BEFORE sending
-            request_body = None
-            request_headers = None
-            try:
-                if hasattr(request, '_content') and request._content:
-                    request_body = request._content
-                    if isinstance(request_body, bytes):
-                        request_body = request_body.decode("utf-8", errors="ignore")
-                elif hasattr(request, 'content') and request.content:
-                    request_body = request.content
-                    if isinstance(request_body, bytes):
-                        request_body = request_body.decode("utf-8", errors="ignore")
-                # Capture request headers
-                if hasattr(request, 'headers') and request.headers:
-                    request_headers = dict(request.headers)
-            except Exception as e:
-                logger.debug(f"Failed to capture request body/headers: {e}")
-
-            # Get current span BEFORE calling original send
-            # The OTel httpx instrumentation creates a child span for HTTP call
-            from opentelemetry import trace
-            parent_span = trace.get_current_span()
-
+            request_body, request_headers = _capture_httpx_request_data(request)
             response = await _original_async_send(self, request, *args, **kwargs)
+            http_span = _get_httpx_http_span()
+            response_body, response_headers = _capture_httpx_response_data(response)
 
-            # Capture response body and headers AFTER receiving (skip binary for body)
-            response_body = None
-            response_headers = None
-            content_type = response.headers.get("content-type", "")
-            try:
-                # Always capture response headers
-                if hasattr(response, 'headers') and response.headers:
-                    response_headers = dict(response.headers)
-                # Only capture body for text content types
-                if _is_text_content_type(content_type):
-                    response_body = response.text
-            except (UnicodeDecodeError, Exception) as e:
-                logger.debug(f"Failed to capture response body: {e}")
-
-            # Store bodies and headers against parent span (activity span)
-            # The HTTP span may have ended by now, but we stored it via hooks
-            try:
-                if parent_span and hasattr(parent_span, 'context') and parent_span.context.span_id:
-                    span_id = parent_span.context.span_id
-                    if request_body:
-                        span_processor.store_body(span_id, request_body=request_body)
-                    if response_body:
-                        span_processor.store_body(span_id, response_body=response_body)
-                    if request_headers:
-                        span_processor.store_body(span_id, request_headers=request_headers)
-                    if response_headers:
-                        span_processor.store_body(span_id, response_headers=response_headers)
-            except Exception:
-                pass  # Best effort
-
+            _store_body_data(span_processor, http_span, request_body, request_headers,
+                             response_body, response_headers)
+            gov_args = _prepare_completed_governance(
+                http_span, request, url, request_body, request_headers,
+                response_body, response_headers, getattr(response, 'status_code', None),
+            )
+            if gov_args:
+                await _hook_gov.evaluate_async(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
             return response
 
         httpx.Client.send = _patched_send
@@ -952,6 +1395,7 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
     if _span_processor is None:
         return
 
+    body = None
     try:
         if hasattr(request_info, "body") and request_info.body:
             body = request_info.body
@@ -960,6 +1404,31 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
             _span_processor.store_body(span.context.span_id, request_body=body)
     except Exception:
         pass
+
+    # Hook-level governance evaluation
+    if _hook_gov.is_configured():
+        # Reconstruct URL from pool and request_info
+        scheme = getattr(pool, 'scheme', 'http')
+        host = getattr(pool, 'host', 'unknown')
+        port = getattr(pool, 'port', None)
+        url_path = getattr(request_info, 'url', getattr(request_info, 'request_url', '/'))
+        if port and port not in (80, 443):
+            url = f"{scheme}://{host}:{port}{url_path}"
+        else:
+            url = f"{scheme}://{host}{url_path}"
+
+        if not _should_ignore_url(url):
+            _span_processor.mark_governed(span.context.span_id)
+            method = getattr(request_info, 'method', 'UNKNOWN')
+            headers = dict(request_info.headers) if hasattr(request_info, 'headers') and request_info.headers else None
+            req_body = body if isinstance(body, str) else None
+            span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=headers)
+            _hook_gov.evaluate_sync(
+                span,
+                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+                identifier=url,
+                span_data=span_data,
+            )
 
 
 def _urllib3_response_hook(span, pool, response) -> None:
@@ -974,16 +1443,45 @@ def _urllib3_response_hook(span, pool, response) -> None:
     if _span_processor is None:
         return
 
+    resp_body = None
+    resp_headers = None
     try:
+        resp_headers = dict(response.headers) if hasattr(response, 'headers') and response.headers else None
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
             body = response.data
             if isinstance(body, bytes):
                 body = body.decode("utf-8", errors="ignore")
             if body:
-                _span_processor.store_body(span.context.span_id, response_body=body)
+                resp_body = body
+                _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass
+
+    # Hook-level governance evaluation (response stage)
+    if _hook_gov.is_configured():
+        # Reconstruct URL from pool
+        scheme = getattr(pool, 'scheme', 'http')
+        host = getattr(pool, 'host', 'unknown')
+        port = getattr(pool, 'port', None)
+        if port and port not in (80, 443):
+            url = f"{scheme}://{host}:{port}/"
+        else:
+            url = f"{scheme}://{host}/"
+
+        if not _should_ignore_url(url):
+            status_code = getattr(response, 'status', None)
+            span_data = _build_http_span_data(
+                span, "UNKNOWN", url, "completed",
+                response_body=resp_body, response_headers=resp_headers,
+                http_status_code=status_code,
+            )
+            _hook_gov.evaluate_sync(
+                span,
+                hook_trigger={"type": "http_request", "method": "UNKNOWN", "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
+                identifier=url,
+                span_data=span_data,
+            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

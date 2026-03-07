@@ -65,6 +65,10 @@ class WorkflowSpanProcessor:
         self._trace_to_activity: Dict[int, str] = {}  # trace_id (int) -> activity_id
         self._body_data: Dict[int, dict] = {}  # span_id (int) -> {request_body, response_body}
         self._verdicts: Dict[str, dict] = {}  # workflow_id -> {"verdict": Verdict, "reason": str}
+        self._activity_context: Dict[str, dict] = {}  # "{workflow_id}:{activity_id}" -> event data
+        self._governed_span_ids: set = set()  # span_ids with governance hooks (skip on_end buffering)
+        self._aborted_activities: Dict[str, str] = {}  # "{workflow_id}:{activity_id}" → abort reason
+        self._halt_requests: Dict[str, str] = {}  # "{workflow_id}:{activity_id}" → halt reason
         self._lock = threading.Lock()
 
     def _should_ignore_span(self, span: "ReadableSpan") -> bool:
@@ -155,6 +159,11 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._buffers.pop(workflow_id, None)
             self._verdicts.pop(workflow_id, None)
+            # Clean abort and halt flags for this workflow (prevent memory leak)
+            for store in (self._aborted_activities, self._halt_requests):
+                stale = [k for k in store if k.startswith(f"{workflow_id}:")]
+                for k in stale:
+                    del store[k]
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Verdict Storage (called by workflow interceptor for SignalReceived stop)
@@ -177,6 +186,112 @@ class WorkflowSpanProcessor:
         """Clear stored verdict for a workflow."""
         with self._lock:
             self._verdicts.pop(workflow_id, None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Activity Context Storage (for hook-level governance in otel_setup.py)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_activity_context(self, workflow_id: str, activity_id: str, context: dict) -> None:
+        """Store buffered ActivityStarted event data for hook-level governance.
+
+        Called by activity_interceptor before executing the actual activity.
+        OTel hooks read this to construct governance payloads.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            activity_id: Temporal activity ID
+            context: The ActivityStarted event payload dict
+        """
+        with self._lock:
+            key = f"{workflow_id}:{activity_id}"
+            self._activity_context[key] = context
+
+    def get_activity_context_by_trace(self, trace_id: int) -> Optional[dict]:
+        """Look up activity context using the trace_id from a child span.
+
+        OTel hooks receive a span whose trace_id maps to a workflow_id + activity_id
+        via the existing register_trace() mappings.
+
+        Args:
+            trace_id: OTel trace ID (integer)
+
+        Returns:
+            Activity context dict, or None
+        """
+        with self._lock:
+            workflow_id = self._trace_to_workflow.get(trace_id)
+            activity_id = self._trace_to_activity.get(trace_id)
+            if workflow_id and activity_id:
+                key = f"{workflow_id}:{activity_id}"
+                return self._activity_context.get(key)
+            return None
+
+    def clear_activity_context(self, workflow_id: str, activity_id: str) -> None:
+        """Clear buffered activity context after activity completes.
+
+        Called by activity_interceptor in the finally block of execute_activity.
+
+        Args:
+            workflow_id: Temporal workflow ID
+            activity_id: Temporal activity ID
+        """
+        with self._lock:
+            key = f"{workflow_id}:{activity_id}"
+            self._activity_context.pop(key, None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Activity Abort Signal (block subsequent hooks after require_approval)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_activity_abort(self, workflow_id: str, activity_id: str, reason: str) -> None:
+        """Set abort flag for an activity. Subsequent hooks will raise immediately."""
+        with self._lock:
+            self._aborted_activities[f"{workflow_id}:{activity_id}"] = reason
+
+    def get_activity_abort(self, workflow_id: str, activity_id: str) -> Optional[str]:
+        """Check if activity is aborted. Returns reason string or None."""
+        with self._lock:
+            return self._aborted_activities.get(f"{workflow_id}:{activity_id}")
+
+    def clear_activity_abort(self, workflow_id: str, activity_id: str) -> None:
+        """Clear abort flag for an activity (on retry or completion)."""
+        with self._lock:
+            self._aborted_activities.pop(f"{workflow_id}:{activity_id}", None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Halt Request (hook → activity interceptor communication for HALT verdict)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_halt_requested(self, workflow_id: str, activity_id: str, reason: str) -> None:
+        """Hook sets this when HALT verdict received. Activity interceptor calls terminate()."""
+        with self._lock:
+            self._halt_requests[f"{workflow_id}:{activity_id}"] = reason
+
+    def get_halt_requested(self, workflow_id: str, activity_id: str) -> Optional[str]:
+        """Check if HALT was requested by a hook. Returns reason or None."""
+        with self._lock:
+            return self._halt_requests.get(f"{workflow_id}:{activity_id}")
+
+    def clear_halt_requested(self, workflow_id: str, activity_id: str) -> None:
+        """Clear halt request flag."""
+        with self._lock:
+            self._halt_requests.pop(f"{workflow_id}:{activity_id}", None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Governed Span Tracking (skip on_end buffering for governance-handled spans)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def mark_governed(self, span_id: int) -> None:
+        """Mark a span as governed by hooks (started/completed spans created by hooks).
+
+        When a span is governed, on_end() will skip buffering it because
+        governance hooks already create separate started/completed span entries.
+
+        Args:
+            span_id: OTel span ID (integer form)
+        """
+        with self._lock:
+            self._governed_span_ids.add(span_id)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Body Storage (called by HTTP hooks in otel_setup.py)
@@ -258,33 +373,43 @@ class WorkflowSpanProcessor:
         workflow_id = span.attributes.get("temporal.workflow_id") if span.attributes else None
         activity_id = span.attributes.get("temporal.activity_id") if span.attributes else None
 
-        # Fallback: look up by trace_id (for child spans like HTTP calls)
-        if not workflow_id:
-            with self._lock:
+        span_id = span.context.span_id
+
+        # Single lock acquisition for all lookups and governed-span check
+        with self._lock:
+            # Fallback: look up by trace_id (for child spans like HTTP calls)
+            if not workflow_id:
                 workflow_id = self._trace_to_workflow.get(span.context.trace_id)
-                # Also get activity_id from trace mapping for child spans
                 if not activity_id:
                     activity_id = self._trace_to_activity.get(span.context.trace_id)
 
-        if workflow_id:
-            with self._lock:
-                buffer = self._buffers.get(workflow_id)
+            # Skip buffering for governed spans — governance hooks already
+            # create separate "started" and "completed" span entries.
+            is_governed = span_id in self._governed_span_ids
+            if is_governed:
+                self._governed_span_ids.discard(span_id)
+                self._body_data.pop(span_id, None)
 
-            if buffer:
-                span_data = self._extract_span_data(span)
+            # Skip OTel pymongo spans when wrapt governance wrapper is active —
+            # wrapt creates its own governance span entries with unique span_ids.
+            if not is_governed and span.attributes and span.attributes.get("db.system") == "mongodb":
+                try:
+                    from . import db_governance_hooks
+                    if db_governance_hooks.is_pymongo_wrapt_active():
+                        is_governed = True
+                except ImportError:
+                    pass
 
-                # Set activity_id for filtering later
-                if activity_id:
-                    span_data["activity_id"] = activity_id
+            buffer = self._buffers.get(workflow_id) if workflow_id and not is_governed else None
+            body_data = self._body_data.pop(span_id, None) if buffer else None
 
-                # Merge body data (stored separately, NOT in OTel span)
-                span_id = span.context.span_id
-                with self._lock:
-                    if span_id in self._body_data:
-                        body_data = self._body_data.pop(span_id)
-                        span_data.update(body_data)
-
-                buffer.spans.append(span_data)
+        if buffer:
+            span_data = self._extract_span_data(span)
+            if activity_id:
+                span_data["activity_id"] = activity_id
+            if body_data:
+                span_data.update(body_data)
+            buffer.spans.append(span_data)
 
         # Always forward to fallback (OTel exporter) - WITHOUT body
         if self.fallback:
@@ -334,7 +459,12 @@ class WorkflowSpanProcessor:
         if span.end_time and span.start_time:
             duration_ns = span.end_time - span.start_time
 
-        return {
+        attributes = dict(span.attributes) if span.attributes else {}
+
+        # Promote governance stage to root level (OpenBox Core expects it there)
+        stage = attributes.pop("openbox.governance.stage", None)
+
+        result = {
             "span_id": span_id_hex,
             "trace_id": trace_id_hex,
             "parent_span_id": parent_span_id,
@@ -343,11 +473,14 @@ class WorkflowSpanProcessor:
             "start_time": span.start_time,
             "end_time": span.end_time,
             "duration_ns": duration_ns,
-            "attributes": dict(span.attributes) if span.attributes else {},
+            "attributes": attributes,
             "status": status,
             "events": events,
             # request_body and response_body will be merged from _body_data
         }
+        if stage:
+            result["stage"] = stage
+        return result
 
     def shutdown(self) -> None:
         """Shutdown the processor."""

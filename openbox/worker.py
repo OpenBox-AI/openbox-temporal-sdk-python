@@ -158,6 +158,10 @@ def create_openbox_worker(
     # Initialize OpenBox
     print(f"Initializing OpenBox SDK with URL: {openbox_url}")
 
+    # 0. Store Temporal client reference for HALT terminate calls
+    from .activities import set_temporal_client
+    set_temporal_client(client)
+
     # 1. Validate API key (also validates URL security - HTTPS required for non-localhost)
     validate_api_key(
         api_url=openbox_url,
@@ -172,11 +176,15 @@ def create_openbox_worker(
     from .otel_setup import setup_opentelemetry_for_governance
     setup_opentelemetry_for_governance(
         span_processor,
+        api_url=openbox_url,
+        api_key=openbox_api_key,
         ignored_urls=[openbox_url],
         instrument_databases=instrument_databases,
         db_libraries=db_libraries,
         instrument_file_io=instrument_file_io,
         sqlalchemy_engine=sqlalchemy_engine,
+        api_timeout=governance_timeout,
+        on_api_error=governance_policy,
     )
 
     # 4. Create governance config
@@ -223,6 +231,7 @@ def create_openbox_worker(
     print(f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}")
     print(f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}")
     print(f"  - Approval polling: {'enabled' if hitl_enabled else 'disabled'}")
+    print("  - Hook governance: enabled")
 
     # Create and return Worker
     return Worker(
