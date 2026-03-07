@@ -72,6 +72,7 @@ from opentelemetry import trace
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
 from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
+from .activities import _terminate_workflow_for_halt
 
 
 def _serialize_value(value: Any) -> Any:
@@ -183,24 +184,31 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity.logger.info(f"Checking verdict for workflow {info.workflow_id}: buffer={buffer is not None}, buffer.verdict={buffer.verdict if buffer else None}, pending_verdict={pending_verdict}")
 
         if pending_verdict and pending_verdict.get("verdict") and Verdict.from_string(pending_verdict.get("verdict")).should_stop():
-            from temporalio.exceptions import ApplicationError
+            pending_v = Verdict.from_string(pending_verdict.get("verdict"))
             reason = pending_verdict.get("reason") or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from signal): {reason}")
-            raise ApplicationError(
-                f"Governance blocked: {reason}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            if pending_v == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         if buffer and buffer.verdict and buffer.verdict.should_stop():
-            from temporalio.exceptions import ApplicationError
             reason = buffer.verdict_reason or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from buffer): {reason}")
-            raise ApplicationError(
-                f"Governance blocked: {reason}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            if buffer.verdict == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         # ═══ Check for pending approval on retry ═══
         # If there's a pending approval, poll OpenBox Core for status
@@ -332,12 +340,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # If governance returned BLOCK/HALT, fail the activity before it runs
         if governance_verdict and governance_verdict.verdict.should_stop():
-            from temporalio.exceptions import ApplicationError
-            raise ApplicationError(
-                f"Governance blocked: {governance_verdict.reason or 'No reason provided'}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            reason = governance_verdict.reason or "No reason provided"
+            if governance_verdict.verdict == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         # Check guardrails validation_passed - if False, stop the activity
         if (
@@ -399,7 +411,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             redacted = governance_verdict.guardrails_result.redacted_input
             activity.logger.info(f"Applying guardrails redaction to activity input")
-            activity.logger.info(f"Redacted input type: {type(redacted).__name__}, value preview: {str(redacted)[:200]}")
+            activity.logger.debug(f"Redacted input type: {type(redacted).__name__}")
 
             # Normalize redacted_input to a list (matching original args structure)
             if isinstance(redacted, dict):
@@ -422,7 +434,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             activity.logger.info(f"Updated {type(original_arg).__name__} fields with redacted values")
                             # Verify the update
                             if hasattr(original_arg, 'prompt'):
-                                activity.logger.info(f"After update, prompt = {getattr(original_arg, 'prompt', 'N/A')}")
+                                activity.logger.debug(f"After update, prompt redacted")
                         else:
                             # Non-dataclass: replace directly
                             original_args[i] = redacted_item
@@ -440,7 +452,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if input.args:
             first_arg = input.args[0]
             if hasattr(first_arg, 'prompt'):
-                activity.logger.info(f"BEFORE ACTIVITY EXECUTION - input.args[0].prompt = {first_arg.prompt}")
+                activity.logger.debug(f"BEFORE ACTIVITY EXECUTION - prompt field present")
 
         status = "completed"
         error = None
@@ -489,10 +501,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         non_retryable=False,
                     )
 
-                # BLOCK/HALT → non-retryable, activity dies
+                # Hook-level BLOCK/HALT → raise non-retryable error to stop activity.
+                # Preserve verdict in error type for the activity interceptor to
+                # differentiate later (e.g. terminate workflow for HALT).
+                error_type = "GovernanceHalt" if e.verdict in ("halt", "stop") else "GovernanceBlock"
                 raise ApplicationError(
-                    f"Hook governance blocked: {e.reason}",
-                    type="GovernanceStop",
+                    f"Hook governance {e.verdict}: {e.reason}",
+                    type=error_type,
                     non_retryable=True,
                 )
             except Exception as e:
@@ -504,6 +519,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                 # Check abort flag before clearing (determines if we skip ActivityCompleted)
                 was_aborted = self._span_processor.get_activity_abort(info.workflow_id, info.activity_id) is not None
+                # Check if hook requested HALT → call terminate() here in async context
+                halt_reason = self._span_processor.get_halt_requested(info.workflow_id, info.activity_id)
+                if halt_reason:
+                    self._span_processor.clear_halt_requested(info.workflow_id, info.activity_id)
+                    await _terminate_workflow_for_halt(info.workflow_id, halt_reason)
                 # Clear abort flag and buffered activity context
                 self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
                 self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
@@ -535,12 +555,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                 # If governance returned BLOCK/HALT, fail the activity after it completes
                 if completed_verdict and completed_verdict.verdict.should_stop():
-                    from temporalio.exceptions import ApplicationError
-                    raise ApplicationError(
-                        f"Governance blocked: {completed_verdict.reason or 'No reason provided'}",
-                        type="GovernanceStop",
-                        non_retryable=True,
-                    )
+                    reason = completed_verdict.reason or "No reason provided"
+                    if completed_verdict.verdict == Verdict.HALT:
+                        await _terminate_workflow_for_halt(info.workflow_id, reason)
+                    else:
+                        from temporalio.exceptions import ApplicationError
+                        raise ApplicationError(
+                            f"Governance blocked: {reason}",
+                            type="GovernanceBlock",
+                            non_retryable=True,
+                        )
 
                 # Check guardrails validation_passed for output - if False, stop
                 if (
@@ -677,9 +701,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if response.status_code == 200:
                     try:
                         data = response.json()
-                        # Debug: Log raw response
-                        activity.logger.info(f"Raw governance response: {data}")
-                        activity.logger.info(f"guardrails_result in response: {'guardrails_result' in data}, value: {data.get('guardrails_result')}")
+                        activity.logger.info(f"Governance response: verdict={data.get('verdict') or data.get('action', 'unknown')}, reason={data.get('reason')}")
 
                         verdict = GovernanceVerdictResponse.from_dict(data)
 
