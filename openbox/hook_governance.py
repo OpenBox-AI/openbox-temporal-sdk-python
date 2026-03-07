@@ -249,7 +249,13 @@ def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> 
     verdict_str = (data.get("verdict") or data.get("action", "continue")).lower().replace("-", "_")
     if verdict_str in ("stop", "block", "halt"):
         if span:
-            _set_activity_abort(span, data.get("reason", "Blocked by governance"))
+            reason = data.get("reason", "Blocked by governance")
+            ids = _resolve_activity_ids(span)
+            if ids:
+                _span_processor.set_activity_abort(ids[0], ids[1], reason)
+                # For HALT, also set halt-requested flag so activity interceptor calls terminate()
+                if verdict_str in ("halt", "stop") and hasattr(_span_processor, 'set_halt_requested'):
+                    _span_processor.set_halt_requested(ids[0], ids[1], reason)
         raise GovernanceBlockedError(
             verdict_str, data.get("reason", "Blocked by governance"), identifier
         )
