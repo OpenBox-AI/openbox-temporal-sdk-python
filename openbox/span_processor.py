@@ -68,6 +68,7 @@ class WorkflowSpanProcessor:
         self._activity_context: Dict[str, dict] = {}  # "{workflow_id}:{activity_id}" -> event data
         self._governed_span_ids: set = set()  # span_ids with governance hooks (skip on_end buffering)
         self._aborted_activities: Dict[str, str] = {}  # "{workflow_id}:{activity_id}" → abort reason
+        self._halt_requests: Dict[str, str] = {}  # "{workflow_id}:{activity_id}" → halt reason
         self._lock = threading.Lock()
 
     def _should_ignore_span(self, span: "ReadableSpan") -> bool:
@@ -158,10 +159,11 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._buffers.pop(workflow_id, None)
             self._verdicts.pop(workflow_id, None)
-            # Clean abort flags for this workflow (prevent memory leak)
-            stale = [k for k in self._aborted_activities if k.startswith(f"{workflow_id}:")]
-            for k in stale:
-                del self._aborted_activities[k]
+            # Clean abort and halt flags for this workflow (prevent memory leak)
+            for store in (self._aborted_activities, self._halt_requests):
+                stale = [k for k in store if k.startswith(f"{workflow_id}:")]
+                for k in stale:
+                    del store[k]
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Verdict Storage (called by workflow interceptor for SignalReceived stop)
@@ -255,6 +257,25 @@ class WorkflowSpanProcessor:
         """Clear abort flag for an activity (on retry or completion)."""
         with self._lock:
             self._aborted_activities.pop(f"{workflow_id}:{activity_id}", None)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Halt Request (hook → activity interceptor communication for HALT verdict)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def set_halt_requested(self, workflow_id: str, activity_id: str, reason: str) -> None:
+        """Hook sets this when HALT verdict received. Activity interceptor calls terminate()."""
+        with self._lock:
+            self._halt_requests[f"{workflow_id}:{activity_id}"] = reason
+
+    def get_halt_requested(self, workflow_id: str, activity_id: str) -> Optional[str]:
+        """Check if HALT was requested by a hook. Returns reason or None."""
+        with self._lock:
+            return self._halt_requests.get(f"{workflow_id}:{activity_id}")
+
+    def clear_halt_requested(self, workflow_id: str, activity_id: str) -> None:
+        """Clear halt request flag."""
+        with self._lock:
+            self._halt_requests.pop(f"{workflow_id}:{activity_id}", None)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Governed Span Tracking (skip on_end buffering for governance-handled spans)

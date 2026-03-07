@@ -100,6 +100,8 @@ def mock_span_processor():
     processor.get_verdict.return_value = None
     processor.get_pending_body.return_value = None
     processor.get_activity_abort.return_value = None
+    processor.get_halt_requested.return_value = None
+    processor.clear_halt_requested = MagicMock()
     return processor
 
 
@@ -599,7 +601,7 @@ class TestActivityInterceptor:
     async def test_checks_pending_verdict_raises_governance_stop(
         self, mock_span_processor, mock_activity_info
     ):
-        """Test that pending BLOCK verdict raises GovernanceStop."""
+        """Test that pending BLOCK verdict raises GovernanceBlock."""
         mock_span_processor.get_verdict.return_value = {
             "verdict": "block",
             "reason": "Blocked by policy",
@@ -629,7 +631,7 @@ class TestActivityInterceptor:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert "Governance blocked" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -834,10 +836,10 @@ class TestActivityInterceptor:
         assert payload["event_type"] == "ActivityStarted"
 
     @pytest.mark.asyncio
-    async def test_raises_governance_stop_on_block_verdict(
+    async def test_raises_governance_block_on_block_verdict(
         self, mock_span_processor, mock_activity_info
     ):
-        """Test that GovernanceStop is raised for BLOCK verdict."""
+        """Test that GovernanceBlock is raised for BLOCK verdict."""
         mock_span_processor.get_buffer.return_value = None
         mock_span_processor.get_verdict.return_value = None
 
@@ -882,7 +884,7 @@ class TestActivityInterceptor:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert "Policy violation" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -2024,7 +2026,7 @@ class TestEdgeCases:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceHalt"
             assert "Workflow halted by policy" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -2114,6 +2116,8 @@ class TestHookLevelRequireApproval:
         processor.get_buffer.return_value = None
         processor.get_verdict.return_value = None
         processor.get_pending_body.return_value = None
+        processor.get_halt_requested.return_value = None
+        processor.clear_halt_requested = MagicMock()
         return processor
 
     def _make_interceptor(self, mock_span_processor, config=None, activity_raises=None):
@@ -2184,10 +2188,10 @@ class TestHookLevelRequireApproval:
             assert buffer.pending_approval is True
 
     @pytest.mark.asyncio
-    async def test_block_verdict_raises_governance_stop(
+    async def test_block_verdict_raises_governance_block(
         self, mock_span_processor, mock_activity_info
     ):
-        """Hook BLOCK → non-retryable GovernanceStop (unchanged behavior)."""
+        """Hook BLOCK → non-retryable GovernanceBlock."""
         mock_span_processor.get_buffer.return_value = None
 
         error = GovernanceBlockedError("block", "Policy violation", "https://api.example.com")
@@ -2212,14 +2216,14 @@ class TestHookLevelRequireApproval:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
-    async def test_require_approval_hitl_disabled_raises_governance_stop(
+    async def test_require_approval_hitl_disabled_raises_governance_block(
         self, mock_span_processor, mock_activity_info
     ):
-        """When HITL disabled, REQUIRE_APPROVAL falls through to GovernanceStop."""
+        """When HITL disabled, REQUIRE_APPROVAL falls through to GovernanceBlock."""
         config = GovernanceConfig(send_activity_start_event=False, hitl_enabled=False)
         error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
         interceptor = self._make_interceptor(mock_span_processor, config=config, activity_raises=error)
@@ -2243,14 +2247,14 @@ class TestHookLevelRequireApproval:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
-    async def test_require_approval_skip_hitl_activity_raises_governance_stop(
+    async def test_require_approval_skip_hitl_activity_raises_governance_block(
         self, mock_span_processor, mock_activity_info
     ):
-        """When activity is in skip_hitl_activity_types, REQUIRE_APPROVAL → GovernanceStop."""
+        """When activity is in skip_hitl_activity_types, REQUIRE_APPROVAL → GovernanceBlock."""
         config = GovernanceConfig(
             send_activity_start_event=False,
             hitl_enabled=True,
@@ -2278,7 +2282,7 @@ class TestHookLevelRequireApproval:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio

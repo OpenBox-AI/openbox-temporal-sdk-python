@@ -158,6 +158,10 @@ def create_openbox_worker(
     # Initialize OpenBox
     print(f"Initializing OpenBox SDK with URL: {openbox_url}")
 
+    # 0. Store Temporal client reference for HALT terminate calls
+    from .activities import set_temporal_client
+    set_temporal_client(client)
+
     # 1. Validate API key (also validates URL security - HTTPS required for non-localhost)
     validate_api_key(
         api_url=openbox_url,
