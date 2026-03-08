@@ -819,6 +819,7 @@ def _setup_pymongo_wrapt_hooks() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _redis_span_meta: Dict[int, Tuple[float, str, str, str, int, str]] = {}
+_REDIS_META_MAX = 1000
 
 
 def setup_redis_hooks() -> Tuple[Callable, Callable]:
@@ -846,6 +847,8 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
 
         started_sd = _build_db_span_data(span, "redis", db_name, command, statement, host, port, "started")
         _evaluate_started("redis", db_name, command, statement, host, port, span_data=started_sd)
+        if len(_redis_span_meta) >= _REDIS_META_MAX:
+            _redis_span_meta.clear()
         _redis_span_meta[id(span)] = (time.perf_counter(), command, statement, host, port, db_name)
 
     def _response_hook(span, instance, response):
@@ -874,6 +877,7 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
 
 # Per-cursor timing for SQLAlchemy (maps (conn_id, cursor_id) → start time)
 _sa_timings: Dict[Tuple[int, int], float] = {}
+_SA_TIMINGS_MAX = 1000
 
 
 def _get_sa_db_system(engine) -> str:
@@ -900,6 +904,8 @@ def setup_sqlalchemy_hooks(engine) -> None:
         return
 
     def _before_execute(conn, cursor, statement, parameters, context, executemany):
+        if len(_sa_timings) >= _SA_TIMINGS_MAX:
+            _sa_timings.clear()
         _sa_timings[(id(conn), id(cursor))] = time.perf_counter()
         db_system = _get_sa_db_system(conn.engine)
         db_name = conn.engine.url.database

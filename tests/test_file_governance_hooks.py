@@ -13,7 +13,7 @@ import pytest
 
 import openbox.hook_governance as hook_gov
 import openbox.otel_setup as otel_setup
-from openbox.types import GovernanceBlockedError, WorkflowSpanBuffer
+from openbox.types import GovernanceBlockedError, Verdict, WorkflowSpanBuffer
 
 
 @pytest.fixture(autouse=True)
@@ -61,12 +61,12 @@ def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
 
 @contextmanager
 def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
-    """Mock httpx.Client for governance API calls.
+    """Mock persistent httpx client for governance API calls.
 
     Args:
         verdict: Governance verdict to return ("allow", "block", "halt").
         reason: Optional reason string for block/halt verdicts.
-        side_effect: If set, __enter__ raises this instead of returning a client.
+        side_effect: If set, post() raises this instead of returning a response.
 
     Yields:
         mock_instance: The mock client instance (access .post.call_args_list for assertions).
@@ -78,14 +78,14 @@ def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
         response_data["reason"] = reason
     response.json.return_value = response_data
 
-    with patch("httpx.Client") as mock_client_class:
-        mock_instance = MagicMock()
-        if side_effect:
-            mock_client_class.return_value.__enter__ = MagicMock(side_effect=side_effect)
-        else:
-            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_instance)
-        mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
+    mock_instance = MagicMock()
+    if side_effect:
+        mock_instance.post.side_effect = side_effect
+    else:
         mock_instance.post.return_value = response
+    mock_instance.is_closed = False
+
+    with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
         yield mock_instance
 
 
@@ -122,7 +122,7 @@ class TestFileGovernanceStarted:
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     open(tmp_path, "r")
 
-                assert exc_info.value.verdict == "block"
+                assert exc_info.value.verdict == Verdict.BLOCK
                 assert exc_info.value.reason == "Forbidden path"
                 assert exc_info.value.url == tmp_path
         finally:
@@ -138,7 +138,7 @@ class TestFileGovernanceStarted:
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     open(tmp_path, "r")
 
-                assert exc_info.value.verdict == "halt"
+                assert exc_info.value.verdict == Verdict.HALT
         finally:
             os.unlink(tmp_path)
 
@@ -212,13 +212,13 @@ class TestFileGovernanceSkipPaths:
         """Files matching skip patterns should not trigger governance."""
         _setup_governance()
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance._get_sync_client") as mock_get:
             try:
                 open("__pycache__/test.pyc", "r")
             except (FileNotFoundError, OSError):
                 pass  # File doesn't exist — we just check no governance call
 
-            mock_client_class.assert_not_called()
+            mock_get.assert_not_called()
 
 
 class TestFileGovernanceDisabled:
@@ -238,10 +238,10 @@ class TestFileGovernanceDisabled:
         otel_setup.setup_file_io_instrumentation()
 
         try:
-            with patch("httpx.Client") as mock_client_class:
+            with patch("openbox.hook_governance._get_sync_client") as mock_get:
                 with open(tmp_path, "r") as f:
                     f.read()
-                mock_client_class.assert_not_called()
+                mock_get.assert_not_called()
         finally:
             os.unlink(tmp_path)
 
@@ -253,10 +253,10 @@ class TestFileGovernanceDisabled:
         otel_setup.setup_file_io_instrumentation()
 
         try:
-            with patch("httpx.Client") as mock_client_class:
+            with patch("openbox.hook_governance._get_sync_client") as mock_get:
                 with open(tmp_path, "r") as f:
                     f.read()
-                mock_client_class.assert_not_called()
+                mock_get.assert_not_called()
         finally:
             os.unlink(tmp_path)
 
@@ -331,17 +331,16 @@ class TestFileReadGovernance:
                     response.json.return_value = {"verdict": "allow"}
                 return response
 
-            with patch("httpx.Client") as mock_client_class:
-                mock_instance = MagicMock()
-                mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_instance)
-                mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
-                mock_instance.post.side_effect = conditional_response
+            mock_instance = MagicMock()
+            mock_instance.post.side_effect = conditional_response
+            mock_instance.is_closed = False
 
+            with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     with open(tmp_path, "r") as f:
                         f.read()
 
-                assert exc_info.value.verdict == "block"
+                assert exc_info.value.verdict == Verdict.BLOCK
                 assert exc_info.value.reason == "Read blocked"
         finally:
             os.unlink(tmp_path)
@@ -410,12 +409,11 @@ class TestFileWriteGovernance:
                     response.json.return_value = {"verdict": "allow"}
                 return response
 
-            with patch("httpx.Client") as mock_client_class:
-                mock_instance = MagicMock()
-                mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_instance)
-                mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
-                mock_instance.post.side_effect = conditional_response
+            mock_instance = MagicMock()
+            mock_instance.post.side_effect = conditional_response
+            mock_instance.is_closed = False
 
+            with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     with open(tmp_path, "w") as f:
                         f.write("forbidden")
