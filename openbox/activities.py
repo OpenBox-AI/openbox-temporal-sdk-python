@@ -29,14 +29,13 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 
-def _rfc3339_now() -> str:
-    """Return current UTC time in RFC3339 format."""
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .types import Verdict
+from .hook_governance import build_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -132,11 +131,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
             response = await client.post(
                 f"{api_url}/api/v1/governance/evaluate",
                 json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "OpenBox-SDK/1.0",
-                },
+                headers=build_auth_headers(api_key),
             )
 
             if response.status_code == 200:

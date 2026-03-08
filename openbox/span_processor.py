@@ -149,9 +149,10 @@ class WorkflowSpanProcessor:
 
     def unregister_workflow(self, workflow_id: str) -> None:
         """
-        Remove buffer for a workflow (alias for remove_buffer).
+        Clean all state associated with a workflow.
 
-        Called when clearing stale buffers from previous workflow runs.
+        Called when workflow completes or terminates. Cleans buffers, verdicts,
+        abort/halt flags, activity context, and trace mappings to prevent memory leaks.
 
         Args:
             workflow_id: Temporal workflow ID
@@ -159,11 +160,16 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._buffers.pop(workflow_id, None)
             self._verdicts.pop(workflow_id, None)
-            # Clean abort and halt flags for this workflow (prevent memory leak)
-            for store in (self._aborted_activities, self._halt_requests):
+            # Clean abort, halt, and activity context for this workflow
+            for store in (self._aborted_activities, self._halt_requests, self._activity_context):
                 stale = [k for k in store if k.startswith(f"{workflow_id}:")]
                 for k in stale:
                     del store[k]
+            # Clean trace mappings pointing to this workflow
+            stale_traces = [t for t, w in self._trace_to_workflow.items() if w == workflow_id]
+            for t in stale_traces:
+                del self._trace_to_workflow[t]
+                self._trace_to_activity.pop(t, None)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Verdict Storage (called by workflow interceptor for SignalReceived stop)
@@ -287,10 +293,15 @@ class WorkflowSpanProcessor:
         When a span is governed, on_end() will skip buffering it because
         governance hooks already create separate started/completed span entries.
 
+        Safety cap: if set grows beyond 10,000 (spans that never ended),
+        clear it. A missed governed ID only causes duplicate buffering, not data loss.
+
         Args:
             span_id: OTel span ID (integer form)
         """
         with self._lock:
+            if len(self._governed_span_ids) > 10_000:
+                self._governed_span_ids.clear()
             self._governed_span_ids.add(span_id)
 
     # ═══════════════════════════════════════════════════════════════════════════
