@@ -566,7 +566,7 @@ class TestSendGovernanceEvent:
             call_args = mock_client.post.call_args
             headers = call_args.kwargs["headers"]
             assert headers["Authorization"] == "Bearer test-api-key"
-            assert headers["Content-Type"] == "application/json"
+            assert headers["User-Agent"] == "OpenBox-SDK/1.0"
 
     # -------------------------------------------------------------------------
     # Verdict types tests

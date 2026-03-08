@@ -46,6 +46,10 @@ _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
 _span_processor: Optional["WorkflowSpanProcessor"] = None
 
+# Persistent HTTP clients (lazy-init, thread-safe for requests)
+_sync_client: Optional[httpx.Client] = None
+_async_client: Optional[httpx.AsyncClient] = None
+
 
 def configure(
     api_url: str,
@@ -64,13 +68,32 @@ def configure(
         api_timeout: Timeout for governance API calls (seconds)
         on_api_error: Error policy — "fail_open" or "fail_closed"
     """
-    global _api_url, _api_key, _api_timeout, _on_api_error, _span_processor
+    global _api_url, _api_key, _api_timeout, _on_api_error, _span_processor, _sync_client, _async_client
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
     _on_api_error = on_api_error
     _span_processor = span_processor
+    # Reset persistent clients so they pick up new timeout/config
+    _sync_client = None
+    _async_client = None
     logger.info("Hook-level governance configured")
+
+
+def _get_sync_client() -> httpx.Client:
+    """Get or create persistent sync HTTP client."""
+    global _sync_client
+    if _sync_client is None or _sync_client.is_closed:
+        _sync_client = httpx.Client(timeout=_api_timeout)
+    return _sync_client
+
+
+def _get_async_client() -> httpx.AsyncClient:
+    """Get or create persistent async HTTP client."""
+    global _async_client
+    if _async_client is None or _async_client.is_closed:
+        _async_client = httpx.AsyncClient(timeout=_api_timeout)
+    return _async_client
 
 
 def is_configured() -> bool:
@@ -123,9 +146,17 @@ def extract_span_context(span) -> tuple:
 
 
 def _auth_headers() -> dict:
-    """Build standard auth headers for governance API calls."""
+    """Build standard auth headers using module-level API key."""
+    return build_auth_headers(_api_key)
+
+
+def build_auth_headers(api_key: str) -> dict:
+    """Build standard auth headers for governance API calls.
+
+    Shared by all modules that call OpenBox Core API.
+    """
     return {
-        "Authorization": f"Bearer {_api_key}",
+        "Authorization": f"Bearer {api_key}",
         "User-Agent": "OpenBox-SDK/1.0",
     }
 
@@ -319,12 +350,12 @@ def evaluate_sync(
         return
 
     try:
-        with httpx.Client(timeout=_api_timeout) as client:
-            response = client.post(
-                f"{_api_url}/api/v1/governance/evaluate",
-                json=payload,
-                headers=_auth_headers(),
-            )
+        client = _get_sync_client()
+        response = client.post(
+            f"{_api_url}/api/v1/governance/evaluate",
+            json=payload,
+            headers=_auth_headers(),
+        )
         _send_and_handle(response, identifier, span=span)
 
     except GovernanceBlockedError:
@@ -367,12 +398,12 @@ async def evaluate_async(
         return
 
     try:
-        async with httpx.AsyncClient(timeout=_api_timeout) as client:
-            response = await client.post(
-                f"{_api_url}/api/v1/governance/evaluate",
-                json=payload,
-                headers=_auth_headers(),
-            )
+        client = _get_async_client()
+        response = await client.post(
+            f"{_api_url}/api/v1/governance/evaluate",
+            json=payload,
+            headers=_auth_headers(),
+        )
         _send_and_handle(response, identifier, span=span)
 
     except GovernanceBlockedError:

@@ -1872,12 +1872,11 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
-            mock_client_instance = MagicMock()
-            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
-            mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_client_instance.post.return_value = mock_response
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.is_closed = False
 
+        with patch("openbox.hook_governance._get_sync_client", return_value=mock_client_instance):
             span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
             evaluate_sync(
                 mock_span,
@@ -1906,12 +1905,11 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
-            mock_client_instance = MagicMock()
-            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
-            mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_client_instance.post.return_value = mock_response
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.is_closed = False
 
+        with patch("openbox.hook_governance._get_sync_client", return_value=mock_client_instance):
             # 1st call: started
             span_data = _build_http_span_data(
                 mock_span, "POST", "https://api.example.com/data", "started",
@@ -1964,12 +1962,11 @@ class TestGovernanceStageField:
         mock_response.status_code = 200
         mock_response.json.return_value = {"verdict": "continue"}
 
-        with patch("openbox.hook_governance.httpx.Client") as mock_client_class:
-            mock_client_instance = MagicMock()
-            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_client_instance)
-            mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_client_instance.post.return_value = mock_response
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.is_closed = False
 
+        with patch("openbox.hook_governance._get_sync_client", return_value=mock_client_instance):
             span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
             evaluate_sync(
                 mock_span,

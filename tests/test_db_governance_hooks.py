@@ -13,7 +13,7 @@ import pytest
 
 import openbox.db_governance_hooks as db_gov
 import openbox.hook_governance as hook_gov
-from openbox.types import GovernanceBlockedError, WorkflowSpanBuffer
+from openbox.types import GovernanceBlockedError, Verdict, WorkflowSpanBuffer
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
 
 @contextmanager
 def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
-    """Mock httpx.Client for governance API calls."""
+    """Mock persistent httpx client for governance API calls."""
     response = MagicMock()
     response.status_code = 200
     response_data = {"verdict": verdict}
@@ -61,14 +61,14 @@ def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
         response_data["reason"] = reason
     response.json.return_value = response_data
 
-    with patch("httpx.Client") as mock_client_class:
-        mock_instance = MagicMock()
-        if side_effect:
-            mock_client_class.return_value.__enter__ = MagicMock(side_effect=side_effect)
-        else:
-            mock_client_class.return_value.__enter__ = MagicMock(return_value=mock_instance)
-        mock_client_class.return_value.__exit__ = MagicMock(return_value=False)
+    mock_instance = MagicMock()
+    if side_effect:
+        mock_instance.post.side_effect = side_effect
+    else:
         mock_instance.post.return_value = response
+    mock_instance.is_closed = False
+
+    with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
         yield mock_instance
 
 
@@ -330,7 +330,7 @@ class TestRedisHooks:
         with _mock_httpx_client(verdict="halt", reason="Blocked by policy"):
             with pytest.raises(GovernanceBlockedError) as exc_info:
                 req_hook(span, instance, ("DEL", "sensitive_key"), {})
-            assert exc_info.value.verdict == "halt"
+            assert exc_info.value.verdict == Verdict.HALT
 
     def test_response_hook_sends_completed(self):
         """Redis response_hook should send 'completed' governance."""
@@ -470,10 +470,10 @@ class TestGovernanceDisabled:
         instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
         span = MagicMock()
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance._get_sync_client") as mock_get:
             req_hook(span, instance, ("GET", "k"), {})
             resp_hook(span, instance, "OK")
-            mock_client_class.assert_not_called()
+            mock_get.assert_not_called()
 
     def test_no_governance_outside_activity(self):
         """No API calls when no activity context found."""
@@ -487,9 +487,9 @@ class TestGovernanceDisabled:
         instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
         span = MagicMock()
 
-        with patch("httpx.Client") as mock_client_class:
+        with patch("openbox.hook_governance._get_sync_client") as mock_get:
             req_hook(span, instance, ("GET", "k"), {})
-            mock_client_class.assert_not_called()
+            mock_get.assert_not_called()
 
 
 class TestGovernanceFailPolicy:

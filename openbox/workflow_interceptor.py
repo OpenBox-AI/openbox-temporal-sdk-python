@@ -32,7 +32,12 @@ from .types import Verdict
 
 
 def _serialize_value(value: Any) -> Any:
-    """Convert a value to JSON-serializable format for workflow result."""
+    """Convert a value to JSON-serializable format for workflow result.
+
+    NOTE: Intentionally duplicated from activity_interceptor._serialize_value.
+    Workflow interceptor runs inside Temporal sandbox — cannot import from
+    activity_interceptor (which has non-sandbox-safe imports like httpx).
+    """
     if value is None:
         return None
     if isinstance(value, (str, int, float, bool)):

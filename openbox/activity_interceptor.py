@@ -23,11 +23,7 @@ import time
 import json
 
 
-def _rfc3339_now() -> str:
-    """Return current UTC time in RFC3339 format (UTC+0)."""
-    # Lazy import to avoid Temporal sandbox restrictions
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -72,6 +68,7 @@ from opentelemetry import trace
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
 from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
+from .hook_governance import build_auth_headers
 from .activities import _terminate_workflow_for_halt
 
 
@@ -274,20 +271,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         # Clear any stale abort flag from previous attempt
         self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
 
-        # Ensure buffer is registered for this workflow (needed for span collection)
-        # The span processor's on_end() will add spans to this buffer
-        buffer = self._span_processor.get_buffer(info.workflow_id)
-        if buffer:
-            # Clear stale spans from previous attempt (prevents leaking into retry)
-            buffer.spans.clear()
-        else:
-            buffer = WorkflowSpanBuffer(
-                workflow_id=info.workflow_id,
-                run_id=info.workflow_run_id,
-                workflow_type=info.workflow_type,
-                task_queue=info.task_queue,
-            )
-            self._span_processor.register_workflow(info.workflow_id, buffer)
+        # Register a fresh buffer for this activity attempt.
+        # Always create new instead of clearing — avoids race with in-flight hooks
+        # that may still be writing to the old buffer from a previous attempt.
+        buffer = WorkflowSpanBuffer(
+            workflow_id=info.workflow_id,
+            run_id=info.workflow_run_id,
+            workflow_type=info.workflow_type,
+            task_queue=info.task_queue,
+        )
+        self._span_processor.register_workflow(info.workflow_id, buffer)
 
         tracer = trace.get_tracer(__name__)
 
@@ -485,7 +478,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # REQUIRE_APPROVAL → retryable, reuse HITL polling flow
                 if (
                     self._config.hitl_enabled
-                    and e.verdict in ("require_approval", "request_approval")
+                    and e.verdict.requires_approval()
                     and info.activity_type not in self._config.skip_hitl_activity_types
                 ):
                     buffer = self._span_processor.get_buffer(info.workflow_id)
@@ -504,9 +497,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # Hook-level BLOCK/HALT → raise non-retryable error to stop activity.
                 # Preserve verdict in error type for the activity interceptor to
                 # differentiate later (e.g. terminate workflow for HALT).
-                error_type = "GovernanceHalt" if e.verdict in ("halt", "stop") else "GovernanceBlock"
+                error_type = "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
                 raise ApplicationError(
-                    f"Hook governance {e.verdict}: {e.reason}",
+                    f"Hook governance {e.verdict.value}: {e.reason}",
                     type=error_type,
                     non_retryable=True,
                 )
@@ -678,10 +671,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
                     json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "User-Agent": "OpenBox-SDK/1.0",
-                    },
+                    headers=build_auth_headers(self._api_key),
                 )
                 # Check for HTTP errors
                 if response.status_code >= 400:
@@ -765,10 +755,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/approval",
                     json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "User-Agent": "OpenBox-SDK/1.0",
-                    },
+                    headers=build_auth_headers(self._api_key),
                 )
 
                 if response.status_code == 200:
