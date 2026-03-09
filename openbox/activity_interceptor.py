@@ -23,11 +23,7 @@ import time
 import json
 
 
-def _rfc3339_now() -> str:
-    """Return current UTC time in RFC3339 format (UTC+0)."""
-    # Lazy import to avoid Temporal sandbox restrictions
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -71,14 +67,16 @@ from opentelemetry import trace
 
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
-from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict
+from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
+from .hook_governance import build_auth_headers
+from .activities import _terminate_workflow_for_halt
 
 
 def _serialize_value(value: Any) -> Any:
     """Convert a value to JSON-serializable format."""
     if value is None:
         return None
-    if isinstance(value, (str, int, float, bool, int)):
+    if isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, bytes):
         # Try to decode bytes as UTF-8, fallback to base64
@@ -183,24 +181,31 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity.logger.info(f"Checking verdict for workflow {info.workflow_id}: buffer={buffer is not None}, buffer.verdict={buffer.verdict if buffer else None}, pending_verdict={pending_verdict}")
 
         if pending_verdict and pending_verdict.get("verdict") and Verdict.from_string(pending_verdict.get("verdict")).should_stop():
-            from temporalio.exceptions import ApplicationError
+            pending_v = Verdict.from_string(pending_verdict.get("verdict"))
             reason = pending_verdict.get("reason") or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from signal): {reason}")
-            raise ApplicationError(
-                f"Governance blocked: {reason}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            if pending_v == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         if buffer and buffer.verdict and buffer.verdict.should_stop():
-            from temporalio.exceptions import ApplicationError
             reason = buffer.verdict_reason or "Workflow blocked by governance"
             activity.logger.info(f"Activity blocked by prior governance verdict (from buffer): {reason}")
-            raise ApplicationError(
-                f"Governance blocked: {reason}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            if buffer.verdict == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         # ═══ Check for pending approval on retry ═══
         # If there's a pending approval, poll OpenBox Core for status
@@ -263,16 +268,19 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         non_retryable=False,
                     )
 
-        # Ensure buffer is registered for this workflow (needed for span collection)
-        # The span processor's on_end() will add spans to this buffer
-        if not self._span_processor.get_buffer(info.workflow_id):
-            buffer = WorkflowSpanBuffer(
-                workflow_id=info.workflow_id,
-                run_id=info.workflow_run_id,
-                workflow_type=info.workflow_type,
-                task_queue=info.task_queue,
-            )
-            self._span_processor.register_workflow(info.workflow_id, buffer)
+        # Clear any stale abort flag from previous attempt
+        self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
+
+        # Register a fresh buffer for this activity attempt.
+        # Always create new instead of clearing — avoids race with in-flight hooks
+        # that may still be writing to the old buffer from a previous attempt.
+        buffer = WorkflowSpanBuffer(
+            workflow_id=info.workflow_id,
+            run_id=info.workflow_run_id,
+            workflow_type=info.workflow_type,
+            task_queue=info.task_queue,
+        )
+        self._span_processor.register_workflow(info.workflow_id, buffer)
 
         tracer = trace.get_tracer(__name__)
 
@@ -305,14 +313,36 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
             )
 
+        # Buffer activity context for hook-level governance (OTel request hooks)
+        _activity_event_context = {
+            "source": "workflow-telemetry",
+            "event_type": WorkflowEventType.ACTIVITY_STARTED.value,
+            "workflow_id": info.workflow_id,
+            "run_id": info.workflow_run_id,
+            "workflow_type": info.workflow_type,
+            "activity_id": info.activity_id,
+            "activity_type": info.activity_type,
+            "task_queue": info.task_queue,
+            "attempt": info.attempt,
+            "activity_input": activity_input,
+            "activity_output": None,
+        }
+        self._span_processor.set_activity_context(
+            info.workflow_id, info.activity_id, _activity_event_context
+        )
+
         # If governance returned BLOCK/HALT, fail the activity before it runs
         if governance_verdict and governance_verdict.verdict.should_stop():
-            from temporalio.exceptions import ApplicationError
-            raise ApplicationError(
-                f"Governance blocked: {governance_verdict.reason or 'No reason provided'}",
-                type="GovernanceStop",
-                non_retryable=True,
-            )
+            reason = governance_verdict.reason or "No reason provided"
+            if governance_verdict.verdict == Verdict.HALT:
+                await _terminate_workflow_for_halt(info.workflow_id, reason)
+            else:
+                from temporalio.exceptions import ApplicationError
+                raise ApplicationError(
+                    f"Governance blocked: {reason}",
+                    type="GovernanceBlock",
+                    non_retryable=True,
+                )
 
         # Check guardrails validation_passed - if False, stop the activity
         if (
@@ -374,7 +404,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             redacted = governance_verdict.guardrails_result.redacted_input
             activity.logger.info(f"Applying guardrails redaction to activity input")
-            activity.logger.info(f"Redacted input type: {type(redacted).__name__}, value preview: {str(redacted)[:200]}")
+            activity.logger.debug(f"Redacted input type: {type(redacted).__name__}")
 
             # Normalize redacted_input to a list (matching original args structure)
             if isinstance(redacted, dict):
@@ -397,7 +427,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             activity.logger.info(f"Updated {type(original_arg).__name__} fields with redacted values")
                             # Verify the update
                             if hasattr(original_arg, 'prompt'):
-                                activity.logger.info(f"After update, prompt = {getattr(original_arg, 'prompt', 'N/A')}")
+                                activity.logger.debug(f"After update, prompt redacted")
                         else:
                             # Non-dataclass: replace directly
                             original_args[i] = redacted_item
@@ -415,7 +445,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if input.args:
             first_arg = input.args[0]
             if hasattr(first_arg, 'prompt'):
-                activity.logger.info(f"BEFORE ACTIVITY EXECUTION - input.args[0].prompt = {first_arg.prompt}")
+                activity.logger.debug(f"BEFORE ACTIVITY EXECUTION - prompt field present")
 
         status = "completed"
         error = None
@@ -440,6 +470,39 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 result = await self.next.execute_activity(input)
                 # Serialize activity output on success
                 activity_output = _serialize_value(result)
+            except GovernanceBlockedError as e:
+                status = "failed"
+                error = {"type": "GovernanceBlockedError", "message": str(e), "verdict": e.verdict, "url": e.url}
+                from temporalio.exceptions import ApplicationError
+
+                # REQUIRE_APPROVAL → retryable, reuse HITL polling flow
+                if (
+                    self._config.hitl_enabled
+                    and e.verdict.requires_approval()
+                    and info.activity_type not in self._config.skip_hitl_activity_types
+                ):
+                    buffer = self._span_processor.get_buffer(info.workflow_id)
+                    if buffer:
+                        buffer.pending_approval = True
+                        activity.logger.info(
+                            f"Hook REQUIRE_APPROVAL: pending approval for {info.activity_type} "
+                            f"(resource: {e.url})"
+                        )
+                    raise ApplicationError(
+                        f"Approval required: {e.reason}",
+                        type="ApprovalPending",
+                        non_retryable=False,
+                    )
+
+                # Hook-level BLOCK/HALT → raise non-retryable error to stop activity.
+                # Preserve verdict in error type for the activity interceptor to
+                # differentiate later (e.g. terminate workflow for HALT).
+                error_type = "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
+                raise ApplicationError(
+                    f"Hook governance {e.verdict.value}: {e.reason}",
+                    type=error_type,
+                    non_retryable=True,
+                )
             except Exception as e:
                 status = "failed"
                 error = {"type": type(e).__name__, "message": str(e)}
@@ -447,60 +510,54 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             finally:
                 end_time = time.time()
 
-                # Get activity spans from buffer
-                # Filter by activity_id (stored in span_data by span_processor)
-                buffer = self._span_processor.get_buffer(info.workflow_id)
-                spans = []
+                # Check abort flag before clearing (determines if we skip ActivityCompleted)
+                was_aborted = self._span_processor.get_activity_abort(info.workflow_id, info.activity_id) is not None
+                # Check if hook requested HALT → call terminate() here in async context
+                halt_reason = self._span_processor.get_halt_requested(info.workflow_id, info.activity_id)
+                if halt_reason:
+                    self._span_processor.clear_halt_requested(info.workflow_id, info.activity_id)
+                    await _terminate_workflow_for_halt(info.workflow_id, halt_reason)
+                # Clear abort flag and buffered activity context
+                self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
+                self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
 
-                # Get pending body data from span processor
-                # This data is stored by patched httpx.send but not yet merged to spans
-                # (because the activity span hasn't ended yet)
-                activity_span_id = span.get_span_context().span_id
-                pending_body = self._span_processor.get_pending_body(activity_span_id)
+                # OTel spans not collected — hook-level governance evaluates each
+                # operation individually, so bundling spans is redundant.
 
-                if buffer:
-                    for s in buffer.spans:
-                        # Check if this span belongs to this activity
-                        if (s.get("activity_id") == info.activity_id
-                            or s.get("attributes", {}).get("temporal.activity_id") == info.activity_id):
-                            spans.append(s)
-
-                    # If we have pending body/header data, propagate to child HTTP spans
-                    if pending_body:
-                        for s in spans:
-                            if "request_body" not in s and pending_body.get("request_body"):
-                                s["request_body"] = pending_body["request_body"]
-                            if "response_body" not in s and pending_body.get("response_body"):
-                                s["response_body"] = pending_body["response_body"]
-                            if "request_headers" not in s and pending_body.get("request_headers"):
-                                s["request_headers"] = pending_body["request_headers"]
-                            if "response_headers" not in s and pending_body.get("response_headers"):
-                                s["response_headers"] = pending_body["response_headers"]
-
-                # Send ActivityCompleted event (with input and output)
-                # Always send for observability, but skip governance verdict check if already approved
-                completed_verdict = await self._send_activity_event(
-                    info,
-                    WorkflowEventType.ACTIVITY_COMPLETED.value,
-                    status=status,
-                    start_time=start_time,
-                    end_time=end_time,
-                    duration_ms=(end_time - start_time) * 1000,
-                    span_count=len(spans),
-                    spans=spans,
-                    activity_input=activity_input,
-                    activity_output=activity_output,
-                    error=error,
-                )
+                # Skip ActivityCompleted when activity was aborted by hook governance
+                # (e.g., require_approval) — activity didn't actually run, will retry
+                completed_verdict = None
+                if was_aborted:
+                    activity.logger.info(
+                        f"Skipping ActivityCompleted event — activity aborted by hook governance"
+                    )
+                else:
+                    completed_verdict = await self._send_activity_event(
+                        info,
+                        WorkflowEventType.ACTIVITY_COMPLETED.value,
+                        status=status,
+                        start_time=start_time,
+                        end_time=end_time,
+                        duration_ms=(end_time - start_time) * 1000,
+                        span_count=0,
+                        spans=[],
+                        activity_input=activity_input,
+                        activity_output=activity_output,
+                        error=error,
+                    )
 
                 # If governance returned BLOCK/HALT, fail the activity after it completes
                 if completed_verdict and completed_verdict.verdict.should_stop():
-                    from temporalio.exceptions import ApplicationError
-                    raise ApplicationError(
-                        f"Governance blocked: {completed_verdict.reason or 'No reason provided'}",
-                        type="GovernanceStop",
-                        non_retryable=True,
-                    )
+                    reason = completed_verdict.reason or "No reason provided"
+                    if completed_verdict.verdict == Verdict.HALT:
+                        await _terminate_workflow_for_halt(info.workflow_id, reason)
+                    else:
+                        from temporalio.exceptions import ApplicationError
+                        raise ApplicationError(
+                            f"Governance blocked: {reason}",
+                            type="GovernanceBlock",
+                            non_retryable=True,
+                        )
 
                 # Check guardrails validation_passed for output - if False, stop
                 if (
@@ -614,10 +671,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
                     json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "User-Agent": "OpenBox-SDK/1.0",
-                    },
+                    headers=build_auth_headers(self._api_key),
                 )
                 # Check for HTTP errors
                 if response.status_code >= 400:
@@ -637,9 +691,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if response.status_code == 200:
                     try:
                         data = response.json()
-                        # Debug: Log raw response
-                        activity.logger.info(f"Raw governance response: {data}")
-                        activity.logger.info(f"guardrails_result in response: {'guardrails_result' in data}, value: {data.get('guardrails_result')}")
+                        activity.logger.info(f"Governance response: verdict={data.get('verdict') or data.get('action', 'unknown')}, reason={data.get('reason')}")
 
                         verdict = GovernanceVerdictResponse.from_dict(data)
 
@@ -703,10 +755,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/approval",
                     json=payload,
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "User-Agent": "OpenBox-SDK/1.0",
-                    },
+                    headers=build_auth_headers(self._api_key),
                 )
 
                 if response.status_code == 200:

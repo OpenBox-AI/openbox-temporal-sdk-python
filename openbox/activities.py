@@ -29,16 +29,25 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 
-def _rfc3339_now() -> str:
-    """Return current UTC time in RFC3339 format."""
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .types import Verdict
+from .hook_governance import build_auth_headers
 
 logger = logging.getLogger(__name__)
+
+# Module-level Temporal client reference, set by worker.py during initialization.
+# Used by send_governance_event to call client.terminate() for HALT verdicts.
+_temporal_client = None
+
+
+def set_temporal_client(client) -> None:
+    """Store Temporal client reference for HALT terminate calls."""
+    global _temporal_client
+    _temporal_client = client
 
 
 class GovernanceAPIError(Exception):
@@ -46,20 +55,42 @@ class GovernanceAPIError(Exception):
     pass
 
 
-def raise_governance_stop(reason: str, policy_id: str = None, risk_score: float = None):
-    """
-    Raise a non-retryable ApplicationError when governance blocks an operation.
+async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
+    """Force-terminate workflow via Temporal client for HALT verdict.
 
-    Using ApplicationError with non_retryable=True ensures:
-    1. The activity fails immediately (no retries)
-    2. The workflow fails with a clear error message
+    HALT is the nuclear option — no cleanup, no finally blocks, immediate kill.
+    Always raises ApplicationError after terminate to also stop the current activity.
+    client.terminate() signals the server, but doesn't stop the running activity code.
     """
+    if _temporal_client:
+        try:
+            logger.info(f"HALT: calling client.terminate() for workflow {workflow_id}")
+            handle = _temporal_client.get_workflow_handle(workflow_id)
+            await handle.terminate(f"Governance HALT: {reason}")
+            logger.info(f"HALT: workflow {workflow_id} terminated successfully")
+        except Exception as e:
+            logger.warning(f"HALT: failed to terminate workflow {workflow_id}: {e}")
+    else:
+        logger.warning(f"HALT: _temporal_client is None, cannot terminate workflow {workflow_id}")
+
+    # Always raise to stop the current activity execution.
+    # Even after successful terminate(), the activity code keeps running
+    # until an exception stops it.
+    raise ApplicationError(
+        f"Governance HALT: {reason}",
+        type="GovernanceHalt",
+        non_retryable=True,
+    )
+
+
+def raise_governance_block(reason: str, policy_id: str = None, risk_score: float = None):
+    """Raise non-retryable ApplicationError for BLOCK verdict — blocks activity only."""
     details = {"policy_id": policy_id, "risk_score": risk_score}
     raise ApplicationError(
         f"Governance blocked: {reason}",
         details,
-        type="GovernanceStop",
-        non_retryable=True,  # Don't retry - terminate the workflow
+        type="GovernanceBlock",
+        non_retryable=True,
     )
 
 
@@ -100,11 +131,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
             response = await client.post(
                 f"{api_url}/api/v1/governance/evaluate",
                 json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "OpenBox-SDK/1.0",
-                },
+                headers=build_auth_headers(api_key),
             )
 
             if response.status_code == 200:
@@ -115,11 +142,11 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
                 policy_id = data.get("policy_id")
                 risk_score = data.get("risk_score", 0.0)
 
-                # Check if governance wants to stop the workflow (BLOCK or HALT)
+                # Check if governance wants to stop (BLOCK or HALT)
                 if verdict.should_stop():
-                    logger.info(f"Governance blocked {event_type}: {reason} (policy: {policy_id})")
+                    logger.info(f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})")
 
-                    # For SignalReceived events, return result instead of raising
+                    # For SignalReceived events, return result instead of raising/terminating
                     # The workflow interceptor will store verdict for activity interceptor to check
                     if event_type == "SignalReceived":
                         return {
@@ -131,12 +158,20 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
                             "risk_score": risk_score,
                         }
 
-                    # For other events, raise non-retryable error to terminate workflow immediately
-                    raise_governance_stop(
-                        reason=reason or "No reason provided",
-                        policy_id=policy_id,
-                        risk_score=risk_score,
-                    )
+                    # HALT → terminate workflow + raise to stop activity
+                    if verdict == Verdict.HALT:
+                        workflow_id = event_payload.get("workflow_id", "")
+                        # Always raises ApplicationError(type="GovernanceHalt")
+                        await _terminate_workflow_for_halt(
+                            workflow_id, reason or "No reason provided"
+                        )
+                    else:
+                        # BLOCK → fail this activity only, workflow can continue
+                        raise_governance_block(
+                            reason=reason or "No reason provided",
+                            policy_id=policy_id,
+                            risk_score=risk_score,
+                        )
 
                 return {
                     "success": True,

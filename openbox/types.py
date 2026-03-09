@@ -1,9 +1,30 @@
 # openbox/types.py
-"""Data types for workflow-boundary governance."""
+"""Data types and shared utilities for workflow-boundary governance."""
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Union
 from enum import Enum
+
+
+def rfc3339_now() -> str:
+    """Return current UTC time in RFC3339 format (e.g. '2026-03-08T12:00:00.000Z')."""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+
+class GovernanceBlockedError(Exception):
+    """Raised by OTel hooks when governance blocks an operation."""
+
+    def __init__(self, verdict: Union[str, "Verdict"], reason: str, url: str = ""):
+        # Normalize to Verdict enum for consistent downstream comparisons
+        if isinstance(verdict, str):
+            from_string = Verdict.from_string  # avoid circular at class level
+            self.verdict = from_string(verdict)
+        else:
+            self.verdict = verdict
+        self.reason = reason
+        self.url = url
+        super().__init__(f"Governance {self.verdict.value}: {reason}")
 
 
 class WorkflowEventType(str, Enum):
