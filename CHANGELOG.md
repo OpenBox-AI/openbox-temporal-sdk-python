@@ -15,10 +15,15 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 - **`@traced` decorator** (`openbox.tracing`) — function-level governance with OTel spans; zero overhead when governance not configured
 - **`GovernanceBlockedError`** — new exception type for hook-level blocking with verdict, reason, and resource identifier
 - **Abort propagation** — once one hook blocks, all subsequent hooks for the same activity short-circuit immediately
-- **Governed span deduplication** — individually-evaluated spans are marked to prevent duplicate data in ActivityCompleted
 - **`attribute_key_identifiers`** in hook payloads — OTel-based dedup keys per span type so OpenBox server can detect and discard duplicate spans
 - **HALT workflow termination** from hook-level governance via `client.terminate()`
 - **REQUIRE_APPROVAL** from hook-level governance enters the same HITL approval polling flow as activity-level approvals
+
+### Changed
+
+- Hook governance payloads now send only the current span per evaluation (not accumulated history)
+- Event-level payloads (ActivityStarted/Completed, Workflow events) no longer include spans
+- Simplified `WorkflowSpanProcessor` — removed span buffering, governed span tracking, body data merging; `on_end()` now only forwards to fallback exporters
 
 ### Fixed
 

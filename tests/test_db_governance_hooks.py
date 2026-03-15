@@ -221,45 +221,46 @@ class TestCursorTracerPatch:
             assert started["hook_trigger"]["server_port"] == 3306
 
     def test_span_data_has_stage_at_root(self):
-        """Span data entries should have 'stage' at root level (not in attributes)."""
+        """Span data sent to governance API should have 'stage' at root level."""
         processor = _setup_governance()
         db_gov.install_cursor_tracer_hooks()
-
-        # Use a real buffer to capture span data
-        buffer = WorkflowSpanBuffer(
-            workflow_id="wf-db-1", run_id="run-1",
-            workflow_type="DbWorkflow", task_queue="db-queue",
-        )
-        processor.get_buffer.return_value = buffer
 
         tracer = self._make_cursor_tracer()
         cursor = self._make_mock_cursor()
 
-        with _mock_httpx_client():
+        with _mock_httpx_client() as mock_client:
             tracer.traced_execution(
                 cursor, cursor.execute, "SELECT * FROM users", None
             )
 
-        # Buffer should have 2 span entries: started + completed
-        assert len(buffer.spans) == 2
-        started_entry = buffer.spans[0]
-        completed_entry = buffer.spans[1]
+        # API should be called 2 times: started + completed
+        assert mock_client.post.call_count == 2
+
+        # Check started call
+        started_call = mock_client.post.call_args_list[0]
+        started_payload = started_call.kwargs["json"]
+        started_span = started_payload["spans"][0]
+
+        # Check completed call
+        completed_call = mock_client.post.call_args_list[1]
+        completed_payload = completed_call.kwargs["json"]
+        completed_span = completed_payload["spans"][0]
 
         # stage must be at ROOT level
-        assert started_entry["stage"] == "started"
-        assert completed_entry["stage"] == "completed"
+        assert started_span["stage"] == "started"
+        assert completed_span["stage"] == "completed"
 
         # stage must NOT be in attributes
-        assert "stage" not in started_entry.get("attributes", {})
-        assert "stage" not in completed_entry.get("attributes", {})
+        assert "stage" not in started_span.get("attributes", {})
+        assert "stage" not in completed_span.get("attributes", {})
 
         # span_id and trace_id must be present
-        assert "span_id" in started_entry
-        assert "trace_id" in started_entry
+        assert "span_id" in started_span
+        assert "trace_id" in started_span
 
         # DB attributes should be in attributes dict
-        assert started_entry["attributes"]["db.system"] == "postgresql"
-        assert started_entry["attributes"]["db.operation"] == "SELECT"
+        assert started_span["attributes"]["db.system"] == "postgresql"
+        assert started_span["attributes"]["db.operation"] == "SELECT"
 
     def test_traced_execution_captures_query_error(self):
         """Patched traced_execution should send completed with error on query failure."""

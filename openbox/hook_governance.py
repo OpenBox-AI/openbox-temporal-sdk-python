@@ -106,21 +106,6 @@ def get_span_processor() -> "WorkflowSpanProcessor | None":
     return _span_processor
 
 
-def mark_span_governed(span) -> None:
-    """Mark a span as governed if the span processor is configured and span is recording.
-
-    Consolidates the hasattr/get_span_context/mark_governed boilerplate
-    used by all governance hook types.
-    """
-    if _span_processor is None:
-        return
-    if not (hasattr(span, 'is_recording') and span.is_recording()):
-        return
-    ctx = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
-    if ctx and isinstance(getattr(ctx, 'span_id', None), int):
-        _span_processor.mark_governed(ctx.span_id)
-
-
 def extract_span_context(span) -> tuple:
     """Extract (span_id_hex, trace_id_hex, parent_span_id_hex) from a span.
 
@@ -193,26 +178,14 @@ def _build_payload(
     workflow_id = activity_context.get("workflow_id")
     activity_id = activity_context.get("activity_id")
 
-    # Store span data in buffer if provided, tagged with activity_id for retrieval
-    buffer = _span_processor.get_buffer(workflow_id) if workflow_id else None
-    if buffer and span_data:
-        if activity_id and "activity_id" not in span_data:
-            span_data["activity_id"] = activity_id
-        buffer.spans.append(span_data)
+    # Tag span_data with activity_id for server-side correlation
+    if span_data and activity_id and "activity_id" not in span_data:
+        span_data["activity_id"] = activity_id
 
-    # Collect all activity spans for the payload
-    all_activity_spans = []
-    if buffer and activity_id:
-        all_activity_spans = [
-            s for s in buffer.spans
-            if (s.get("activity_id") == activity_id
-                or s.get("attributes", {}).get("temporal.activity_id") == activity_id)
-        ]
-
-    # Assemble payload — ensure JSON-serializable (Temporal Payload objects slip through)
+    # Assemble payload — send only the current span (server processes each individually)
     payload = dict(activity_context)
-    payload["spans"] = all_activity_spans
-    payload["span_count"] = len(all_activity_spans)
+    payload["spans"] = [span_data] if span_data else []
+    payload["span_count"] = 1 if span_data else 0
     payload["hook_trigger"] = hook_trigger
     from .activities import _rfc3339_now
     payload["timestamp"] = _rfc3339_now()
