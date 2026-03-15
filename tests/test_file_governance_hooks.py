@@ -659,7 +659,7 @@ class TestFileGovernanceSpanData:
                 with open(tmp_path, "r") as f:
                     f.read()
 
-                # Find read started call (2nd call: open, read_started, ...)
+                # Find read started call
                 read_started = [
                     c for c in mock.post.call_args_list
                     if c.kwargs["json"]["hook_trigger"]["operation"] == "read"
@@ -668,8 +668,8 @@ class TestFileGovernanceSpanData:
                 assert len(read_started) == 1
                 payload = read_started[0].kwargs["json"]
                 assert payload["span_count"] >= 1
-                # Spans should accumulate (open span + read span)
-                assert len(payload["spans"]) >= 2
+                # Each call sends only current span
+                assert len(payload["spans"]) == 1
         finally:
             os.unlink(tmp_path)
 

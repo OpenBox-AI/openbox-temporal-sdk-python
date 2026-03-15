@@ -181,7 +181,6 @@ class TestInitialization:
         assert processor._buffers == {}
         assert processor._trace_to_workflow == {}
         assert processor._trace_to_activity == {}
-        assert processor._body_data == {}
         assert processor._verdicts == {}
         assert processor._lock is not None
 
@@ -415,84 +414,7 @@ class TestVerdictStorage:
 
 
 # =============================================================================
-# 5. Body Storage Tests
-# =============================================================================
-
-
-class TestBodyStorage:
-    """Tests for body storage methods."""
-
-    def test_store_body_request_only(self, processor):
-        """Test storing only request body."""
-        processor.store_body(0x123, request_body='{"key": "value"}')
-        assert processor._body_data[0x123]["request_body"] == '{"key": "value"}'
-        assert "response_body" not in processor._body_data[0x123]
-
-    def test_store_body_response_only(self, processor):
-        """Test storing only response body."""
-        processor.store_body(0x123, response_body='{"result": "ok"}')
-        assert processor._body_data[0x123]["response_body"] == '{"result": "ok"}'
-        assert "request_body" not in processor._body_data[0x123]
-
-    def test_store_body_both(self, processor):
-        """Test storing both request and response bodies."""
-        processor.store_body(
-            0x123,
-            request_body='{"input": "data"}',
-            response_body='{"output": "result"}',
-        )
-        assert processor._body_data[0x123]["request_body"] == '{"input": "data"}'
-        assert processor._body_data[0x123]["response_body"] == '{"output": "result"}'
-
-    def test_store_body_with_headers(self, processor):
-        """Test storing bodies with headers."""
-        request_headers = {"Content-Type": "application/json"}
-        response_headers = {"X-Custom": "header"}
-        processor.store_body(
-            0x123,
-            request_body="request",
-            response_body="response",
-            request_headers=request_headers,
-            response_headers=response_headers,
-        )
-        assert processor._body_data[0x123]["request_headers"] == request_headers
-        assert processor._body_data[0x123]["response_headers"] == response_headers
-
-    def test_store_body_incremental(self, processor):
-        """Test storing body data incrementally."""
-        processor.store_body(0x123, request_body="request")
-        processor.store_body(0x123, response_body="response")
-        assert processor._body_data[0x123]["request_body"] == "request"
-        assert processor._body_data[0x123]["response_body"] == "response"
-
-    def test_store_body_overwrites(self, processor):
-        """Test that subsequent calls overwrite existing data."""
-        processor.store_body(0x123, request_body="old")
-        processor.store_body(0x123, request_body="new")
-        assert processor._body_data[0x123]["request_body"] == "new"
-
-    def test_get_pending_body_existing(self, processor):
-        """Test getting pending body data."""
-        processor.store_body(0x123, request_body="test", response_body="result")
-        result = processor.get_pending_body(0x123)
-        assert result is not None
-        assert result["request_body"] == "test"
-        assert result["response_body"] == "result"
-
-    def test_get_pending_body_not_found(self, processor):
-        """Test getting non-existent pending body returns None."""
-        result = processor.get_pending_body(0x999)
-        assert result is None
-
-    def test_get_pending_body_does_not_remove(self, processor):
-        """Test that get_pending_body does not remove the data."""
-        processor.store_body(0x123, request_body="test")
-        processor.get_pending_body(0x123)
-        assert 0x123 in processor._body_data
-
-
-# =============================================================================
-# 6. URL Filtering Tests (_should_ignore_span)
+# 5. URL Filtering Tests (_should_ignore_span)
 # =============================================================================
 
 
@@ -563,7 +485,6 @@ class TestOnStart:
         # Should not raise and should not modify anything
         processor.on_start(span, parent_context=None)
         assert processor._buffers == {}
-        assert processor._body_data == {}
 
     def test_on_start_with_fallback(self, processor_with_fallback, mock_fallback):
         """Test that on_start doesn't call fallback."""
@@ -579,121 +500,6 @@ class TestOnStart:
 
 class TestOnEnd:
     """Tests for on_end method."""
-
-    def test_on_end_buffers_span_with_workflow_id_attribute(self, processor, sample_buffer):
-        """Test buffering spans that have workflow_id attribute."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span = MockReadableSpan(
-            name="test_activity",
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-        assert len(sample_buffer.spans) == 1
-        assert sample_buffer.spans[0]["name"] == "test_activity"
-
-    def test_on_end_buffers_span_via_trace_mapping(self, processor, sample_buffer):
-        """Test buffering spans via trace_id mapping."""
-        processor.register_workflow("wf-123", sample_buffer)
-        trace_id = 0xABCDEF123456
-        processor.register_trace(trace_id, "wf-123")
-
-        span = MockReadableSpan(
-            name="http_call",
-            trace_id=trace_id,
-            attributes={},  # No workflow_id attribute
-        )
-        processor.on_end(span)
-        assert len(sample_buffer.spans) == 1
-        assert sample_buffer.spans[0]["name"] == "http_call"
-
-    def test_on_end_sets_activity_id_from_attribute(self, processor, sample_buffer):
-        """Test that activity_id from span attribute is set."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span = MockReadableSpan(
-            name="activity",
-            attributes={
-                "temporal.workflow_id": "wf-123",
-                "temporal.activity_id": "act-456",
-            },
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["activity_id"] == "act-456"
-
-    def test_on_end_sets_activity_id_from_trace_mapping(self, processor, sample_buffer):
-        """Test that activity_id from trace mapping is set for child spans."""
-        processor.register_workflow("wf-123", sample_buffer)
-        trace_id = 0xABCDEF123456
-        processor.register_trace(trace_id, "wf-123", activity_id="act-789")
-
-        span = MockReadableSpan(
-            name="child_span",
-            trace_id=trace_id,
-            attributes={},  # No workflow_id or activity_id
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["activity_id"] == "act-789"
-
-    def test_on_end_merges_body_data(self, processor, sample_buffer):
-        """Test that body data is merged on span end."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span_id = 0xABCDEF0123456789
-        processor.store_body(
-            span_id,
-            request_body='{"input": "test"}',
-            response_body='{"output": "result"}',
-        )
-
-        span = MockReadableSpan(
-            name="http_span",
-            span_id=span_id,
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-
-        assert sample_buffer.spans[0]["request_body"] == '{"input": "test"}'
-        assert sample_buffer.spans[0]["response_body"] == '{"output": "result"}'
-        # Body data should be removed after merge
-        assert span_id not in processor._body_data
-
-    def test_on_end_merges_body_headers(self, processor, sample_buffer):
-        """Test that header data is merged on span end."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span_id = 0xABCDEF0123456789
-        processor.store_body(
-            span_id,
-            request_headers={"Content-Type": "application/json"},
-            response_headers={"X-Request-Id": "abc123"},
-        )
-
-        span = MockReadableSpan(
-            name="http_span",
-            span_id=span_id,
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-
-        assert sample_buffer.spans[0]["request_headers"] == {"Content-Type": "application/json"}
-        assert sample_buffer.spans[0]["response_headers"] == {"X-Request-Id": "abc123"}
-
-    def test_on_end_ignores_span_to_ignored_url(self, processor_with_ignored_urls):
-        """Test that spans to ignored URLs are not buffered."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="wf-123",
-            run_id="run-456",
-            workflow_type="Test",
-            task_queue="test",
-        )
-        processor_with_ignored_urls.register_workflow("wf-123", buffer)
-
-        span = MockReadableSpan(
-            name="openbox_call",
-            attributes={
-                "temporal.workflow_id": "wf-123",
-                "http.url": "https://openbox.internal/api/v1/evaluate",
-            },
-        )
-        processor_with_ignored_urls.on_end(span)
-        assert len(buffer.spans) == 0
 
     def test_on_end_forwards_to_fallback(self, processor_with_fallback, mock_fallback, sample_buffer):
         """Test that spans are forwarded to fallback processor."""
@@ -729,8 +535,6 @@ class TestOnEnd:
             },
         )
         processor.on_end(span)
-        # Should not be buffered
-        assert len(buffer.spans) == 0
         # Should still be forwarded to fallback
         mock_fallback.on_end.assert_called_once_with(span)
 
@@ -758,139 +562,10 @@ class TestOnEnd:
             attributes={"temporal.workflow_id": "wf-123"},
         )
         processor.on_end(span)  # Should not raise
-        assert len(sample_buffer.spans) == 1
 
 
 # =============================================================================
-# 9. _extract_span_data Tests
-# =============================================================================
-
-
-class TestExtractSpanData:
-    """Tests for _extract_span_data method."""
-
-    def test_extract_basic_span_data(self, processor):
-        """Test extracting basic span data."""
-        span = MockReadableSpan(
-            name="test_span",
-            trace_id=0x123456789ABCDEF0123456789ABCDEF0,
-            span_id=0xABCDEF0123456789,
-            start_time=1000000000,
-            end_time=2000000000,
-        )
-        data = processor._extract_span_data(span)
-
-        assert data["name"] == "test_span"
-        assert data["span_id"] == "abcdef0123456789"  # 16 hex chars
-        # Note: trace_id format depends on the actual integer value
-        assert data["trace_id"] == "123456789abcdef0123456789abcdef0"  # 32 hex chars (leading zero stripped if not needed)
-        assert data["start_time"] == 1000000000
-        assert data["end_time"] == 2000000000
-        assert data["duration_ns"] == 1000000000  # end - start
-
-    def test_extract_span_data_with_parent(self, processor):
-        """Test extracting span data with parent span."""
-        span = MockReadableSpan(
-            name="child_span",
-            parent_span_id=0x1111111111111111,
-        )
-        data = processor._extract_span_data(span)
-        assert data["parent_span_id"] == "1111111111111111"
-
-    def test_extract_span_data_without_parent(self, processor):
-        """Test extracting span data without parent span."""
-        span = MockReadableSpan(
-            name="root_span",
-            parent_span_id=None,
-        )
-        data = processor._extract_span_data(span)
-        assert data["parent_span_id"] is None
-
-    def test_extract_span_data_with_attributes(self, processor):
-        """Test extracting span data with attributes."""
-        span = MockReadableSpan(
-            name="span_with_attrs",
-            attributes={
-                "http.method": "POST",
-                "http.url": "https://api.example.com",
-                "custom.attr": 123,
-            },
-        )
-        data = processor._extract_span_data(span)
-        assert data["attributes"]["http.method"] == "POST"
-        assert data["attributes"]["http.url"] == "https://api.example.com"
-        assert data["attributes"]["custom.attr"] == 123
-
-    def test_extract_span_data_without_attributes(self, processor):
-        """Test extracting span data without attributes."""
-        span = MockReadableSpan(name="no_attrs", attributes=None)
-        data = processor._extract_span_data(span)
-        assert data["attributes"] == {}
-
-    def test_extract_span_data_with_status(self, processor):
-        """Test extracting span data with status."""
-        span = MockReadableSpan(
-            name="span_with_status",
-            status=MockStatus(status_code=MockStatusCode.ERROR, description="Something went wrong"),
-        )
-        data = processor._extract_span_data(span)
-        assert data["status"]["code"] == "ERROR"
-        assert data["status"]["description"] == "Something went wrong"
-
-    def test_extract_span_data_with_ok_status(self, processor):
-        """Test extracting span data with OK status."""
-        span = MockReadableSpan(
-            name="span_ok",
-            status=MockStatus(status_code=MockStatusCode.OK),
-        )
-        data = processor._extract_span_data(span)
-        assert data["status"]["code"] == "OK"
-
-    def test_extract_span_data_with_events(self, processor):
-        """Test extracting span data with events."""
-        events = [
-            MockEvent(name="event1", timestamp=1500000000, attributes={"key": "value"}),
-            MockEvent(name="event2", timestamp=1600000000, attributes=None),
-        ]
-        span = MockReadableSpan(name="span_with_events", events=events)
-        data = processor._extract_span_data(span)
-
-        assert len(data["events"]) == 2
-        assert data["events"][0]["name"] == "event1"
-        assert data["events"][0]["timestamp"] == 1500000000
-        assert data["events"][0]["attributes"] == {"key": "value"}
-        assert data["events"][1]["name"] == "event2"
-        assert data["events"][1]["attributes"] == {}
-
-    def test_extract_span_data_with_kind(self, processor):
-        """Test extracting span data with span kind."""
-        span = MockReadableSpan(name="client_span", kind=MockSpanKind.CLIENT)
-        data = processor._extract_span_data(span)
-        assert data["kind"] == "CLIENT"
-
-    def test_extract_span_data_duration_calculation(self, processor):
-        """Test duration calculation in span data."""
-        span = MockReadableSpan(
-            name="timed_span",
-            start_time=1000000000,
-            end_time=1500000000,
-        )
-        data = processor._extract_span_data(span)
-        assert data["duration_ns"] == 500000000
-
-    def test_extract_span_data_missing_times(self, processor):
-        """Test span data when times are missing."""
-        span = MockReadableSpan(
-            name="timeless_span",
-            start_time=None,
-            end_time=None,
-        )
-        data = processor._extract_span_data(span)
-        assert data["duration_ns"] is None
-
-
-# =============================================================================
-# 10. shutdown and force_flush Tests
+# 9. shutdown and force_flush Tests
 # =============================================================================
 
 
@@ -967,42 +642,26 @@ class TestThreadSafety:
 
         assert len(processor._buffers) == 10
 
-    def test_concurrent_store_body(self, processor):
-        """Test concurrent body storage."""
+    def test_concurrent_buffer_registration_stress(self, processor):
+        """Test concurrent buffer registration under stress."""
         import threading
 
-        def store_body(span_id):
-            processor.store_body(span_id, request_body=f"body-{span_id}")
-
-        threads = []
+        buffers_data = []
         for i in range(10):
-            t = threading.Thread(target=store_body, args=(i,))
-            threads.append(t)
-
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        assert len(processor._body_data) == 10
-
-    def test_concurrent_on_end(self, processor, sample_buffer):
-        """Test concurrent span processing."""
-        import threading
-
-        processor.register_workflow("wf-123", sample_buffer)
-
-        def process_span(i):
-            span = MockReadableSpan(
-                name=f"span_{i}",
-                span_id=i,
-                attributes={"temporal.workflow_id": "wf-123"},
+            buffer = WorkflowSpanBuffer(
+                workflow_id=f"wf-{i}",
+                run_id=f"run-{i}",
+                workflow_type="StressWorkflow",
+                task_queue="test",
             )
-            processor.on_end(span)
+            buffers_data.append((f"wf-{i}", buffer))
 
         threads = []
-        for i in range(10):
-            t = threading.Thread(target=process_span, args=(i,))
+        for wf_id, buffer in buffers_data:
+            t = threading.Thread(
+                target=processor.register_workflow,
+                args=(wf_id, buffer),
+            )
             threads.append(t)
 
         for t in threads:
@@ -1010,7 +669,7 @@ class TestThreadSafety:
         for t in threads:
             t.join()
 
-        assert len(sample_buffer.spans) == 10
+        assert len(processor._buffers) == 10
 
 
 # =============================================================================
@@ -1020,104 +679,6 @@ class TestThreadSafety:
 
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
-
-    def test_empty_workflow_id_in_attribute_not_buffered(self, processor):
-        """Test that empty workflow_id in span attribute is treated as falsy (not buffered).
-
-        In Python, empty string is falsy, so spans with empty workflow_id attribute
-        will not be buffered directly. They would need trace_id mapping.
-        """
-        buffer = WorkflowSpanBuffer(
-            workflow_id="",
-            run_id="run",
-            workflow_type="Test",
-            task_queue="test",
-        )
-        processor.register_workflow("", buffer)
-        span = MockReadableSpan(
-            name="empty_wf_span",
-            attributes={"temporal.workflow_id": ""},
-        )
-        processor.on_end(span)
-        # Empty string is falsy in Python, so span is not buffered via workflow_id attribute
-        assert len(buffer.spans) == 0
-
-    def test_empty_workflow_id_via_trace_mapping_not_buffered(self, processor):
-        """Test that empty workflow_id from trace mapping is also not buffered.
-
-        Empty string is falsy in Python, so even if trace mapping returns empty
-        string workflow_id, the span will not be buffered. This is intentional -
-        empty string is not a valid workflow ID.
-        """
-        buffer = WorkflowSpanBuffer(
-            workflow_id="",
-            run_id="run",
-            workflow_type="Test",
-            task_queue="test",
-        )
-        processor.register_workflow("", buffer)
-        trace_id = 0xABCDEF123456
-        processor.register_trace(trace_id, "")  # Map to empty workflow_id
-
-        span = MockReadableSpan(
-            name="empty_wf_span",
-            trace_id=trace_id,
-            attributes={},  # No workflow_id attribute
-        )
-        processor.on_end(span)
-        # Empty string workflow_id is falsy, so span is not buffered
-        assert len(buffer.spans) == 0
-
-    def test_large_body_data(self, processor, sample_buffer):
-        """Test handling large body data."""
-        processor.register_workflow("wf-123", sample_buffer)
-        large_body = "x" * 1000000  # 1MB body
-        processor.store_body(0x123, request_body=large_body)
-
-        span = MockReadableSpan(
-            name="large_body_span",
-            span_id=0x123,
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["request_body"] == large_body
-
-    def test_special_characters_in_body(self, processor, sample_buffer):
-        """Test handling special characters in body."""
-        processor.register_workflow("wf-123", sample_buffer)
-        special_body = '{"key": "value with \n newlines \t tabs and \"quotes\""}'
-        processor.store_body(0x123, request_body=special_body)
-
-        span = MockReadableSpan(
-            name="special_span",
-            span_id=0x123,
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["request_body"] == special_body
-
-    def test_unicode_in_span_name(self, processor, sample_buffer):
-        """Test handling unicode in span name."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span = MockReadableSpan(
-            name="span_with_unicode_\u4e2d\u6587",
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["name"] == "span_with_unicode_\u4e2d\u6587"
-
-    def test_zero_span_id(self, processor, sample_buffer):
-        """Test handling zero span_id."""
-        processor.register_workflow("wf-123", sample_buffer)
-        processor.store_body(0, request_body="zero_id_body")
-
-        span = MockReadableSpan(
-            name="zero_span",
-            span_id=0,
-            attributes={"temporal.workflow_id": "wf-123"},
-        )
-        processor.on_end(span)
-        assert sample_buffer.spans[0]["request_body"] == "zero_id_body"
 
     def test_very_long_workflow_id(self, processor):
         """Test handling very long workflow_id."""
@@ -1130,16 +691,3 @@ class TestEdgeCases:
         )
         processor.register_workflow(long_wf_id, buffer)
         assert processor.get_buffer(long_wf_id) is buffer
-
-    def test_span_with_none_attributes_value(self, processor, sample_buffer):
-        """Test span where attributes dict exists but values may be None."""
-        processor.register_workflow("wf-123", sample_buffer)
-        span = MockReadableSpan(
-            name="null_attr_span",
-            attributes={
-                "temporal.workflow_id": "wf-123",
-                "some.attr": None,
-            },
-        )
-        processor.on_end(span)
-        assert len(sample_buffer.spans) == 1

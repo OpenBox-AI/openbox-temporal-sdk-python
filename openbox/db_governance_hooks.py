@@ -41,10 +41,6 @@ _sqlalchemy_listeners: List[Tuple[Any, str, Callable]] = []
 # CommandListener prematurely. CommandListener skips when depth > 0.
 _pymongo_wrapt_depth = threading.local()
 
-def is_pymongo_wrapt_active() -> bool:
-    """Check if pymongo wrapt wrapper is executing (for OTel span filtering)."""
-    return getattr(_pymongo_wrapt_depth, 'value', 0) > 0
-
 
 # pymongo: store command string from started event (keyed by request_id)
 # so succeeded/failed can reuse the same db_statement for consistency.
@@ -57,7 +53,7 @@ _span_processor: Optional["WorkflowSpanProcessor"] = None
 
 
 def configure(span_processor: "WorkflowSpanProcessor") -> None:
-    """Store span_processor reference for mark_governed() and span data building.
+    """Store span_processor reference for span data building.
 
     Args:
         span_processor: WorkflowSpanProcessor for governed span tracking
@@ -350,10 +346,6 @@ def install_cursor_tracer_hooks() -> bool:
             # Runs inside OTel span context — get_current_span() returns DB span
             current_span = otel_trace.get_current_span()
 
-            # Mark span as governed — on_end() will skip buffering it
-            from . import hook_governance as _hg
-            _hg.mark_span_governed(current_span)
-
             # Build & send "started" span data entry
             started_sd = _build_db_span_data(
                 current_span, db_system, db_name, operation, stmt, host, port, "started",
@@ -413,10 +405,6 @@ def install_cursor_tracer_hooks() -> bool:
 
         async def _governed_query_async(*qargs, **qkwargs):
             current_span = otel_trace.get_current_span()
-
-            # Mark governed — on_end() skips buffering
-            from . import hook_governance as _hg
-            _hg.mark_span_governed(current_span)
 
             started_sd = _build_db_span_data(
                 current_span, db_system, db_name, operation, stmt, host, port, "started",
@@ -527,8 +515,6 @@ def install_asyncpg_hooks() -> bool:
         db_name = getattr(params, "database", None) if params else None
 
         current_span = otel_trace.get_current_span()
-        from . import hook_governance as _hg
-        _hg.mark_span_governed(current_span)
 
         started_sd = _build_db_span_data(
             current_span, "postgresql", db_name, operation, stmt, host, port, "started",
@@ -630,18 +616,9 @@ def setup_pymongo_hooks() -> None:
             can reuse the same db_statement for consistency.
             """
 
-            def _mark_otel_span_governed(self):
-                """Mark the current OTel pymongo span as governed (suppress from buffer)."""
-                try:
-                    from . import hook_governance as _hg
-                    _hg.mark_span_governed(otel_trace.get_current_span())
-                except Exception:
-                    pass
-
             def started(self, event):
                 # Skip if wrapt wrapper is already handling this operation
                 if getattr(_pymongo_wrapt_depth, 'value', 0) > 0:
-                    self._mark_otel_span_governed()
                     return
                 try:
                     span = otel_trace.get_current_span()
@@ -760,10 +737,6 @@ def _setup_pymongo_wrapt_hooks() -> None:
 
             current_span = otel_trace.get_current_span()
 
-            # Mark activity span as governed
-            from . import hook_governance as _hg
-            _hg.mark_span_governed(current_span)
-
             # Generate unique span_id for this pymongo operation (shared by started+completed)
             gov_sid = _generate_span_id()
 
@@ -841,10 +814,6 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
         except AttributeError:
             host, port, db_name = "localhost", 6379, "0"
 
-        # Mark governed — we create our own started/completed span entries
-        from . import hook_governance as _hg
-        _hg.mark_span_governed(span)
-
         started_sd = _build_db_span_data(span, "redis", db_name, command, statement, host, port, "started")
         _evaluate_started("redis", db_name, command, statement, host, port, span_data=started_sd)
         if len(_redis_span_meta) >= _REDIS_META_MAX:
@@ -914,8 +883,6 @@ def setup_sqlalchemy_hooks(engine) -> None:
         port = conn.engine.url.port
 
         current_span = otel_trace.get_current_span()
-        from . import hook_governance as _hg
-        _hg.mark_span_governed(current_span)
 
         started_sd = _build_db_span_data(
             current_span, db_system, db_name, operation, str(statement), host, port, "started",
