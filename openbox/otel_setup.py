@@ -22,7 +22,7 @@ Supported database libraries:
 - sqlalchemy (ORM)
 """
 
-from typing import TYPE_CHECKING, Any, Optional, Set, List
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set, List
 import contextvars
 import logging
 
@@ -48,6 +48,11 @@ from . import db_governance_hooks as _db_gov
 _httpx_http_span: contextvars.ContextVar = contextvars.ContextVar(
     '_httpx_http_span', default=None
 )
+
+# Timing for HTTP hooks: span_id → perf_counter start time
+# Used by request_hook (started) to pass timing to response_hook (completed)
+_http_hook_timings: Dict[int, float] = {}
+_HTTP_HOOK_TIMINGS_MAX = 1000
 
 # Text content types that are safe to capture as body
 _TEXT_CONTENT_TYPES = (
@@ -88,6 +93,7 @@ def _build_http_span_data(
     response_body: Optional[str] = None,
     response_headers: Optional[dict] = None,
     http_status_code: Optional[int] = None,
+    duration_ms: Optional[float] = None,
 ) -> dict:
     """Build span data dict for an HTTP request (used by governance hooks).
 
@@ -115,6 +121,9 @@ def _build_http_span_data(
         attrs["http.response.status_code"] = http_status_code
 
     now_ns = _time.time_ns()
+    duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
+    end_time = now_ns if stage == "completed" else None
+    start_time = (now_ns - duration_ns) if duration_ns else now_ns
 
     # Derive error from HTTP status code (4xx/5xx)
     error = None
@@ -128,9 +137,9 @@ def _build_http_span_data(
         "name": span.name if hasattr(span, 'name') and span.name else f"HTTP {http_method}",
         "kind": "CLIENT",
         "stage": stage,
-        "start_time": now_ns,
-        "end_time": now_ns if stage == "completed" else None,
-        "duration_ns": None,
+        "start_time": start_time,
+        "end_time": end_time,
+        "duration_ns": duration_ns,
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
@@ -151,6 +160,7 @@ def _build_file_span_data(
     operation: str,
     stage: str,
     error: Optional[str] = None,
+    duration_ms: Optional[float] = None,
 ) -> dict:
     """Build span data dict for a file operation (used by governance hooks).
 
@@ -173,6 +183,9 @@ def _build_file_span_data(
 
     span_name = getattr(span, 'name', None) or f"file.{operation}"
     now_ns = _time.time_ns()
+    duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
+    end_time = now_ns if stage == "completed" else None
+    start_time = (now_ns - duration_ns) if duration_ns else now_ns
 
     return {
         "span_id": span_id_hex,
@@ -181,9 +194,9 @@ def _build_file_span_data(
         "name": span_name,
         "kind": "INTERNAL",
         "stage": stage,
-        "start_time": now_ns,
-        "end_time": now_ns if stage == "completed" else None,
-        "duration_ns": None,
+        "start_time": start_time,
+        "end_time": end_time,
+        "duration_ns": duration_ns,
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
@@ -391,9 +404,6 @@ def setup_file_io_instrumentation() -> bool:
                 return
             from .types import GovernanceBlockedError
             active_span = span or self._parent_span
-            # Mark governed on started stage — we create our own span entries
-            if stage == "started":
-                _hook_gov.mark_span_governed(active_span)
             try:
                 trigger = {
                     "type": "file_operation",
@@ -562,8 +572,6 @@ def setup_file_io_instrumentation() -> bool:
         if _hook_gov.is_configured():
             from .types import GovernanceBlockedError
             try:
-                # Mark governed — we create our own started/completed span entries
-                _hook_gov.mark_span_governed(span)
                 open_span_data = _build_file_span_data(
                     span, file_str, mode, "open", "started",
                 )
@@ -885,14 +893,16 @@ def _requests_request_hook(span, request) -> None:
     except Exception:
         pass
 
-    if body:
-        _span_processor.store_body(span.context.span_id, request_body=body)
-
     # Hook-level governance evaluation
     if _hook_gov.is_configured():
+        import time as _time
         url = str(request.url) if hasattr(request, 'url') else None
         if url and not _should_ignore_url(url):
-            _span_processor.mark_governed(span.context.span_id)
+            # Record start time for duration calculation in response hook
+            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+                if len(_http_hook_timings) >= _HTTP_HOOK_TIMINGS_MAX:
+                    _http_hook_timings.clear()
+                _http_hook_timings[span.context.span_id] = _time.perf_counter()
             headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
             method = request.method or "UNKNOWN"
             span_data = _build_http_span_data(span, method, url, "started", request_body=body, request_headers=headers)
@@ -923,14 +933,20 @@ def _requests_response_hook(span, request, response) -> None:
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
             resp_body = response.text
-            _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass
 
     # Hook-level governance evaluation (response stage)
     if _hook_gov.is_configured():
+        import time as _time
         url = str(request.url) if hasattr(request, 'url') else None
         if url and not _should_ignore_url(url):
+            # Compute duration from started hook timing
+            _dur_ms = None
+            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+                _start = _http_hook_timings.pop(span.context.span_id, None)
+                if _start:
+                    _dur_ms = (_time.perf_counter() - _start) * 1000
             req_headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
             req_body = None
             try:
@@ -946,6 +962,7 @@ def _requests_response_hook(span, request, response) -> None:
                 request_body=req_body, request_headers=req_headers,
                 response_body=resp_body, response_headers=resp_headers,
                 http_status_code=getattr(response, 'status_code', None),
+                duration_ms=_dur_ms,
             )
             _hook_gov.evaluate_sync(
                 span,
@@ -985,7 +1002,6 @@ def _httpx_request_hook(span, request) -> None:
         # Capture request headers from RequestInfo namedtuple
         if hasattr(request, 'headers') and request.headers:
             request_headers = dict(request.headers)
-            _span_processor.store_body(span.context.span_id, request_headers=request_headers)
 
         # Try to get request body - RequestInfo has a 'stream' attribute
         # httpx ByteStream stores body in _stream (not body or _body)
@@ -1017,7 +1033,6 @@ def _httpx_request_hook(span, request) -> None:
                 body = body.decode("utf-8", errors="ignore")
             elif not isinstance(body, str):
                 body = str(body)
-            _span_processor.store_body(span.context.span_id, request_body=body)
 
     except Exception:
         pass  # Best effort
@@ -1027,7 +1042,6 @@ def _httpx_request_hook(span, request) -> None:
 
     # Hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        _span_processor.mark_governed(span.context.span_id)
         method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
         req_body = body if isinstance(body, str) else None
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
@@ -1066,7 +1080,6 @@ def _httpx_response_hook(span, request, response) -> None:
         # Capture response headers first (always available even for streaming)
         if hasattr(response, 'headers') and response.headers:
             resp_headers = dict(response.headers)
-            _span_processor.store_body(span.context.span_id, response_headers=resp_headers)
 
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
@@ -1086,7 +1099,6 @@ def _httpx_response_hook(span, request, response) -> None:
                 if isinstance(body, bytes):
                     body = body.decode("utf-8", errors="ignore")
                 resp_body = body
-                _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass  # Best effort
 
@@ -1110,7 +1122,6 @@ async def _httpx_async_request_hook(span, request) -> None:
         # Capture request headers
         if hasattr(request, 'headers') and request.headers:
             request_headers = dict(request.headers)
-            _span_processor.store_body(span.context.span_id, request_headers=request_headers)
 
         # Try to get request body
         if hasattr(request, 'stream'):
@@ -1138,7 +1149,6 @@ async def _httpx_async_request_hook(span, request) -> None:
                 body = body.decode("utf-8", errors="ignore")
             elif not isinstance(body, str):
                 body = str(body)
-            _span_processor.store_body(span.context.span_id, request_body=body)
 
     except Exception:
         pass  # Best effort
@@ -1148,7 +1158,6 @@ async def _httpx_async_request_hook(span, request) -> None:
 
     # Async hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        _span_processor.mark_governed(span.context.span_id)
         method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
         req_body = body if isinstance(body, str) else None
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
@@ -1176,7 +1185,6 @@ async def _httpx_async_response_hook(span, request, response) -> None:
         # Capture response headers
         if hasattr(response, 'headers') and response.headers:
             resp_headers = dict(response.headers)
-            _span_processor.store_body(span.context.span_id, response_headers=resp_headers)
 
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
@@ -1201,7 +1209,6 @@ async def _httpx_async_response_hook(span, request, response) -> None:
 
             if body:
                 resp_body = body
-                _span_processor.store_body(span.context.span_id, response_body=resp_body)
 
         # Also try to get request body from the stream
         request_body = None
@@ -1215,7 +1222,6 @@ async def _httpx_async_response_hook(span, request, response) -> None:
         if request_body:
             if isinstance(request_body, bytes):
                 request_body = request_body.decode("utf-8", errors="ignore")
-            _span_processor.store_body(span.context.span_id, request_body=request_body)
 
     except Exception:
         pass  # Best effort
@@ -1285,24 +1291,8 @@ def _get_httpx_http_span():
     return http_span
 
 
-def _store_body_data(span_processor, http_span, request_body, request_headers,
-                     response_body, response_headers) -> None:
-    """Store captured HTTP body/header data against the span."""
-    try:
-        if http_span and hasattr(http_span, 'context') and http_span.context.span_id:
-            span_processor.store_body(
-                http_span.context.span_id,
-                request_body=request_body or None,
-                response_body=response_body or None,
-                request_headers=request_headers or None,
-                response_headers=response_headers or None,
-            )
-    except Exception as e:
-        logger.debug(f"Failed to store body: {e}")
-
-
 def _prepare_completed_governance(http_span, request, url, request_body, request_headers,
-                                  response_body, response_headers, status_code):
+                                  response_body, response_headers, status_code, duration_ms=None):
     """Build 'completed' governance args. Returns tuple or None if not applicable."""
     if not (_hook_gov.is_configured() and url and http_span):
         return None
@@ -1311,7 +1301,7 @@ def _prepare_completed_governance(http_span, request, url, request_body, request
         http_span, method, url, "completed",
         request_body=request_body, request_headers=request_headers,
         response_body=response_body, response_headers=response_headers,
-        http_status_code=status_code,
+        http_status_code=status_code, duration_ms=duration_ms,
     )
     hook_trigger = {"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP}
     return http_span, hook_trigger, url, span_data
@@ -1331,40 +1321,44 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
         _original_async_send = httpx.AsyncClient.send
 
         def _patched_send(self, request, *args, **kwargs):
+            import time as _time
             url = str(request.url) if hasattr(request, 'url') else None
             if url and _should_ignore_url(url):
                 return _original_send(self, request, *args, **kwargs)
 
             request_body, request_headers = _capture_httpx_request_data(request)
+            _start = _time.perf_counter()
             response = _original_send(self, request, *args, **kwargs)
+            _dur_ms = (_time.perf_counter() - _start) * 1000
             http_span = _get_httpx_http_span()
             response_body, response_headers = _capture_httpx_response_data(response)
 
-            _store_body_data(span_processor, http_span, request_body, request_headers,
-                             response_body, response_headers)
             gov_args = _prepare_completed_governance(
                 http_span, request, url, request_body, request_headers,
                 response_body, response_headers, getattr(response, 'status_code', None),
+                duration_ms=_dur_ms,
             )
             if gov_args:
                 _hook_gov.evaluate_sync(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
             return response
 
         async def _patched_async_send(self, request, *args, **kwargs):
+            import time as _time
             url = str(request.url) if hasattr(request, 'url') else None
             if url and _should_ignore_url(url):
                 return await _original_async_send(self, request, *args, **kwargs)
 
             request_body, request_headers = _capture_httpx_request_data(request)
+            _start = _time.perf_counter()
             response = await _original_async_send(self, request, *args, **kwargs)
+            _dur_ms = (_time.perf_counter() - _start) * 1000
             http_span = _get_httpx_http_span()
             response_body, response_headers = _capture_httpx_response_data(response)
 
-            _store_body_data(span_processor, http_span, request_body, request_headers,
-                             response_body, response_headers)
             gov_args = _prepare_completed_governance(
                 http_span, request, url, request_body, request_headers,
                 response_body, response_headers, getattr(response, 'status_code', None),
+                duration_ms=_dur_ms,
             )
             if gov_args:
                 await _hook_gov.evaluate_async(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
@@ -1401,7 +1395,6 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
             body = request_info.body
             if isinstance(body, bytes):
                 body = body.decode("utf-8", errors="ignore")
-            _span_processor.store_body(span.context.span_id, request_body=body)
     except Exception:
         pass
 
@@ -1418,7 +1411,11 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
             url = f"{scheme}://{host}{url_path}"
 
         if not _should_ignore_url(url):
-            _span_processor.mark_governed(span.context.span_id)
+            import time as _time
+            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+                if len(_http_hook_timings) >= _HTTP_HOOK_TIMINGS_MAX:
+                    _http_hook_timings.clear()
+                _http_hook_timings[span.context.span_id] = _time.perf_counter()
             method = getattr(request_info, 'method', 'UNKNOWN')
             headers = dict(request_info.headers) if hasattr(request_info, 'headers') and request_info.headers else None
             req_body = body if isinstance(body, str) else None
@@ -1454,7 +1451,6 @@ def _urllib3_response_hook(span, pool, response) -> None:
                 body = body.decode("utf-8", errors="ignore")
             if body:
                 resp_body = body
-                _span_processor.store_body(span.context.span_id, response_body=resp_body)
     except Exception:
         pass
 
@@ -1470,11 +1466,17 @@ def _urllib3_response_hook(span, pool, response) -> None:
             url = f"{scheme}://{host}/"
 
         if not _should_ignore_url(url):
+            import time as _time
+            _dur_ms = None
+            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+                _start = _http_hook_timings.pop(span.context.span_id, None)
+                if _start:
+                    _dur_ms = (_time.perf_counter() - _start) * 1000
             status_code = getattr(response, 'status', None)
             span_data = _build_http_span_data(
                 span, "UNKNOWN", url, "completed",
                 response_body=resp_body, response_headers=resp_headers,
-                http_status_code=status_code,
+                http_status_code=status_code, duration_ms=_dur_ms,
             )
             _hook_gov.evaluate_sync(
                 span,
@@ -1500,6 +1502,5 @@ def _urllib_request_hook(span, request) -> None:
             body = request.data
             if isinstance(body, bytes):
                 body = body.decode("utf-8", errors="ignore")
-            _span_processor.store_body(span.context.span_id, request_body=body)
     except Exception:
         pass

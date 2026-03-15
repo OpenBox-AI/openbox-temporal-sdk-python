@@ -85,14 +85,14 @@ class Verdict(str, Enum):
 
 @dataclass
 class WorkflowSpanBuffer:
-    """Buffer for spans generated during workflow execution."""
+    """Buffer for workflow governance state (verdicts, approvals, abort flags)."""
 
     workflow_id: str
     run_id: str
     workflow_type: str
     task_queue: str
     parent_workflow_id: Optional[str] = None
-    spans: List[dict] = field(default_factory=list)
+    spans: List[dict] = field(default_factory=list)  # kept for backward compat, always empty
     status: Optional[str] = None  # "completed", "failed", "cancelled", "terminated"
     error: Optional[Dict[str, Any]] = None
 

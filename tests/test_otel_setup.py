@@ -1138,40 +1138,6 @@ class TestUninstrumentAll:
 class TestRequestsRequestHook:
     """Tests for _requests_request_hook()."""
 
-    def test_stores_request_body_string(self, mock_span_processor, mock_span):
-        """Should store string request body."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _requests_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.body = "test request body"
-
-        _requests_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="test request body"
-        )
-
-    def test_stores_request_body_bytes(self, mock_span_processor, mock_span):
-        """Should decode and store bytes request body."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _requests_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.body = b"test bytes body"
-
-        _requests_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="test bytes body"
-        )
-
     def test_does_nothing_when_no_span_processor(self, mock_span):
         """Should do nothing when _span_processor is None."""
         import openbox.otel_setup as otel_setup
@@ -1195,9 +1161,8 @@ class TestRequestsRequestHook:
         request = MagicMock()
         request.body = None
 
+        # Should not raise
         _requests_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_not_called()
 
     def test_handles_decode_errors(self, mock_span_processor, mock_span):
         """Should handle decode errors gracefully."""
@@ -1210,31 +1175,12 @@ class TestRequestsRequestHook:
         # Invalid UTF-8 bytes
         request.body = b'\xff\xfe\x00\x01'
 
-        # Should not raise, should still store (with errors='ignore')
+        # Should not raise
         _requests_request_hook(mock_span, request)
 
 
 class TestRequestsResponseHook:
     """Tests for _requests_response_hook()."""
-
-    def test_stores_response_body_for_text_content(self, mock_span_processor, mock_span):
-        """Should store response body for text content types."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _requests_response_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        response = MagicMock()
-        response.headers = {"content-type": "application/json"}
-        response.text = '{"key": "value"}'
-
-        _requests_response_hook(mock_span, request, response)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            response_body='{"key": "value"}'
-        )
 
     def test_does_not_store_binary_content(self, mock_span_processor, mock_span):
         """Should not store response body for binary content types."""
@@ -1248,9 +1194,8 @@ class TestRequestsResponseHook:
         response.headers = {"content-type": "image/png"}
         response.text = "binary data"
 
+        # Should not raise
         _requests_response_hook(mock_span, request, response)
-
-        mock_span_processor.store_body.assert_not_called()
 
     def test_does_nothing_when_no_span_processor(self, mock_span):
         """Should do nothing when _span_processor is None."""
@@ -1271,50 +1216,6 @@ class TestRequestsResponseHook:
 class TestHttpxRequestHook:
     """Tests for _httpx_request_hook()."""
 
-    def test_stores_request_headers(self, mock_span_processor, mock_span):
-        """Should store request headers."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-        request.headers = {"Authorization": "Bearer token", "Content-Type": "application/json"}
-        request.stream = None
-        request._content = None
-
-        _httpx_request_hook(mock_span, request)
-
-        # Check that headers were stored
-        calls = mock_span_processor.store_body.call_args_list
-        assert any(
-            call[1].get('request_headers') == {"Authorization": "Bearer token", "Content-Type": "application/json"}
-            for call in calls
-        )
-
-    def test_stores_request_body_from_content(self, mock_span_processor, mock_span):
-        """Should store request body from _content attribute."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-        request.headers = {}
-        request.stream = None
-        request._content = b'{"key": "value"}'
-        # Mock hasattr properly
-        delattr(request, 'content')
-
-        _httpx_request_hook(mock_span, request)
-
-        calls = mock_span_processor.store_body.call_args_list
-        assert any(
-            call[1].get('request_body') == '{"key": "value"}'
-            for call in calls
-        )
 
     def test_ignores_url_when_in_ignored_list(self, mock_span_processor, mock_span):
         """Should ignore URLs in the ignored prefixes list."""
@@ -1352,51 +1253,6 @@ class TestHttpxRequestHook:
 class TestHttpxResponseHook:
     """Tests for _httpx_response_hook()."""
 
-    def test_stores_response_headers(self, mock_span_processor, mock_span):
-        """Should store response headers."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_response_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-
-        response = MagicMock()
-        response.headers = {"Content-Type": "application/json", "X-Request-Id": "abc123"}
-        response._content = b'{"result": "ok"}'
-
-        _httpx_response_hook(mock_span, request, response)
-
-        calls = mock_span_processor.store_body.call_args_list
-        assert any(
-            call[1].get('response_headers') == {"Content-Type": "application/json", "X-Request-Id": "abc123"}
-            for call in calls
-        )
-
-    def test_stores_response_body_for_text_content(self, mock_span_processor, mock_span):
-        """Should store response body for text content types."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_response_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-
-        response = MagicMock()
-        response.headers = {"content-type": "application/json"}
-        response._content = b'{"result": "ok"}'
-        # Remove content property to avoid fallback
-        delattr(response, 'content')
-
-        _httpx_response_hook(mock_span, request, response)
-
-        calls = mock_span_processor.store_body.call_args_list
-        assert any(
-            call[1].get('response_body') == '{"result": "ok"}'
-            for call in calls
-        )
 
     def test_ignores_url_when_in_ignored_list(self, mock_span_processor, mock_span):
         """Should ignore URLs in the ignored prefixes list."""
@@ -1421,49 +1277,6 @@ class TestHttpxResponseHook:
 class TestHttpxAsyncHooks:
     """Tests for async httpx hooks."""
 
-    @pytest.mark.asyncio
-    async def test_async_request_hook_delegates_to_sync(self, mock_span_processor, mock_span):
-        """Async request hook should delegate to sync hook."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_async_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-        request.headers = {"Content-Type": "application/json"}
-        request.stream = None
-        request._content = b'{"key": "value"}'
-
-        await _httpx_async_request_hook(mock_span, request)
-
-        # Should have called store_body
-        assert mock_span_processor.store_body.called
-
-    @pytest.mark.asyncio
-    async def test_async_response_hook_stores_headers(self, mock_span_processor, mock_span):
-        """Async response hook should store response headers."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _httpx_async_response_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.url = "https://api.example.com/data"
-        request.stream = None
-
-        response = MagicMock()
-        response.headers = {"content-type": "application/json"}
-        response._content = b'{"result": "ok"}'
-        response.aread = None  # No async read needed
-
-        await _httpx_async_response_hook(mock_span, request, response)
-
-        calls = mock_span_processor.store_body.call_args_list
-        assert any(
-            call[1].get('response_headers') == {"content-type": "application/json"}
-            for call in calls
-        )
 
     @pytest.mark.asyncio
     async def test_async_response_hook_ignores_url(self, mock_span_processor, mock_span):
@@ -1489,60 +1302,6 @@ class TestHttpxAsyncHooks:
 class TestUrllib3Hooks:
     """Tests for urllib3 hooks."""
 
-    def test_request_hook_stores_body(self, mock_span_processor, mock_span):
-        """Should store request body from RequestInfo."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _urllib3_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        pool = MagicMock()
-        request_info = MagicMock()
-        request_info.body = "test body"
-
-        _urllib3_request_hook(mock_span, pool, request_info)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="test body"
-        )
-
-    def test_request_hook_decodes_bytes_body(self, mock_span_processor, mock_span):
-        """Should decode bytes body."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _urllib3_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        pool = MagicMock()
-        request_info = MagicMock()
-        request_info.body = b"bytes body"
-
-        _urllib3_request_hook(mock_span, pool, request_info)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="bytes body"
-        )
-
-    def test_response_hook_stores_body_for_text(self, mock_span_processor, mock_span):
-        """Should store response body for text content types."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _urllib3_response_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        pool = MagicMock()
-        response = MagicMock()
-        response.headers = {"content-type": "application/json"}
-        response.data = b'{"key": "value"}'
-
-        _urllib3_response_hook(mock_span, pool, response)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            response_body='{"key": "value"}'
-        )
 
     def test_response_hook_skips_binary_content(self, mock_span_processor, mock_span):
         """Should skip storing response body for binary content types."""
@@ -1564,40 +1323,6 @@ class TestUrllib3Hooks:
 class TestUrllibHooks:
     """Tests for urllib (standard library) hooks."""
 
-    def test_request_hook_stores_body(self, mock_span_processor, mock_span):
-        """Should store request body."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _urllib_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.data = "request data"
-
-        _urllib_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="request data"
-        )
-
-    def test_request_hook_decodes_bytes(self, mock_span_processor, mock_span):
-        """Should decode bytes data."""
-        import openbox.otel_setup as otel_setup
-        from openbox.otel_setup import _urllib_request_hook
-
-        otel_setup._span_processor = mock_span_processor
-
-        request = MagicMock()
-        request.data = b"bytes data"
-
-        _urllib_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_called_once_with(
-            mock_span.context.span_id,
-            request_body="bytes data"
-        )
-
     def test_request_hook_handles_no_data(self, mock_span_processor, mock_span):
         """Should handle requests with no data."""
         import openbox.otel_setup as otel_setup
@@ -1609,8 +1334,6 @@ class TestUrllibHooks:
         request.data = None
 
         _urllib_request_hook(mock_span, request)
-
-        mock_span_processor.store_body.assert_not_called()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1793,11 +1516,8 @@ class TestIntegration:
         request = MagicMock()
         request.body = "test body"
 
-        # Call hook
+        # Call hook (should not raise)
         _requests_request_hook(mock_span, request)
-
-        # Verify it used the global processor
-        mock_span_processor.store_body.assert_called_once()
 
         # Clear global
         otel_setup._span_processor = None
@@ -1895,7 +1615,7 @@ class TestGovernanceStageField:
             assert payload["hook_trigger"]["stage"] == "started"
 
     def test_evaluate_governance_sync_started_then_completed_sends_2_spans(self, governance_setup, mock_span):
-        """Calling started then completed should produce 2 separate spans in the completed payload."""
+        """Calling started then completed should send 2 separate API calls with 1 span each."""
         from openbox.otel_setup import _build_http_span_data
         from openbox.hook_governance import evaluate_sync
 
@@ -1937,19 +1657,27 @@ class TestGovernanceStageField:
                 span_data=span_data,
             )
 
-            # Verify the completed payload has both spans
-            call_args = mock_client_instance.post.call_args
-            payload = call_args.kwargs["json"]
-            spans = payload["spans"]
-            assert len(spans) == 2
-            assert spans[0]["stage"] == "started"
-            assert spans[1]["stage"] == "completed"
-            assert spans[1]["response_body"] == '{"result": "ok"}'
-            assert spans[1]["response_headers"] == {"content-type": "application/json"}
-            assert spans[1]["http_status_code"] == 200
-            assert payload["hook_trigger"]["stage"] == "completed"
-            # Both use the same OTel span_id
-            assert spans[0]["span_id"] == spans[1]["span_id"]
+            # Verify 2 API calls were made
+            assert mock_client_instance.post.call_count == 2
+
+            # 1st call should have started stage
+            first_call = mock_client_instance.post.call_args_list[0]
+            first_payload = first_call.kwargs["json"]
+            first_spans = first_payload["spans"]
+            assert len(first_spans) == 1
+            assert first_spans[0]["stage"] == "started"
+            assert first_payload["hook_trigger"]["stage"] == "started"
+
+            # 2nd call should have completed stage with response data
+            second_call = mock_client_instance.post.call_args_list[1]
+            second_payload = second_call.kwargs["json"]
+            second_spans = second_payload["spans"]
+            assert len(second_spans) == 1
+            assert second_spans[0]["stage"] == "completed"
+            assert second_spans[0]["response_body"] == '{"result": "ok"}'
+            assert second_spans[0]["response_headers"] == {"content-type": "application/json"}
+            assert second_spans[0]["http_status_code"] == 200
+            assert second_payload["hook_trigger"]["stage"] == "completed"
 
     def test_evaluate_governance_sync_omits_status_code_when_none(self, governance_setup, mock_span):
         """http_status_code should not be in span when not provided."""

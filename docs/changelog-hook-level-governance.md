@@ -42,7 +42,7 @@ Activity ends → ActivityCompleted → API → verdict
 
 ### Hook Trigger Payload
 
-Governance evaluations now include a `hook_trigger` object:
+Governance evaluations now include a `hook_trigger` object. Each evaluation sends only the current span — no accumulated history:
 
 ```json
 {
@@ -51,6 +51,8 @@ Governance evaluations now include a `hook_trigger` object:
   "run_id": "...",
   "activity_id": "...",
   "activity_type": "...",
+  "spans": [{ ...single span data... }],
+  "span_count": 1,
   "hook_trigger": {
     "type": "http_request | file_operation | db_query | function_call",
     "stage": "started | completed",
@@ -126,8 +128,8 @@ worker = create_openbox_worker(
 If your SDK (LangChain, Mastra, etc.) has a similar OpenBox governance flow, here are the key changes to replicate:
 
 1. **Two-stage evaluation** — Send `started` (blocking) and `completed` (informational) governance calls for each operation, using the same `/api/v1/governance/evaluate` endpoint with a `hook_trigger` field.
-2. **Activity context resolution** — Map OTel `trace_id` → `(workflow_id, activity_id)` so hook payloads include activity context.
-3. **Abort propagation** — Once one hook blocks, short-circuit all subsequent hooks for that activity.
-4. **Governed span dedup** — Mark individually-evaluated spans so they aren't duplicated in ActivityCompleted.
+2. **Single span per evaluation** — Each hook evaluation sends only the current span in `spans[]` (not accumulated history). The server processes each individually.
+3. **Activity context resolution** — Map OTel `trace_id` → `(workflow_id, activity_id)` so hook payloads include activity context.
+4. **Abort propagation** — Once one hook blocks, short-circuit all subsequent hooks for that activity.
 5. **HALT async bridge** — Hooks may run in sync context but `terminate()` is async. Use a flag that the activity interceptor checks in its `finally` block.
 6. **`attribute_key_identifiers`** — Include OTel-based dedup keys per span type so the server can discard duplicate spans.
