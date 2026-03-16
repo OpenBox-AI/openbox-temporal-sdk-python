@@ -1600,7 +1600,6 @@ class TestGovernanceStageField:
             span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
             evaluate_sync(
                 mock_span,
-                hook_trigger={"type": "http_request", "method": "GET", "url": "https://api.example.com/data", "stage": "started"},
                 identifier="https://api.example.com/data",
                 span_data=span_data,
             )
@@ -1612,7 +1611,7 @@ class TestGovernanceStageField:
             assert spans[0]["stage"] == "started"
             assert spans[0]["response_body"] is None
             assert spans[0]["response_headers"] is None
-            assert payload["hook_trigger"]["stage"] == "started"
+            assert payload["hook_trigger"] is True
 
     def test_evaluate_governance_sync_started_then_completed_sends_2_spans(self, governance_setup, mock_span):
         """Calling started then completed should send 2 separate API calls with 1 span each."""
@@ -1635,10 +1634,7 @@ class TestGovernanceStageField:
                 mock_span, "POST", "https://api.example.com/data", "started",
                 request_body='{"key": "value"}',
             )
-            evaluate_sync(
-                mock_span,
-                hook_trigger={"type": "http_request", "method": "POST", "url": "https://api.example.com/data", "stage": "started"},
-                identifier="https://api.example.com/data",
+            evaluate_sync(mock_span, identifier="https://api.example.com/data",
                 span_data=span_data,
             )
 
@@ -1650,10 +1646,7 @@ class TestGovernanceStageField:
                 response_headers={"content-type": "application/json"},
                 http_status_code=200,
             )
-            evaluate_sync(
-                mock_span,
-                hook_trigger={"type": "http_request", "method": "POST", "url": "https://api.example.com/data", "stage": "completed"},
-                identifier="https://api.example.com/data",
+            evaluate_sync(mock_span, identifier="https://api.example.com/data",
                 span_data=span_data,
             )
 
@@ -1666,7 +1659,7 @@ class TestGovernanceStageField:
             first_spans = first_payload["spans"]
             assert len(first_spans) == 1
             assert first_spans[0]["stage"] == "started"
-            assert first_payload["hook_trigger"]["stage"] == "started"
+            first_span = first_payload["spans"][0]; assert first_span["stage"] == "started"
 
             # 2nd call should have completed stage with response data
             second_call = mock_client_instance.post.call_args_list[1]
@@ -1677,7 +1670,7 @@ class TestGovernanceStageField:
             assert second_spans[0]["response_body"] == '{"result": "ok"}'
             assert second_spans[0]["response_headers"] == {"content-type": "application/json"}
             assert second_spans[0]["http_status_code"] == 200
-            assert second_payload["hook_trigger"]["stage"] == "completed"
+            second_span = second_payload["spans"][0]; assert second_span["stage"] == "completed"
 
     def test_evaluate_governance_sync_omits_status_code_when_none(self, governance_setup, mock_span):
         """http_status_code should not be in span when not provided."""
@@ -1696,17 +1689,14 @@ class TestGovernanceStageField:
 
         with patch("openbox.hook_governance._get_sync_client", return_value=mock_client_instance):
             span_data = _build_http_span_data(mock_span, "GET", "https://api.example.com/data", "started")
-            evaluate_sync(
-                mock_span,
-                hook_trigger={"type": "http_request", "method": "GET", "url": "https://api.example.com/data", "stage": "started"},
-                identifier="https://api.example.com/data",
+            evaluate_sync(mock_span, identifier="https://api.example.com/data",
                 span_data=span_data,
             )
 
             call_args = mock_client_instance.post.call_args
             payload = call_args.kwargs["json"]
             new_span = payload["spans"][-1]
-            assert "http_status_code" not in new_span
+            assert new_span.get("http_status_code") is None
 
     def test_requests_request_hook_sends_stage_started(self, governance_setup, mock_span):
         """_requests_request_hook should call governance with stage='started'."""
@@ -1723,7 +1713,7 @@ class TestGovernanceStageField:
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["hook_trigger"]["stage"] == "started"
+            assert kwargs["span_data"]["stage"] == "started"
 
     def test_requests_response_hook_sends_stage_completed(self, governance_setup, mock_span):
         """_requests_response_hook should call governance with stage='completed'."""
@@ -1745,7 +1735,7 @@ class TestGovernanceStageField:
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["hook_trigger"]["stage"] == "completed"
+            assert kwargs["span_data"]["stage"] == "completed"
 
     def test_httpx_request_hook_sends_stage_started(self, governance_setup, mock_span):
         """_httpx_request_hook should call governance with stage='started'."""
@@ -1765,7 +1755,7 @@ class TestGovernanceStageField:
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["hook_trigger"]["stage"] == "started"
+            assert kwargs["span_data"]["stage"] == "started"
 
     def test_httpx_response_hook_does_not_call_governance(self, governance_setup, mock_span):
         """_httpx_response_hook should NOT call governance (moved to patched send)."""
@@ -1814,7 +1804,7 @@ class TestGovernanceStageField:
 
                 mock_gov_async.assert_called_once()
                 kwargs = mock_gov_async.call_args.kwargs
-                assert kwargs["hook_trigger"]["stage"] == "started"
+                assert kwargs["span_data"]["stage"] == "started"
 
     @pytest.mark.asyncio
     async def test_httpx_async_response_hook_does_not_call_governance(self, governance_setup, mock_span):
@@ -1859,7 +1849,7 @@ class TestGovernanceStageField:
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["hook_trigger"]["stage"] == "started"
+            assert kwargs["span_data"]["stage"] == "started"
 
     def test_urllib3_response_hook_sends_stage_completed(self, governance_setup, mock_span):
         """_urllib3_response_hook should call governance with stage='completed'."""
@@ -1880,7 +1870,7 @@ class TestGovernanceStageField:
 
             mock_gov.assert_called_once()
             kwargs = mock_gov.call_args.kwargs
-            assert kwargs["hook_trigger"]["stage"] == "completed"
+            assert kwargs["span_data"]["stage"] == "completed"
 
     def test_response_hook_no_governance_when_disabled(self, mock_span_processor, mock_span):
         """Response hooks should not call governance when governance is disabled."""

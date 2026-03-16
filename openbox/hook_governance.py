@@ -1,18 +1,15 @@
 # openbox/hook_governance.py
-"""Hook-level governance evaluation for HTTP requests and file operations.
+"""Hook-level governance evaluation for all operation types.
 
 Sends per-operation governance evaluations to OpenBox Core during activity
-execution. Used by OTel hooks in otel_setup.py to evaluate each HTTP request
-and file operation at two stages: 'started' (before) and 'completed' (after).
+execution. Used by OTel hooks to evaluate each operation (HTTP, file I/O,
+database, traced functions) at two stages: 'started' and 'completed'.
 
 Architecture:
-    1. otel_setup.py hooks detect an operation (HTTP request, file open, etc.)
-    2. Hook builds a span_data dict and hook_trigger dict
-    3. Hook calls evaluate_sync() or evaluate_async()
-    4. This module: looks up activity context, assembles payload, sends to API
-    5. If verdict is BLOCK/HALT → raises GovernanceBlockedError
-
-Shared by all operation types (HTTP, file I/O, future: database queries).
+    1. Hook modules detect an operation and build a span_data dict
+    2. Hook calls evaluate_sync() or evaluate_async()
+    3. This module: looks up activity context, assembles payload, sends to API
+    4. If verdict is BLOCK/HALT → raises GovernanceBlockedError
 """
 
 from __future__ import annotations
@@ -32,19 +29,13 @@ logger = logging.getLogger(__name__)
 FAIL_OPEN = "fail_open"
 FAIL_CLOSED = "fail_closed"
 
-# Attribute keys used by OpenBox Core for span deduplication across retries.
-# Each hook type has different keys that uniquely identify the operation.
-DEDUP_KEYS_HTTP = ["http.method", "http.url"]
-DEDUP_KEYS_FILE = ["file.path", "file.operation"]
-DEDUP_KEYS_DB = ["db.system", "db.operation", "db.statement"]
-DEDUP_KEYS_FUNCTION = ["code.function", "code.namespace"]
-
 # Module-level config (set once by configure())
 _api_url: str = ""
 _api_key: str = ""
 _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
 _span_processor: Optional["WorkflowSpanProcessor"] = None
+_cached_auth_headers: Optional[dict] = None
 
 # Persistent HTTP clients (lazy-init, thread-safe for requests)
 _sync_client: Optional[httpx.Client] = None
@@ -68,12 +59,14 @@ def configure(
         api_timeout: Timeout for governance API calls (seconds)
         on_api_error: Error policy — "fail_open" or "fail_closed"
     """
-    global _api_url, _api_key, _api_timeout, _on_api_error, _span_processor, _sync_client, _async_client
+    global _api_url, _api_key, _api_timeout, _on_api_error, _span_processor, _sync_client, _async_client, _cached_auth_headers
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
     _on_api_error = on_api_error
     _span_processor = span_processor
+    # Cache auth headers (immutable after configure)
+    _cached_auth_headers = build_auth_headers(api_key)
     # Reset persistent clients so they pick up new timeout/config
     _sync_client = None
     _async_client = None
@@ -131,8 +124,8 @@ def extract_span_context(span) -> tuple:
 
 
 def _auth_headers() -> dict:
-    """Build standard auth headers using module-level API key."""
-    return build_auth_headers(_api_key)
+    """Return cached auth headers (built once in configure())."""
+    return _cached_auth_headers or build_auth_headers(_api_key)
 
 
 def build_auth_headers(api_key: str) -> dict:
@@ -148,17 +141,15 @@ def build_auth_headers(api_key: str) -> dict:
 
 def _build_payload(
     span: Any,
-    hook_trigger: Dict[str, Any],
     span_data: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Build governance evaluation payload from activity context + hook trigger.
+    """Build governance evaluation payload from activity context + span data.
 
     Returns None if no activity context found (not inside a governed activity).
 
     Args:
         span: OTel span for the current operation
-        hook_trigger: Dict describing what triggered governance (type, stage, etc.)
-        span_data: Optional span data dict to store in the buffer
+        span_data: Span data dict with hook_type, stage, and type-specific fields at root
     """
     if _span_processor is None:
         logger.debug("[GOV] _build_payload: span_processor is None — skipping")
@@ -186,11 +177,11 @@ def _build_payload(
     payload = dict(activity_context)
     payload["spans"] = [span_data] if span_data else []
     payload["span_count"] = 1 if span_data else 0
-    payload["hook_trigger"] = hook_trigger
-    from .activities import _rfc3339_now
-    payload["timestamp"] = _rfc3339_now()
+    payload["hook_trigger"] = True
+    from .types import rfc3339_now
+    payload["timestamp"] = rfc3339_now()
 
-    # Ensure JSON-serializable (Temporal Payload objects slip through)
+    # Ensure JSON-serializable (Temporal Payload objects slip through from activity_context)
     try:
         json.dumps(payload)
     except (TypeError, ValueError):
@@ -293,7 +284,6 @@ def _send_and_handle(response: Any, identifier: str, span: Any = None) -> None:
 
 def evaluate_sync(
     span: Any,
-    hook_trigger: Dict[str, Any],
     identifier: str,
     span_data: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -304,9 +294,8 @@ def evaluate_sync(
 
     Args:
         span: OTel span for the current operation
-        hook_trigger: Dict describing what triggered governance
         identifier: Resource identifier (URL or file path) for error context
-        span_data: Optional span data dict to store in the buffer
+        span_data: Span data dict with hook_type and type-specific fields at root
     """
     if not is_configured():
         return
@@ -318,7 +307,7 @@ def evaluate_sync(
     if abort_reason:
         raise GovernanceBlockedError("require_approval", abort_reason, identifier)
 
-    payload = _build_payload(span, hook_trigger, span_data)
+    payload = _build_payload(span, span_data)
     if payload is None:
         return
 
@@ -341,7 +330,6 @@ def evaluate_sync(
 
 async def evaluate_async(
     span: Any,
-    hook_trigger: Dict[str, Any],
     identifier: str,
     span_data: Optional[Dict[str, Any]] = None,
 ) -> None:
@@ -352,9 +340,8 @@ async def evaluate_async(
 
     Args:
         span: OTel span for the current operation
-        hook_trigger: Dict describing what triggered governance
         identifier: Resource identifier (URL or file path) for error context
-        span_data: Optional span data dict to store in the buffer
+        span_data: Span data dict with hook_type and type-specific fields at root
     """
     if not is_configured():
         return
@@ -366,7 +353,7 @@ async def evaluate_async(
     if abort_reason:
         raise GovernanceBlockedError("require_approval", abort_reason, identifier)
 
-    payload = _build_payload(span, hook_trigger, span_data)
+    payload = _build_payload(span, span_data)
     if payload is None:
         return
 

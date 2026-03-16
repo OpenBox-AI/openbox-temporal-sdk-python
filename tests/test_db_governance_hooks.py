@@ -152,15 +152,19 @@ class TestCursorTracerPatch:
             )
 
             assert mock.post.call_count == 2
-            started = mock.post.call_args_list[0].kwargs["json"]
-            completed = mock.post.call_args_list[1].kwargs["json"]
-            assert started["hook_trigger"]["stage"] == "started"
-            assert started["hook_trigger"]["db_system"] == "postgresql"
-            assert started["hook_trigger"]["db_operation"] == "SELECT"
-            assert started["hook_trigger"]["db_name"] == "testdb"
-            assert started["hook_trigger"]["server_address"] == "pg-host"
-            assert completed["hook_trigger"]["stage"] == "completed"
-            assert completed["hook_trigger"]["duration_ms"] >= 0
+            started_payload = mock.post.call_args_list[0].kwargs["json"]
+            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            assert started_payload["hook_trigger"] is True
+            assert completed_payload["hook_trigger"] is True
+            started = started_payload["spans"][0]
+            completed = completed_payload["spans"][0]
+            assert started["stage"] == "started"
+            assert started["db_system"] == "postgresql"
+            assert started["db_operation"] == "SELECT"
+            assert started["db_name"] == "testdb"
+            assert started["server_address"] == "pg-host"
+            assert completed["stage"] == "completed"
+            assert completed["duration_ns"] >= 0
 
     def test_traced_execution_blocks_on_halt(self):
         """HALT verdict on started should raise GovernanceBlockedError."""
@@ -197,7 +201,8 @@ class TestCursorTracerPatch:
             with _mock_httpx_client() as mock:
                 tracer.traced_execution(cursor, cursor.execute, query, None)
                 payload = mock.post.call_args_list[0].kwargs["json"]
-                assert payload["hook_trigger"]["db_operation"] == expected_op, \
+                span = payload["spans"][0]
+                assert span["db_operation"] == expected_op, \
                     f"Expected {expected_op} for query: {query}"
 
     def test_traced_execution_mysql_system(self):
@@ -215,10 +220,11 @@ class TestCursorTracerPatch:
                 cursor, cursor.execute, "SELECT 1", None
             )
 
-            started = mock.post.call_args_list[0].kwargs["json"]
-            assert started["hook_trigger"]["db_system"] == "mysql"
-            assert started["hook_trigger"]["server_address"] == "mysql-host"
-            assert started["hook_trigger"]["server_port"] == 3306
+            payload = mock.post.call_args_list[0].kwargs["json"]
+            started = payload["spans"][0]
+            assert started["db_system"] == "mysql"
+            assert started["server_address"] == "mysql-host"
+            assert started["server_port"] == 3306
 
     def test_span_data_has_stage_at_root(self):
         """Span data sent to governance API should have 'stage' at root level."""
@@ -258,9 +264,9 @@ class TestCursorTracerPatch:
         assert "span_id" in started_span
         assert "trace_id" in started_span
 
-        # DB attributes should be in attributes dict
-        assert started_span["attributes"]["db.system"] == "postgresql"
-        assert started_span["attributes"]["db.operation"] == "SELECT"
+        # DB-specific fields should be at root level
+        assert started_span["db_system"] == "postgresql"
+        assert started_span["db_operation"] == "SELECT"
 
     def test_traced_execution_captures_query_error(self):
         """Patched traced_execution should send completed with error on query failure."""
@@ -280,9 +286,10 @@ class TestCursorTracerPatch:
                 )
 
             assert mock.post.call_count == 2
-            completed = mock.post.call_args_list[1].kwargs["json"]
-            assert completed["hook_trigger"]["stage"] == "completed"
-            assert completed["hook_trigger"]["error"] == "connection lost"
+            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            completed = completed_payload["spans"][0]
+            assert completed["stage"] == "completed"
+            assert completed["error"] == "connection lost"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -312,14 +319,16 @@ class TestRedisHooks:
 
             assert mock.post.call_count == 1
             payload = mock.post.call_args_list[0].kwargs["json"]
-            assert payload["hook_trigger"]["type"] == "db_query"
-            assert payload["hook_trigger"]["stage"] == "started"
-            assert payload["hook_trigger"]["db_system"] == "redis"
-            assert payload["hook_trigger"]["db_name"] == "2"
-            assert payload["hook_trigger"]["db_operation"] == "GET"
-            assert payload["hook_trigger"]["db_statement"] == "GET mykey"
-            assert payload["hook_trigger"]["server_address"] == "redis-host"
-            assert payload["hook_trigger"]["server_port"] == 6379
+            assert payload["hook_trigger"] is True
+            span_data = payload["spans"][0]
+            assert span_data["hook_type"] == "db_query"
+            assert span_data["stage"] == "started"
+            assert span_data["db_system"] == "redis"
+            assert span_data["db_name"] == "2"
+            assert span_data["db_operation"] == "GET"
+            assert span_data["db_statement"] == "GET mykey"
+            assert span_data["server_address"] == "redis-host"
+            assert span_data["server_port"] == 6379
 
     def test_request_hook_blocks_on_halt(self):
         """Redis request_hook with HALT verdict should raise GovernanceBlockedError."""
@@ -347,10 +356,11 @@ class TestRedisHooks:
 
             # 2 calls: started + completed
             assert mock.post.call_count == 2
-            completed = mock.post.call_args_list[1].kwargs["json"]
-            assert completed["hook_trigger"]["stage"] == "completed"
-            assert completed["hook_trigger"]["db_system"] == "redis"
-            assert completed["hook_trigger"]["duration_ms"] >= 0
+            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            completed = completed_payload["spans"][0]
+            assert completed["stage"] == "completed"
+            assert completed["db_system"] == "redis"
+            assert completed["duration_ns"] >= 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -377,13 +387,15 @@ class TestSQLAlchemyHooks:
                 )
 
             assert mock.post.call_count == 2
-            started = mock.post.call_args_list[0].kwargs["json"]
-            completed = mock.post.call_args_list[1].kwargs["json"]
-            assert started["hook_trigger"]["stage"] == "started"
-            assert started["hook_trigger"]["db_operation"] == "SELECT"
-            assert started["hook_trigger"]["db_system"] == "sqlite"
-            assert completed["hook_trigger"]["stage"] == "completed"
-            assert completed["hook_trigger"]["duration_ms"] >= 0
+            started_payload = mock.post.call_args_list[0].kwargs["json"]
+            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            started = started_payload["spans"][0]
+            completed = completed_payload["spans"][0]
+            assert started["stage"] == "started"
+            assert started["db_operation"] == "SELECT"
+            assert started["db_system"] == "sqlite"
+            assert completed["stage"] == "completed"
+            assert completed["duration_ns"] >= 0
 
     def test_block_prevents_query(self):
         """BLOCK verdict on started should raise GovernanceBlockedError."""
@@ -415,10 +427,10 @@ class TestSQLAlchemyHooks:
 
             insert_calls = [
                 c for c in mock.post.call_args_list
-                if c.kwargs["json"]["hook_trigger"]["db_operation"] == "INSERT"
+                if c.kwargs["json"]["spans"][0]["db_operation"] == "INSERT"
             ]
             assert len(insert_calls) >= 1
-            assert insert_calls[0].kwargs["json"]["hook_trigger"]["stage"] == "started"
+            assert insert_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -529,7 +541,7 @@ class TestHookTriggerSchema:
     """Verify hook_trigger contains all required fields."""
 
     def test_started_trigger_has_required_fields(self):
-        """Started hook_trigger must have type, stage, db_system, db_operation, db_statement."""
+        """Span data should have hook_type, stage, db_system, db_operation, db_statement."""
         _setup_governance()
         req_hook, _ = db_gov.setup_redis_hooks()
         instance = MagicMock()
@@ -539,15 +551,17 @@ class TestHookTriggerSchema:
         with _mock_httpx_client() as mock:
             req_hook(span, instance, ("HSET", "myhash", "field", "value"), {})
 
-            trigger = mock.post.call_args_list[0].kwargs["json"]["hook_trigger"]
-            required = {"type", "stage", "db_system", "db_name", "db_operation",
+            payload = mock.post.call_args_list[0].kwargs["json"]
+            assert payload["hook_trigger"] is True
+            span_data = payload["spans"][0]
+            required = {"hook_type", "stage", "db_system", "db_name", "db_operation",
                         "db_statement", "server_address", "server_port"}
-            assert required.issubset(trigger.keys())
-            assert trigger["type"] == "db_query"
-            assert trigger["stage"] == "started"
+            assert required.issubset(span_data.keys())
+            assert span_data["hook_type"] == "db_query"
+            assert span_data["stage"] == "started"
 
     def test_completed_trigger_has_duration_and_error(self):
-        """Completed hook_trigger must include duration_ms and error fields."""
+        """Completed span data must include duration_ns and error fields."""
         _setup_governance()
         req_hook, resp_hook = db_gov.setup_redis_hooks()
         instance = MagicMock()
@@ -558,11 +572,12 @@ class TestHookTriggerSchema:
             req_hook(span, instance, ("GET", "k"), {})
             resp_hook(span, instance, "v")
 
-            trigger = mock.post.call_args_list[1].kwargs["json"]["hook_trigger"]
-            assert "duration_ms" in trigger
-            assert "error" in trigger
-            assert trigger["duration_ms"] >= 0
-            assert trigger["error"] is None
+            payload = mock.post.call_args_list[1].kwargs["json"]
+            span_data = payload["spans"][0]
+            assert "duration_ns" in span_data
+            assert "error" in span_data
+            assert span_data["duration_ns"] >= 0
+            assert span_data["error"] is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -636,12 +651,14 @@ class TestPymongoCommandListener:
 
             assert mock.post.call_count == 1
             payload = mock.post.call_args_list[0].kwargs["json"]
-            assert payload["hook_trigger"]["stage"] == "started"
-            assert payload["hook_trigger"]["db_system"] == "mongodb"
-            assert payload["hook_trigger"]["db_name"] == "mydb"
-            assert payload["hook_trigger"]["db_operation"] == "insert"
-            assert payload["hook_trigger"]["server_address"] == "mongo-host"
-            assert payload["hook_trigger"]["server_port"] == 27017
+            assert payload["hook_trigger"] is True
+            span_data = payload["spans"][0]
+            assert span_data["stage"] == "started"
+            assert span_data["db_system"] == "mongodb"
+            assert span_data["db_name"] == "mydb"
+            assert span_data["db_operation"] == "insert"
+            assert span_data["server_address"] == "mongo-host"
+            assert span_data["server_port"] == 27017
 
     def test_succeeded_sends_completed_with_consistent_statement(self):
         """CommandListener.succeeded should reuse db_statement from started event."""
@@ -665,12 +682,12 @@ class TestPymongoCommandListener:
             started_payload = mock.post.call_args_list[0].kwargs["json"]
             completed_payload = mock.post.call_args_list[1].kwargs["json"]
             # db_statement should be consistent between started and completed
-            assert started_payload["hook_trigger"]["db_statement"] == \
-                completed_payload["hook_trigger"]["db_statement"]
-            assert completed_payload["hook_trigger"]["stage"] == "completed"
-            assert completed_payload["hook_trigger"]["db_system"] == "mongodb"
-            assert completed_payload["hook_trigger"]["duration_ms"] == 3.0
-            assert completed_payload["hook_trigger"]["error"] is None
+            assert started_payload["spans"][0]["db_statement"] == \
+                completed_payload["spans"][0]["db_statement"]
+            assert completed_payload["spans"][0]["stage"] == "completed"
+            assert completed_payload["spans"][0]["db_system"] == "mongodb"
+            assert completed_payload["spans"][0]["duration_ns"] == 3_000_000  # 3ms in nanoseconds
+            assert completed_payload["spans"][0]["error"] is None
 
     def test_failed_sends_completed_with_error_and_consistent_statement(self):
         """CommandListener.failed should send 'completed' with error and consistent db_statement."""
@@ -693,10 +710,10 @@ class TestPymongoCommandListener:
             assert mock.post.call_count == 2
             started_payload = mock.post.call_args_list[0].kwargs["json"]
             completed_payload = mock.post.call_args_list[1].kwargs["json"]
-            assert started_payload["hook_trigger"]["db_statement"] == \
-                completed_payload["hook_trigger"]["db_statement"]
-            assert completed_payload["hook_trigger"]["stage"] == "completed"
-            assert completed_payload["hook_trigger"]["error"] == "connection timeout"
+            assert started_payload["spans"][0]["db_statement"] == \
+                completed_payload["spans"][0]["db_statement"]
+            assert completed_payload["spans"][0]["stage"] == "completed"
+            assert completed_payload["spans"][0]["error"] == "connection timeout"
 
     def test_listener_skips_when_wrapt_active(self):
         """CommandListener should skip when wrapt wrapper is active (dedup)."""
@@ -751,8 +768,9 @@ class TestPymongoCommandListener:
             listener.started(event)
 
             payload = mock.post.call_args_list[0].kwargs["json"]
-            assert payload["hook_trigger"]["server_address"] == "unknown"
-            assert payload["hook_trigger"]["server_port"] == 27017
+            span_data = payload["spans"][0]
+            assert span_data["server_address"] == "unknown"
+            assert span_data["server_port"] == 27017
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

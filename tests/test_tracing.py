@@ -984,8 +984,8 @@ class TestTracedGovernanceStarted:
 
         # Check started payload
         started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
-        trigger = started_payload["hook_trigger"]
-        assert trigger["type"] == "function_call"
+        trigger = started_payload["spans"][0]
+        assert trigger["hook_type"] == "function_call"
         assert trigger["function"] == "my_func"
         assert trigger["stage"] == "started"
 
@@ -1035,7 +1035,7 @@ class TestTracedGovernanceStarted:
 
         calls = mock_client.post.call_args_list
         started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
-        trigger = started_payload["hook_trigger"]
+        trigger = started_payload["spans"][0]
         assert "args" in trigger
 
 
@@ -1066,8 +1066,8 @@ class TestTracedGovernanceCompleted:
         assert len(calls) == 2
 
         completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
-        trigger = completed_payload["hook_trigger"]
-        assert trigger["type"] == "function_call"
+        trigger = completed_payload["spans"][0]
+        assert trigger["hook_type"] == "function_call"
         assert trigger["stage"] == "completed"
 
     def test_governed_completed_includes_result(self):
@@ -1083,7 +1083,7 @@ class TestTracedGovernanceCompleted:
 
         calls = mock_client.post.call_args_list
         completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
-        trigger = completed_payload["hook_trigger"]
+        trigger = completed_payload["spans"][0]
         assert "result" in trigger
 
     def test_governed_completed_includes_error_on_exception(self):
@@ -1102,10 +1102,9 @@ class TestTracedGovernanceCompleted:
         assert len(calls) == 2
 
         error_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
-        trigger = error_payload["hook_trigger"]
+        trigger = error_payload["spans"][0]
         assert trigger["stage"] == "completed"
-        assert trigger["error"]["type"] == "ValueError"
-        assert trigger["error"]["message"] == "test error"
+        assert trigger["error"] == "test error"
 
     def test_governed_started_and_completed_both_sent(self):
         """2 governance calls per invocation (started + completed)."""
@@ -1124,7 +1123,7 @@ class TestTracedGovernanceCompleted:
         stages = []
         for c in calls:
             payload = c.kwargs.get("json") or c[1].get("json")
-            stages.append(payload["hook_trigger"]["stage"])
+            stages.append(payload["spans"][0]["stage"])
         assert stages == ["started", "completed"]
 
 
@@ -1158,7 +1157,7 @@ class TestTracedGovernanceAsync:
         stages = []
         for c in calls:
             payload = c[0][1] if len(c[0]) > 1 else c.kwargs.get("json")
-            stages.append(payload["hook_trigger"]["stage"])
+            stages.append(payload["spans"][0]["stage"])
         assert stages == ["started", "completed"]
 
     async def test_async_governed_block_prevents_execution(self):
