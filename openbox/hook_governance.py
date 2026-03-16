@@ -133,9 +133,11 @@ def build_auth_headers(api_key: str) -> dict:
 
     Shared by all modules that call OpenBox Core API.
     """
+    from . import __version__
     return {
         "Authorization": f"Bearer {api_key}",
-        "User-Agent": "OpenBox-SDK/1.0",
+        "User-Agent": f"OpenBox-SDK/{__version__}",
+        "X-OpenBox-SDK-Version": __version__,
     }
 
 
