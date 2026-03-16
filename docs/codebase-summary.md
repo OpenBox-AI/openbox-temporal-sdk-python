@@ -27,8 +27,10 @@ openbox-temporal-sdk-python/
 │   ├── activities.py          # Governance event activity
 │   ├── span_processor.py      # OTel span buffering and body storage
 │   ├── hook_governance.py     # Hook-level governance evaluation
-│   ├── otel_setup.py          # HTTP/DB/File instrumentation setup
-│   ├── db_governance_hooks.py # Per-library DB governance wrappers
+│   ├── otel_setup.py            # Orchestrator + re-exports (HTTP/DB/File setup)
+│   ├── http_governance_hooks.py # HTTP hooks + body capture (requests, httpx, etc.)
+│   ├── file_governance_hooks.py # File I/O hooks + TracedFile wrapper
+│   ├── db_governance_hooks.py   # Per-library DB governance wrappers
 │   └── tracing.py             # @traced decorator for function tracing
 ├── README.md                  # User-facing documentation
 ├── pyproject.toml             # Package metadata and dependencies
@@ -601,7 +603,9 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 | `activities.py` | 163 | Governance activity |
 | `span_processor.py` | 400+ | Span buffering |
 | `hook_governance.py` | 375 | Hook-level governance evaluation |
-| `otel_setup.py` | 1,200+ | Instrumentation + span data builders |
+| `otel_setup.py` | 463 | Orchestrator + re-exports (backward compat) |
+| `http_governance_hooks.py` | 749 | HTTP hooks + body capture |
+| `file_governance_hooks.py` | 342 | File I/O hooks + TracedFile wrapper |
 | `db_governance_hooks.py` | 900+ | DB governance hooks + span data builder |
 | `tracing.py` | 450+ | @traced decorator + span data builder |
 | **Total** | **~5,000+** | **Core SDK** |

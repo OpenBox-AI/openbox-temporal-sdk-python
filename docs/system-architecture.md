@@ -384,7 +384,7 @@ class WorkflowSpanProcessor:
    response_headers: dict of response headers
    ```
 
-**Code Location:** `openbox/otel_setup.py` (lines 1-1500+)
+**Code Location:** `openbox/http_governance_hooks.py` (re-exported via `openbox/otel_setup.py`)
 
 #### Database Instrumentation
 
@@ -451,7 +451,7 @@ class WorkflowSpanProcessor:
 | sqlalchemy | `before/after_cursor_execute` + `handle_error` events | Requires engine reference |
 | psycopg2, asyncpg, mysql, pymysql, pymongo | `wrapt` monkey-patching | C extensions may be immutable (silently skipped) |
 
-**Code Location:** `openbox/db_governance_hooks.py`, `openbox/otel_setup.py`
+**Code Location:** `openbox/db_governance_hooks.py` (orchestrated by `openbox/otel_setup.py`)
 
 #### File I/O Instrumentation
 
@@ -517,7 +517,7 @@ class WorkflowSpanProcessor:
 
 **Skipped Paths:** `/dev/`, `/proc/`, `/sys/`, `__pycache__`, `.pyc`, `.so`
 
-**Code Location:** `openbox/otel_setup.py` (lines 143-600+)
+**Code Location:** `openbox/file_governance_hooks.py` (re-exported via `openbox/otel_setup.py`)
 
 #### Function Tracing Instrumentation
 
