@@ -1,21 +1,24 @@
 # Project Overview & Product Development Requirements (PDR)
 
 **Project Name:** OpenBox SDK for Temporal Workflows
-**Version:** 1.0.0
+**Version:** 1.1.0
 **Status:** Alpha
-**Last Updated:** 2026-02-04
-**Total LOC:** 3,583 (across 10 Python files)
+**Last Updated:** 2026-03-16
+**Total LOC:** 3,700+ (across 11 Python files)
 
 ---
 
 ## Executive Summary
 
-OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boundary governance and observability** for Temporal-based applications. It captures workflow/activity lifecycle events, HTTP telemetry (request/response bodies and headers), and sends them to OpenBox Core for policy evaluation. The SDK enables graduated governance responses (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT) and guardrails for input/output validation and redaction.
+OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boundary governance and observability** for Temporal-based applications. It captures workflow/activity lifecycle events, HTTP telemetry (request/response bodies and headers), database queries, file operations, and sends them to OpenBox Core for policy evaluation. The SDK enables graduated governance responses (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT) and guardrails for input/output validation and redaction.
+
+**Key Innovation:** Hook-level governance enables real-time per-operation policy evaluation during activity execution, allowing operations to be blocked at the source rather than only at activity completion.
 
 ### Core Value Proposition
 
 - **Zero-code instrumentation** via `create_openbox_worker()` factory function
 - **Comprehensive telemetry capture**: workflow events, activity I/O, HTTP calls, database queries, file operations
+- **Real-time per-operation governance** via hook-level evaluation (HTTP, database, file I/O, traced functions)
 - **Graduated governance verdicts**: 5-tier response (ALLOW → CONSTRAIN → REQUIRE_APPROVAL → BLOCK → HALT)
 - **Human-in-the-loop (HITL) support**: Pause workflows for human approval with expiration handling
 - **Guardrails system**: Validate and redact sensitive data before/after execution
@@ -103,7 +106,28 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Exception details captured on error
   - BLOCK/HALT verdicts raise `GovernanceBlockedError` and prevent/interrupt execution
 
-#### FR-7: Governance Verdict Handling
+#### FR-7: Hook-Level Governance (NEW)
+- **Requirement**: Real-time per-operation governance evaluation during activity execution
+- **Operations Covered**:
+  - HTTP requests (started/completed stages)
+  - Database queries (started/completed stages)
+  - File operations (open, read, write; started/completed stages)
+  - Traced function calls (started/completed stages)
+- **Implementation**: `hook_governance.py` with hooks in `otel_setup.py`, `db_governance_hooks.py`, `tracing.py`
+- **Payload Structure**:
+  - `hook_trigger`: Simple boolean `true` (replaces dict with type/stage/data)
+  - Span data at root level: type-specific fields (`http_method`, `db_system`, `file_path`) at root, NOT in attributes
+  - `attributes` field: Contains ONLY original OTel attributes (no custom fields)
+  - `hook_type` field: Discriminates operation type (`http_request`, `db_query`, `file_operation`, `function_call`)
+  - Single span per evaluation (no accumulated history)
+  - `duration_ns` computed for all hook types
+- **Acceptance Criteria**:
+  - Operations can be blocked at the source (before execution)
+  - Activity abort tracking prevents duplicate evaluations
+  - Short-circuit evaluation on abort prevents cascade evaluations
+  - Fail-open/fail-closed policies respected
+
+#### FR-8: Governance Verdict Handling
 - **Requirement**: Process governance verdicts and enforce actions
 - **5-Tier Verdict System**:
   1. `ALLOW` - Continue execution normally
@@ -117,7 +141,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - `BLOCK`/`HALT` raise `ApplicationError` with `non_retryable=True`
   - Backward compatible with v1.0 action strings (`continue`, `stop`, `require-approval`)
 
-#### FR-8: Guardrails System
+#### FR-9: Guardrails System
 - **Requirement**: Validate and redact sensitive data in activity input/output
 - **Features**:
   - **Pre-execution**: Redact activity input before it executes
@@ -130,7 +154,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Validation failures raise `ApplicationError` with type `GuardrailsValidationFailed`
   - Reasons array provides detailed failure information
 
-#### FR-9: Human-in-the-Loop (HITL) Approval
+#### FR-10: Human-in-the-Loop (HITL) Approval
 - **Requirement**: Pause workflow execution for human approval on `REQUIRE_APPROVAL` verdict
 - **Behavior**:
   - Activity raises retryable `ApplicationError` with type `ApprovalPending`
@@ -145,12 +169,13 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Expired approvals terminate with `ApprovalExpired` error type
   - Configurable via `hitl_enabled` flag (default: True)
 
-#### FR-10: Worker Factory Function
+#### FR-11: Worker Factory Function
 - **Requirement**: Provide simple factory function for zero-code setup
 - **Function**: `create_openbox_worker()` in `worker.py`
 - **Acceptance Criteria**:
   - Validates API key format and connectivity
   - Sets up span processor and OTel instrumentation
+  - Configures hook-level governance
   - Creates workflow + activity interceptors
   - Returns fully configured `Worker` instance
   - Accepts all standard Temporal Worker parameters
@@ -165,9 +190,11 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - HTTP body capture: <10ms per request
   - Span buffering: O(1) registration, O(n) retrieval
   - Event serialization: <5ms for typical payloads
+  - Hook governance evaluation: <20ms per operation
 - **Constraints**:
   - Bodies stored separately from OTel spans to avoid exporter overhead
   - Ignored URLs skip instrumentation entirely
+  - Hook-level governance evaluated synchronously (blocking potential)
 
 #### NFR-2: Reliability
 - **Requirement**: Fail-safe governance with configurable error handling
@@ -214,6 +241,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Event payloads include timestamps, workflow IDs, activity IDs
   - Span data includes trace IDs for correlation
   - Error details include full exception chain
+  - Hook-level governance logs verdict decisions
 
 ---
 
@@ -239,6 +267,11 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Impact**: Verdicts from previous run should not affect new run
 - **Mitigation**: Store `run_id` with verdict, clear stale verdicts on mismatch
 
+#### TC-5: Hook Governance Performance
+- **Constraint**: Synchronous governance evaluation blocks operation execution
+- **Impact**: Slow governance API responses slow down activity execution
+- **Mitigation**: Configurable timeout (default 30s), fail-open/fail-closed policies
+
 ---
 
 ### 4. Integration Points
@@ -251,6 +284,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - `GET /api/v1/auth/validate` - Validate API key on initialization
 - **Authentication**: Bearer token (`Authorization: Bearer {api_key}`)
 - **Response Format**: JSON with `verdict`, `reason`, `policy_id`, `risk_score`, `guardrails_result`, `approval_expiration_time`
+- **Hook Governance Payload**: Includes `hook_trigger: true`, `spans` array with single span, type-specific fields at root level
 
 #### INT-2: Temporal Server
 - **Connection**: Via `temporalio.client.Client`
@@ -261,6 +295,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **TracerProvider**: SDK creates and registers `WorkflowSpanProcessor`
 - **Instrumentors**: HTTP, database, file I/O (via OTel community packages)
 - **Span Export**: Optional fallback processor for external tracing systems
+- **Hook-Level Governance**: Integrated into HTTP/DB/File/Function hooks before OTel span creation
 
 ---
 
@@ -269,10 +304,12 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 #### SM-1: Adoption Metrics
 - **Zero-code setup**: >80% of users use `create_openbox_worker()` factory
 - **Instrumentation coverage**: All 6 event types captured
+- **Hook governance adoption**: >50% of users enable hook-level governance
 - **HITL adoption**: >50% of users enable approval polling
 
 #### SM-2: Performance Metrics
-- **Latency**: <50ms p95 for governance API calls
+- **Latency**: <50ms p95 for governance API calls (activity-level)
+- **Hook latency**: <20ms p95 for hook-level governance calls
 - **Overhead**: <5% CPU increase with full instrumentation
 - **Memory**: <100MB additional memory per worker
 
@@ -280,10 +317,32 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Uptime**: 99.9% governance API availability
 - **Error rate**: <0.1% governance evaluation failures
 - **Verdict enforcement**: 100% compliance (no HALT verdicts bypassed)
+- **Hook accuracy**: 100% blocking enforcement (no blocked operations proceed)
 
 ---
 
-### 6. Future Enhancements
+### 6. Recent Changes (v1.1.0)
+
+#### Hook-Level Governance Simplification
+
+**Key Changes:**
+1. **hook_trigger simplified to boolean `true`** — was a dict with type/stage/data, now just `true`
+2. **All span data at root level** — type-specific fields (`http_method`, `db_system`, `file_path`, `function`, etc.) are at span root, not in attributes or hook_trigger
+3. **`attributes` is OTel-original only** — no custom fields injected
+4. **`hook_type` field** discriminates operation type: `http_request`, `db_query`, `file_operation`, `function_call`
+5. **Single span per evaluation** — no accumulated history
+6. **`duration_ns` now computed** for all hook types (HTTP, file, function — DB already had it)
+7. **Removed from span_processor**: `mark_governed`, `store_body`, `get_pending_body`, `_extract_span_data`, `_governed_span_ids`, `_body_data`
+
+**Files Updated:**
+- `hook_governance.py` (new module for per-operation evaluation)
+- `otel_setup.py` (span data builders, hook integration)
+- `db_governance_hooks.py` (span data builder, hook integration)
+- `tracing.py` (span data builder, hook integration)
+
+---
+
+### 7. Future Enhancements
 
 #### FE-1: Constraint Enforcement
 - **Description**: Enforce `CONSTRAIN` verdict by modifying activity behavior (e.g., rate limiting, sandboxing)
@@ -305,9 +364,14 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Priority**: Medium
 - **Timeline**: Q3 2026
 
+#### FE-5: Async Hook Governance
+- **Description**: Support truly async governance evaluation without blocking
+- **Priority**: Medium
+- **Timeline**: Q3 2026
+
 ---
 
-### 7. Risks and Mitigations
+### 8. Risks and Mitigations
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|------------|------------|
@@ -316,10 +380,12 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 | Governance API downtime | High | Medium | Fail-open default, configurable timeout |
 | Body capture breaking HTTP clients | Medium | Low | Defensive programming, skip binary content |
 | Verdict staleness across runs | Medium | Medium | Store run_id with verdict, clear on mismatch |
+| Hook governance performance degradation | High | Medium | Timeout enforcement, fail-open default, async alternative |
+| Hook governance API failures | High | Medium | Activity abort tracking, short-circuit evaluation |
 
 ---
 
-### 8. Dependencies
+### 9. Dependencies
 
 #### Core Dependencies
 - `temporalio>=1.8.0,<2` - Temporal Python SDK
@@ -344,7 +410,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 ---
 
-### 9. Glossary
+### 10. Glossary
 
 - **Verdict**: Governance decision returned by OpenBox Core (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
 - **Guardrails**: Input/output validation and redaction system
@@ -353,10 +419,12 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Determinism**: Temporal requirement that workflow code produces same result on replay
 - **Fail-open**: Continue execution when governance API is unavailable
 - **Fail-closed**: Stop execution when governance API is unavailable
+- **Hook-level governance**: Real-time per-operation policy evaluation during execution
+- **Activity abort**: Flag set when hook governance blocks an operation, preventing cascade evaluation
 
 ---
 
-**Document Version**: 1.0
+**Document Version**: 1.2
 **Prepared By**: OpenBox Documentation System
-**Date**: 2026-02-04
-**Test Status**: 10 test files implemented (see `./tests/` directory)
+**Date**: 2026-03-16
+**Test Status**: 13+ test files implemented (see `./tests/` directory)

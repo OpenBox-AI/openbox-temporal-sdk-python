@@ -24,11 +24,11 @@ Activity ends → ActivityCompleted → API → verdict
 
 **HTTP Requests** — httpx (sync + async), requests, urllib3, urllib
 - Started: method, URL, request headers/body
-- Completed: + response headers/body, status code
+- Completed: + response headers/body, status code, duration
 
 **Database Queries** — psycopg2, pymysql, mysql-connector, asyncpg, pymongo, redis, sqlalchemy
 - Started: db_system, db_name, db_operation, db_statement, server address/port
-- Completed: + duration_ms, error
+- Completed: + duration, rowcount, error
 
 **File Operations** — open, read, write, readline, readlines, writelines, close
 - Started: file path, mode, operation type
@@ -37,12 +37,12 @@ Activity ends → ActivityCompleted → API → verdict
 
 **Function Tracing** — `@traced` decorator
 - Started: function name, module, arguments (if `capture_args=True`)
-- Completed: + result (if `capture_result=True`), error
+- Completed: + result (if `capture_result=True`), error, duration
 - Zero overhead when governance is not configured
 
-### Hook Trigger Payload
+### Payload Shape
 
-Governance evaluations now include a `hook_trigger` object. Each evaluation sends only the current span — no accumulated history:
+Each hook evaluation sends a single span with all data at root level. `hook_trigger` is a boolean flag:
 
 ```json
 {
@@ -51,24 +51,36 @@ Governance evaluations now include a `hook_trigger` object. Each evaluation send
   "run_id": "...",
   "activity_id": "...",
   "activity_type": "...",
-  "spans": [{ ...single span data... }],
+  "spans": [{
+    "hook_type": "http_request",
+    "stage": "completed",
+    "http_method": "GET",
+    "http_url": "https://api.example.com/data",
+    "request_body": "...",
+    "response_body": "...",
+    "http_status_code": 200,
+    "duration_ns": 125000000,
+    "attributes": {"http.method": "GET", "http.url": "..."},
+    "error": null,
+    ...base span fields...
+  }],
   "span_count": 1,
-  "hook_trigger": {
-    "type": "http_request | file_operation | db_query | function_call",
-    "stage": "started | completed",
-    "attribute_key_identifiers": ["http.method", "http.url"]
-  }
+  "hook_trigger": true
 }
 ```
 
-`attribute_key_identifiers` are OTel semantic convention keys that uniquely identify a span by its type. The OpenBox server uses these to detect and discard duplicate spans (e.g. from Temporal activity retries or OTel instrumentation overlap).
+### Span Data Interfaces
 
-| Type | Dedup Keys |
-|------|-----------|
-| HTTP | `http.method`, `http.url` |
-| File | `file.path`, `file.operation` |
-| DB | `db.system`, `db.operation`, `db.statement` |
-| Function | `code.function`, `code.namespace` |
+**Base fields (all types):**
+`span_id`, `trace_id`, `parent_span_id`, `name`, `kind`, `stage`, `start_time`, `end_time`, `duration_ns`, `attributes` (OTel-original only), `status`, `events`, `hook_type`, `error`
+
+**HTTP** (`hook_type: "http_request"`): `http_method`, `http_url`, `request_body`, `request_headers`, `response_body`, `response_headers`, `http_status_code`
+
+**DB** (`hook_type: "db_query"`): `db_system`, `db_name`, `db_operation`, `db_statement`, `server_address`, `server_port`, `rowcount`
+
+**File** (`hook_type: "file_operation"`): `file_path`, `file_mode`, `file_operation`, `data`, `bytes_read`, `bytes_written`, `lines_count`
+
+**Function** (`hook_type: "function_call"`): `function`, `module`, `args`, `result`
 
 ### `@traced` Decorator
 
@@ -94,14 +106,14 @@ REQUIRE_APPROVAL verdicts from hook-level governance now enter the same human-in
 
 ## Bug Fixes
 
-- **HALT verdict from hooks not terminating workflow** — HALT was treated the same as BLOCK (only stopped the activity). Now correctly calls `client.terminate()` to end the workflow.
-- **REQUIRE_APPROVAL from hooks not entering approval flow** — `GovernanceBlockedError` with REQUIRE_APPROVAL was unhandled. Now sets `pending_approval` flag and raises retryable `ApplicationError(type="ApprovalPending")`.
-- **Stale buffer/verdict from previous workflow run** — Buffer and verdict from a previous run could carry over when workflow_id was reused. Now checks `run_id` and clears stale state.
-- **Subsequent hooks still firing after first block** — After one hook blocked, remaining hooks for the same activity still executed. Now uses abort propagation to short-circuit all subsequent hooks immediately.
+- **HALT verdict from hooks not terminating workflow** — Now correctly calls `client.terminate()` to end the workflow.
+- **REQUIRE_APPROVAL from hooks not entering approval flow** — Now sets `pending_approval` flag and raises retryable `ApplicationError(type="ApprovalPending")`.
+- **Stale buffer/verdict from previous workflow run** — Now checks `run_id` and clears stale state.
+- **Subsequent hooks still firing after first block** — Now uses abort propagation to short-circuit all subsequent hooks immediately.
 
 ## Breaking Changes
 
-None. Fully backward compatible with v1.0.x. The existing `POST /api/v1/governance/evaluate` endpoint is reused with the additional `hook_trigger` field. All v1.0 verdict aliases (`continue`, `stop`, `require-approval`, `action` field) remain supported.
+None. Fully backward compatible with v1.0.x. The existing `POST /api/v1/governance/evaluate` endpoint is reused. All v1.0 verdict aliases (`continue`, `stop`, `require-approval`, `action` field) remain supported.
 
 ## Configuration
 
@@ -115,10 +127,8 @@ worker = create_openbox_worker(
     activities=[my_activity],
     openbox_url=os.getenv("OPENBOX_URL"),
     openbox_api_key=os.getenv("OPENBOX_API_KEY"),
-    # These settings now also apply to hook-level governance
     governance_timeout=30.0,
     governance_policy="fail_open",
-    # Opt-in for file I/O governance
     instrument_file_io=True,
 )
 ```
@@ -127,9 +137,10 @@ worker = create_openbox_worker(
 
 If your SDK (LangChain, Mastra, etc.) has a similar OpenBox governance flow, here are the key changes to replicate:
 
-1. **Two-stage evaluation** — Send `started` (blocking) and `completed` (informational) governance calls for each operation, using the same `/api/v1/governance/evaluate` endpoint with a `hook_trigger` field.
-2. **Single span per evaluation** — Each hook evaluation sends only the current span in `spans[]` (not accumulated history). The server processes each individually.
-3. **Activity context resolution** — Map OTel `trace_id` → `(workflow_id, activity_id)` so hook payloads include activity context.
-4. **Abort propagation** — Once one hook blocks, short-circuit all subsequent hooks for that activity.
-5. **HALT async bridge** — Hooks may run in sync context but `terminate()` is async. Use a flag that the activity interceptor checks in its `finally` block.
-6. **`attribute_key_identifiers`** — Include OTel-based dedup keys per span type so the server can discard duplicate spans.
+1. **Two-stage evaluation** — Send `started` (blocking) and `completed` (informational) governance calls for each operation via `POST /api/v1/governance/evaluate`.
+2. **Single span per evaluation** — Each hook sends only the current span in `spans[]`. `hook_trigger: true` signals it's a hook evaluation.
+3. **All data at span root** — `hook_type` discriminates the operation type. Type-specific fields (method, url, db_system, file_path, etc.) are at span root level, not in `attributes` or `hook_trigger`.
+4. **`attributes` = OTel-original only** — Don't inject custom fields into span attributes.
+5. **Activity context resolution** — Map OTel `trace_id` → `(workflow_id, activity_id)` so hook payloads include activity context.
+6. **Abort propagation** — Once one hook blocks, short-circuit all subsequent hooks for that activity.
+7. **HALT async bridge** — Hooks may run in sync context but `terminate()` is async. Use a flag that the activity interceptor checks in its `finally` block.

@@ -1,8 +1,8 @@
 # System Architecture
 
-**Last Updated:** 2026-03-05
+**Last Updated:** 2026-03-16
 **Version:** 1.1.0
-**Total LOC:** 3,583 (across 10 Python files)
+**Total LOC:** 3,700+ (across 11 Python files)
 
 ---
 
@@ -45,6 +45,16 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
 │  │  - Store HTTP bodies/headers separately (privacy)              ││
 │  │  - Map trace_id → workflow_id for child spans                  ││
 │  │  - Store verdicts from SignalReceived                          ││
+│  └────────────────────────────────────────────────────────────────┘│
+│               │                                                      │
+│               ▼                                                      │
+│  ┌────────────────────────────────────────────────────────────────┐│
+│  │ Hook-Level Governance Layer (Real-time per-operation)         ││
+│  │  ────────────────────────────────────────────────────────────  ││
+│  │ - HTTP request/response hooks evaluate at started/completed    ││
+│  │ - Database query hooks evaluate before/after execution         ││
+│  │ - File I/O hooks evaluate on open/read/write operations        ││
+│  │ - @traced decorator evaluates function calls                   ││
 │  └────────────────────────────────────────────────────────────────┘│
 │               │                                                      │
 │               ▼                                                      │
@@ -140,6 +150,7 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
    → Create OTel span with trace_id mapping
    → User activity code runs
    → Child spans (HTTP/DB/file) captured automatically
+   → Hook-level governance evaluates each operation in real-time
 
 3. Activity completes
    → Collect child spans from buffer
@@ -207,7 +218,89 @@ class WorkflowSpanProcessor:
 
 ---
 
-### 3. Instrumentation Layer
+### 3. Hook-Level Governance Layer
+
+#### Hook Governance Module (`hook_governance.py`)
+
+**Responsibility:** Real-time governance evaluation for each operation
+
+**Architecture:**
+1. Hook modules detect an operation and build a `span_data` dict
+2. Hook calls `evaluate_sync()` or `evaluate_async()` in `hook_governance.py`
+3. This module: looks up activity context, assembles payload, sends to API
+4. If verdict is BLOCK/HALT/REQUIRE_APPROVAL → raises `GovernanceBlockedError`
+
+**Payload Structure (hook_trigger simplified to boolean):**
+```json
+{
+  "workflow_id": "string",
+  "activity_id": "string",
+  "run_id": "string",
+  "hook_trigger": true,
+  "timestamp": "RFC3339 timestamp",
+  "spans": [
+    {
+      "span_id": "16-char hex",
+      "trace_id": "32-char hex",
+      "parent_span_id": "16-char hex or null",
+      "stage": "started|completed",
+      "hook_type": "http_request|db_query|file_operation|function_call",
+      "start_time": nanoseconds,
+      "end_time": nanoseconds or null,
+      "duration_ns": nanoseconds or null,
+      "name": "operation name",
+      "kind": "CLIENT|INTERNAL|SERVER",
+      "attributes": {...OTel-original only...},
+      "status": {"code": "ERROR|UNSET", "description": "string or null"},
+      "events": [],
+
+      // Type-specific fields at root level (not in attributes)
+      // HTTP-specific:
+      "http_method": "GET|POST|...",
+      "http_url": "string",
+      "http_status_code": number,
+      "request_body": "string or null",
+      "request_headers": {...},
+      "response_body": "string or null",
+      "response_headers": {...},
+      "error": "string or null",
+
+      // Database-specific:
+      "db_system": "postgresql|mysql|mongodb|redis",
+      "db_operation": "SELECT|INSERT|UPDATE|DELETE|GET|...",
+      "db_statement": "SQL or command",
+      "db_name": "database name",
+      "server_address": "host",
+      "server_port": number,
+
+      // File-specific:
+      "file_path": "string",
+      "file_mode": "r|w|a|...",
+      "file_operation": "open|read|write|close",
+      "file_bytes": number,
+
+      // Function-specific:
+      "code_function": "function name",
+      "code_namespace": "module name"
+    }
+  ],
+  "span_count": 1
+}
+```
+
+**Key Characteristics:**
+- `hook_trigger` is simple boolean `true` (replaces dict with type/stage/data)
+- All span data at root level: `http_method`, `db_system`, `file_path`, `function` (type-specific fields NOT in attributes)
+- `attributes` field contains ONLY original OTel attributes (no custom fields injected)
+- `hook_type` field discriminates operation type: `http_request`, `db_query`, `file_operation`, `function_call`
+- Single span per evaluation (no accumulated history)
+- `duration_ns` computed for all hook types
+
+**Code Location:** `openbox/hook_governance.py`
+
+---
+
+### 4. Instrumentation Layer
 
 #### HTTP Instrumentation
 
@@ -229,18 +322,15 @@ class WorkflowSpanProcessor:
    ```
 
 2. **Hook-Level Governance** (request hook) - started stage governance evaluation
-   - Calls `mark_governed()` once to prevent double-buffering
    - Builds span data and calls governance evaluate_sync/evaluate_async
-   - Span data includes: http.method, http.url, http.status_code, request/response bodies
+   - Span data includes type-specific fields at root: http_method, http_url, request/response bodies, http_status_code
    - Can block HTTP request if governance returns BLOCK/HALT
    ```python
    def _httpx_request_hook(span, request):
-       # Mark governed at started stage
-       _span_processor.mark_governed(span.context.span_id)
-       # Build span data matching governance span format
+       # Build span data with hook_type and type-specific fields at root level
        span_data = _build_http_span_data(span, method, url, "started", request_body=body)
        # Evaluate governance
-       _hook_gov.evaluate_sync(span, hook_trigger={...}, span_data=span_data)
+       _hook_gov.evaluate_sync(span, identifier=url, span_data=span_data)
    ```
 
 3. **Custom Hooks** - Capture bodies/headers via `span_processor.store_body()`
@@ -281,15 +371,20 @@ class WorkflowSpanProcessor:
    start_time: nanosecond timestamp
    end_time: nanosecond timestamp (completed only), None for started
    status: {code: "ERROR" if status >= 400, "UNSET", description: error}
-   attributes: {http.method, http.url, http.status_code, http.request.header.*, http.response.header.*}
-   request_body: request body (text only)
-   response_body: response body (text only)
+   hook_type: "http_request"
+   attributes: {http.method, http.url, http.status_code} (OTel-original only)
+
+   // Type-specific fields at root level:
+   http_method: HTTP method
+   http_url: HTTP URL
+   http_status_code: HTTP status code
+   request_body: request body text
+   response_body: response body text
    request_headers: dict of request headers
    response_headers: dict of response headers
-   http_status_code: HTTP status code
    ```
 
-**Code Location:** `openbox/otel_setup.py` (lines 1-898)
+**Code Location:** `openbox/otel_setup.py` (lines 1-1500+)
 
 #### Database Instrumentation
 
@@ -308,9 +403,8 @@ class WorkflowSpanProcessor:
    _db_gov.setup_psycopg2_hooks()       # wrapt on cursor.execute
    Psycopg2Instrumentor().instrument()   # OTel span creation
    ```
-   - Calls `mark_governed()` once at started stage to prevent double-buffering
    - Both started + completed stages call governance evaluate with `span_data=` parameter
-   - Span data includes: db.system, db.operation, db.statement, status, duration
+   - Span data includes: db.system, db.operation, db.statement, status, duration_ns
 
 2. **OTel Instrumentors** - Create spans with db.* attributes
    ```python
@@ -334,7 +428,17 @@ class WorkflowSpanProcessor:
    start_time: nanosecond timestamp
    end_time: nanosecond timestamp (completed only), None for started
    status: {code: "ERROR" if error, "UNSET", description: error or null}
+   hook_type: "db_query"
    attributes: {db.system, db.operation, db.statement, db.name, server.address, server.port, rowcount}
+
+   // Type-specific fields at root level:
+   db_system: "postgresql" etc
+   db_operation: "SELECT" etc
+   db_statement: SQL query
+   db_name: database name
+   server_address: host
+   server_port: port
+   duration_ns: query duration in nanoseconds
    ```
 
 4. **Span Capture** - Automatically buffered by WorkflowSpanProcessor
@@ -366,16 +470,13 @@ class WorkflowSpanProcessor:
    ```
 
 2. **Hook-Level Governance** (on open, read, write) - started/completed stages
-   - Calls `mark_governed()` once at started stage to prevent double-buffering
    - Builds span data with file path, mode, operation
    - Both started + completed stages call governance evaluate_sync with span_data
    - Can block file access (open, read, write) if governance returns BLOCK/HALT
    ```python
    def _evaluate_governance(self, operation: str, stage: str, span=None):
-       if stage == "started":
-           _span_processor.mark_governed(span.context.span_id)
        span_data = _build_file_span_data(span, file_path, mode, operation, stage)
-       _hook_gov.evaluate_sync(span, hook_trigger={...}, span_data=span_data)
+       _hook_gov.evaluate_sync(span, identifier=file_path, span_data=span_data)
    ```
 
 3. **Wrap File Operations** - Trace each read/write
@@ -403,12 +504,20 @@ class WorkflowSpanProcessor:
    start_time: nanosecond timestamp
    end_time: nanosecond timestamp (completed only), None for started
    status: {code: "ERROR" if error, "UNSET", description: error}
+   hook_type: "file_operation"
    attributes: {file.path, file.mode, file.operation, openbox.governance.error}
+
+   // Type-specific fields at root level:
+   file_path: path to file
+   file_mode: "r", "w", etc
+   file_operation: "open", "read", "write"
+   file_bytes: bytes read/written
+   duration_ns: operation duration
    ```
 
 **Skipped Paths:** `/dev/`, `/proc/`, `/sys/`, `__pycache__`, `.pyc`, `.so`
 
-**Code Location:** `openbox/otel_setup.py` (lines 188-332)
+**Code Location:** `openbox/otel_setup.py` (lines 143-600+)
 
 #### Function Tracing Instrumentation
 
@@ -437,7 +546,6 @@ class WorkflowSpanProcessor:
 2. **Hook-Level Governance** - When `hook_governance` is configured
    - `started` stage: Before function executes (can block)
    - `completed` stage: After function returns or raises (can block/halt)
-   - Calls `mark_governed()` once at started stage to prevent double-buffering
    - Both stages pass `span_data=` parameter with structured span info
    - Zero overhead when governance not configured
 
@@ -452,7 +560,12 @@ class WorkflowSpanProcessor:
    start_time: nanosecond timestamp
    end_time: nanosecond timestamp (completed only), None for started
    status: {code: "ERROR" | "UNSET", description: error message or null}
+   hook_type: "function_call"
    attributes: {code.function, code.namespace, ...function args, result, errors}
+
+   // Type-specific fields at root level:
+   code_function: function name
+   code_namespace: module name
    ```
 
 4. **Span Attributes**
@@ -469,7 +582,7 @@ class WorkflowSpanProcessor:
 
 ---
 
-### 4. Governance Integration Layer
+### 5. Governance Integration Layer
 
 #### OpenBox Core API
 
@@ -501,6 +614,9 @@ interface GovernanceEvent {
   status?: "completed" | "failed";
   duration_ms?: number;
   error?: ErrorDetails;
+
+  // Hook-level governance
+  hook_trigger?: true;  // Simple boolean when evaluating per-operation
 }
 ```
 
@@ -607,7 +723,7 @@ Authorization: Bearer {api_key}
 └───────────────────────┘
 ```
 
-### Activity Execution Flow
+### Activity Execution Flow with Hook-Level Governance
 
 ```
 ┌───────────────┐
@@ -626,27 +742,25 @@ Authorization: Bearer {api_key}
 │ 2. Send ActivityStarted event (optional)                     │
 │    - Captures activity_input                                 │
 │    - Returns verdict + guardrails                            │
-│    - If BLOCK/HALT → raise ApplicationError                  │
-│    - If validation_passed=false → raise ApplicationError     │
-│    - If REQUIRE_APPROVAL → raise ApprovalPending (retryable) │
-│    - If guardrails redaction → apply to input                │
 │                                                               │
 │ 3. Execute activity                                          │
 │    - Create OTel span (temporal.workflow_id attribute)       │
 │    - Register trace_id → workflow_id mapping                 │
-│    - User activity code runs                                 │
-│    - Child spans captured (HTTP, DB, file)                   │
+│    - User activity code runs:                                │
+│      * HTTP calls → hooks build span_data → governance       │
+│        evaluates at started/completed stages                 │
+│      * DB queries → hooks build span_data → governance       │
+│        evaluates at started/completed stages                 │
+│      * File operations → hooks build span_data → governance  │
+│      * Functions → @traced evaluates at started/completed    │
+│    - Child spans captured automatically                      │
 │                                                               │
 │ 4. Send ActivityCompleted event                              │
 │    - Captures activity_output                                │
 │    - Includes all child spans                                │
 │    - Returns verdict + guardrails                            │
-│    - If BLOCK/HALT → raise ApplicationError                  │
-│    - If validation_passed=false → raise ApplicationError     │
-│    - If REQUIRE_APPROVAL → raise ApprovalPending (retryable) │
-│    - If guardrails redaction → apply to output               │
 │                                                               │
-│ 5. Return result (or raise exception)                        │
+│ 5. Return result (or raise exception from hook governance)   │
 └───────────────────────────────────────────────────────────────┘
         │
         ▼
@@ -701,43 +815,62 @@ Authorization: Bearer {api_key}
 └────────────┘          └──────────────┘   └──────────────┘
 ```
 
-### Span Buffering Flow
+### Hook-Level Governance Flow
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Activity starts                                      │
-│ - ActivityInterceptor creates OTel span              │
-│ - span_processor.register_trace(trace_id, wf_id)    │
-└────────────────┬─────────────────────────────────────┘
-                 │
-                 ▼
+│ Operation detected by hook (HTTP, DB, File, @traced) │
+└────────────┬───────────────────────────────────────┘
+             │
+             ▼
 ┌──────────────────────────────────────────────────────┐
-│ Activity makes HTTP call (e.g., httpx.post())        │
-│                                                      │
-│ 1. OTel httpx instrumentation creates child span     │
-│    - Shares same trace_id as parent activity span    │
-│    - Does NOT have temporal.workflow_id attribute    │
-│                                                      │
-│ 2. _httpx_request_hook() captures request body      │
-│    - span_processor.store_body(span_id, request_body)│
-│                                                      │
-│ 3. _httpx_response_hook() captures response body    │
-│    - span_processor.store_body(span_id, response_body)│
-│                                                      │
-│ 4. HTTP span ends                                    │
-│    - span_processor.on_end(span) called              │
-│    - Looks up workflow_id via trace_id mapping       │
-│    - Merges body data from _body_data                │
-│    - Appends span to workflow buffer                 │
-└────────────────┬─────────────────────────────────────┘
-                 │
-                 ▼
+│ Hook builds span_data dict                           │
+│ - hook_type: "http_request|db_query|file_operation" │
+│ - stage: "started" or "completed"                    │
+│ - Type-specific fields at root level                 │
+│   (http_method, http_url, http_status_code, etc.)   │
+└────────────┬───────────────────────────────────────┘
+             │
+             ▼
 ┌──────────────────────────────────────────────────────┐
-│ Activity completes                                   │
-│ - ActivityInterceptor retrieves buffer.spans         │
-│ - Filters by activity_id                             │
-│ - Sends to OpenBox Core in ActivityCompleted event   │
-└──────────────────────────────────────────────────────┘
+│ Hook calls _hook_gov.evaluate_sync/async()           │
+│ - Passes span and span_data                          │
+└────────────┬───────────────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────────────────────────────┐
+│ hook_governance looks up activity context            │
+│ - Uses trace_id to find workflow_id + activity_id    │
+│ - Builds full payload with hook_trigger=true         │
+└────────────┬───────────────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────────────────────────────┐
+│ POST /api/v1/governance/evaluate                     │
+│ - Sends payload with single span                     │
+│ - Waits for verdict response                         │
+└────────────┬───────────────────────────────────────┘
+             │
+             ▼
+     ┌───────────────┐
+     │ Check verdict │
+     └───────┬───────┘
+             │
+     ┌───────┴──────────────────┬──────────────┐
+     │                          │              │
+     ▼                          ▼              ▼
+┌────────────┐      ┌───────────────────┐  ┌────────────┐
+│"allow" or  │      │"block", "halt",   │  │No error    │
+│"constrain" │      │"require_approval" │  │(fail_open) │
+└─────┬──────┘      └─────┬─────────────┘  └─────┬──────┘
+      │                    │                      │
+      ▼                    ▼                      ▼
+┌────────────┐   ┌──────────────────┐   ┌──────────────┐
+│Continue    │   │Raise             │   │Log warning,  │
+│operation   │   │GovernanceBlocked │   │continue      │
+└────────────┘   │Error, abort      │   └──────────────┘
+                 │activity          │
+                 └──────────────────┘
 ```
 
 ---
@@ -816,8 +949,9 @@ Authorization: Bearer {api_key}
 
 1. **Span Buffering** - Batch spans per workflow, send once per activity
 2. **Ignored URLs** - Early return to avoid instrumentation overhead
-3. **Lazy Initialization** - Defer expensive operations until needed
-4. **Thread-Safe Locking** - Minimize lock contention with fine-grained locks
+3. **Hook-Level Governance** - Per-operation evaluation (can block early)
+4. **Lazy Initialization** - Defer expensive operations until needed
+5. **Thread-Safe Locking** - Minimize lock contention with fine-grained locks
 
 ### Scalability Limits
 
@@ -907,9 +1041,7 @@ Authorization: Bearer {api_key}
 
 ---
 
----
-
-**Document Version:** 1.1
-**Last Updated:** 2026-03-05
+**Document Version:** 1.2
+**Last Updated:** 2026-03-16
 
 See `./docs/project-roadmap.md` for future enhancements and planned features.
