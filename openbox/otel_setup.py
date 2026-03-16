@@ -97,40 +97,23 @@ def _build_http_span_data(
 ) -> dict:
     """Build span data dict for an HTTP request (used by governance hooks).
 
-    Creates a span data structure matching _extract_span_data() output,
-    enriched with HTTP body/header data for governance evaluation.
+    attributes: OTel-original only. All custom data at root level.
     """
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-
-    attrs = dict(span.attributes) if hasattr(span, 'attributes') and span.attributes else {
-        "http.method": http_method,
-        "http.url": http_url,
-    }
-    # Enrich attributes with body/header data for governance evaluation
-    if request_headers is not None:
-        attrs["http.request.headers"] = request_headers
-    if request_body is not None:
-        attrs["http.request.body"] = request_body
-    if response_headers is not None:
-        attrs["http.response.headers"] = response_headers
-    if response_body is not None:
-        attrs["http.response.body"] = response_body
-    if http_status_code is not None:
-        attrs["http.response.status_code"] = http_status_code
+    attrs = dict(span.attributes) if hasattr(span, 'attributes') and span.attributes else {}
 
     now_ns = _time.time_ns()
     duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
     end_time = now_ns if stage == "completed" else None
     start_time = (now_ns - duration_ns) if duration_ns else now_ns
 
-    # Derive error from HTTP status code (4xx/5xx)
     error = None
     if http_status_code is not None and http_status_code >= 400:
         error = f"HTTP {http_status_code}"
 
-    span_data = {
+    return {
         "span_id": span_id_hex,
         "trace_id": trace_id_hex,
         "parent_span_id": parent_span_id,
@@ -143,14 +126,18 @@ def _build_http_span_data(
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
+        # Hook type identification
+        "hook_type": "http_request",
+        # HTTP-specific root fields
+        "http_method": http_method,
+        "http_url": http_url,
         "request_body": request_body,
-        "response_body": response_body,
         "request_headers": request_headers,
+        "response_body": response_body,
         "response_headers": response_headers,
+        "http_status_code": http_status_code,
+        "error": error,
     }
-    if http_status_code is not None:
-        span_data["http_status_code"] = http_status_code
-    return span_data
 
 
 def _build_file_span_data(
@@ -161,25 +148,21 @@ def _build_file_span_data(
     stage: str,
     error: Optional[str] = None,
     duration_ms: Optional[float] = None,
+    data: Optional[str] = None,
+    bytes_read: Optional[int] = None,
+    bytes_written: Optional[int] = None,
+    lines_count: Optional[int] = None,
+    operations: Optional[list] = None,
 ) -> dict:
     """Build span data dict for a file operation (used by governance hooks).
 
-    Creates a span data structure matching _extract_span_data() output,
-    enriched with file operation context for governance evaluation.
-    Handles both recording spans and NonRecordingSpan (no-op tracer).
+    attributes: OTel-original only. All custom data at root level.
     """
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-
     raw_attrs = getattr(span, 'attributes', None)
-    attrs = dict(raw_attrs) if raw_attrs else {
-        "file.path": file_path,
-        "file.mode": file_mode,
-        "file.operation": operation,
-    }
-    if error:
-        attrs["openbox.governance.error"] = error
+    attrs = dict(raw_attrs) if raw_attrs else {}
 
     span_name = getattr(span, 'name', None) or f"file.{operation}"
     now_ns = _time.time_ns()
@@ -187,7 +170,7 @@ def _build_file_span_data(
     end_time = now_ns if stage == "completed" else None
     start_time = (now_ns - duration_ns) if duration_ns else now_ns
 
-    return {
+    result = {
         "span_id": span_id_hex,
         "trace_id": trace_id_hex,
         "parent_span_id": parent_span_id,
@@ -200,7 +183,28 @@ def _build_file_span_data(
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
+        # Hook type identification
+        "hook_type": "file_operation",
+        # File-specific root fields
+        "file_path": file_path,
+        "file_mode": file_mode,
+        "file_operation": operation,
+        "error": error,
     }
+
+    # Only include optional fields if they have values
+    if data is not None:
+        result["data"] = data
+    if bytes_read is not None:
+        result["bytes_read"] = bytes_read
+    if bytes_written is not None:
+        result["bytes_written"] = bytes_written
+    if lines_count is not None:
+        result["lines_count"] = lines_count
+    if operations is not None:
+        result["operations"] = operations
+
+    return result
 
 
 def setup_opentelemetry_for_governance(
@@ -405,21 +409,12 @@ def setup_file_io_instrumentation() -> bool:
             from .types import GovernanceBlockedError
             active_span = span or self._parent_span
             try:
-                trigger = {
-                    "type": "file_operation",
-                    "operation": operation,
-                    "file_path": self._file_path,
-                    "file_mode": self._mode,
-                    "stage": stage,
-                    "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
-                    **extra,
-                }
                 span_data = _build_file_span_data(
                     active_span, self._file_path, self._mode, operation, stage,
+                    **extra,
                 )
                 _hook_gov.evaluate_sync(
                     active_span,
-                    hook_trigger=trigger,
                     identifier=self._file_path,
                     span_data=span_data,
                 )
@@ -577,14 +572,6 @@ def setup_file_io_instrumentation() -> bool:
                 )
                 _hook_gov.evaluate_sync(
                     span,
-                    hook_trigger={
-                        "type": "file_operation",
-                        "operation": "open",
-                        "file_path": file_str,
-                        "file_mode": mode,
-                        "stage": "started",
-                        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FILE,
-                    },
                     identifier=file_str,
                     span_data=open_span_data,
                 )
@@ -908,7 +895,6 @@ def _requests_request_hook(span, request) -> None:
             span_data = _build_http_span_data(span, method, url, "started", request_body=body, request_headers=headers)
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -966,7 +952,6 @@ def _requests_response_hook(span, request, response) -> None:
             )
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -1047,7 +1032,6 @@ def _httpx_request_hook(span, request) -> None:
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
         _hook_gov.evaluate_sync(
             span,
-            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
             identifier=url,
             span_data=span_data,
         )
@@ -1163,7 +1147,6 @@ async def _httpx_async_request_hook(span, request) -> None:
         span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
         await _hook_gov.evaluate_async(
             span,
-            hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
             identifier=url,
             span_data=span_data,
         )
@@ -1303,8 +1286,7 @@ def _prepare_completed_governance(http_span, request, url, request_body, request
         response_body=response_body, response_headers=response_headers,
         http_status_code=status_code, duration_ms=duration_ms,
     )
-    hook_trigger = {"type": "http_request", "method": method, "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP}
-    return http_span, hook_trigger, url, span_data
+    return http_span, url, span_data
 
 
 def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
@@ -1339,7 +1321,7 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
                 duration_ms=_dur_ms,
             )
             if gov_args:
-                _hook_gov.evaluate_sync(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
+                _hook_gov.evaluate_sync(gov_args[0], identifier=gov_args[1], span_data=gov_args[2])
             return response
 
         async def _patched_async_send(self, request, *args, **kwargs):
@@ -1361,7 +1343,7 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
                 duration_ms=_dur_ms,
             )
             if gov_args:
-                await _hook_gov.evaluate_async(gov_args[0], gov_args[1], gov_args[2], span_data=gov_args[3])
+                await _hook_gov.evaluate_async(gov_args[0], identifier=gov_args[1], span_data=gov_args[2])
             return response
 
         httpx.Client.send = _patched_send
@@ -1422,7 +1404,6 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
             span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=headers)
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": method, "url": url, "stage": "started", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
@@ -1480,7 +1461,6 @@ def _urllib3_response_hook(span, pool, response) -> None:
             )
             _hook_gov.evaluate_sync(
                 span,
-                hook_trigger={"type": "http_request", "method": "UNKNOWN", "url": url, "stage": "completed", "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_HTTP},
                 identifier=url,
                 span_data=span_data,
             )
