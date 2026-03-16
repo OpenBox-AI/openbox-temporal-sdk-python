@@ -22,6 +22,12 @@ def _get_logger():
     import logging
     return logging.getLogger(__name__)
 
+
+def _build_auth_headers(api_key: str) -> dict:
+    """Build auth headers reusing hook_governance's centralized builder."""
+    from .hook_governance import build_auth_headers
+    return build_auth_headers(api_key)
+
 # API key format pattern (obx_live_... or obx_test_...)
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_[a-zA-Z0-9_]+$")
 
@@ -172,9 +178,8 @@ def _validate_api_key_with_server(api_url: str, api_key: str, timeout: float) ->
         req = Request(
             f"{api_url}/api/v1/auth/validate",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                **_build_auth_headers(api_key),
                 "Content-Type": "application/json",
-                "User-Agent": "OpenBox-SDK/1.0",
             },
             method="GET",
         )

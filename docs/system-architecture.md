@@ -923,8 +923,12 @@ Authorization: Bearer {api_key}
 
 2. Governance requests
    → Include Authorization: Bearer {api_key} header
+   → Include User-Agent: OpenBox-SDK/{version} header
+   → Include X-OpenBox-SDK-Version: {version} header
    → Server validates on each request
 ```
+
+**SDK Version Header:** All API calls include `X-OpenBox-SDK-Version` with the SDK version from `importlib.metadata`. Built centrally in `hook_governance.build_auth_headers()`.
 
 ### Temporal Sandbox Compliance
 

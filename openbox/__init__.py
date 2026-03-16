@@ -1,5 +1,12 @@
 """OpenBox SDK - Workflow-Boundary Governance with OpenTelemetry"""
 
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("openbox-temporal-sdk-python")
+except PackageNotFoundError:
+    __version__ = "0.0.0"  # Fallback for editable installs without metadata
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Simple Factories (recommended)
 # ═══════════════════════════════════════════════════════════════════════════════
