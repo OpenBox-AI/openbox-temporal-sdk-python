@@ -123,22 +123,6 @@ def _build_db_span_data(
 
     raw_attrs = getattr(span, 'attributes', None)
     attrs = dict(raw_attrs) if raw_attrs and isinstance(raw_attrs, dict) else {}
-    # Always set DB-specific attributes
-    attrs["db.system"] = db_system
-    attrs["db.operation"] = db_operation
-    attrs["db.statement"] = db_statement
-    if db_name:
-        attrs["db.name"] = str(db_name)
-    if server_address:
-        attrs["server.address"] = server_address
-    if server_port:
-        attrs["server.port"] = int(server_port)
-    if error:
-        attrs["openbox.governance.error"] = error
-    if rowcount is not None and isinstance(rowcount, int) and rowcount >= 0:
-        attrs["db.result.rowcount"] = rowcount
-    if duration_ms is not None:
-        attrs["openbox.governance.duration_ms"] = round(duration_ms, 2)
 
     span_name = getattr(span, 'name', None)
     if not span_name or not isinstance(span_name, str):
@@ -158,138 +142,71 @@ def _build_db_span_data(
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
-    }
-
-
-def _evaluate_started(
-    db_system: str,
-    db_name: Optional[str],
-    db_operation: str,
-    db_statement: str,
-    server_address: Optional[str],
-    server_port: Optional[int],
-    span_data: Optional[dict] = None,
-) -> None:
-    """Send 'started' governance evaluation (sync). Raises GovernanceBlockedError to block."""
-    from . import hook_governance as _hook_gov
-    if not _hook_gov.is_configured():
-        return
-    span = otel_trace.get_current_span()
-    trigger = {
-        "type": "db_query",
-        "stage": "started",
+        # Hook type identification
+        "hook_type": "db_query",
+        # DB-specific root fields
         "db_system": db_system,
         "db_name": str(db_name) if db_name else None,
         "db_operation": db_operation,
         "db_statement": db_statement,
         "server_address": server_address,
         "server_port": int(server_port) if server_port else None,
-        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
-    }
-    identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
-    _hook_gov.evaluate_sync(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
-
-
-def _evaluate_completed(
-    db_system: str,
-    db_name: Optional[str],
-    db_operation: str,
-    db_statement: str,
-    server_address: Optional[str],
-    server_port: Optional[int],
-    duration_ms: float,
-    error: Optional[str],
-    span_data: Optional[dict] = None,
-) -> None:
-    """Send 'completed' governance evaluation (sync). Does not block (query already executed)."""
-    from . import hook_governance as _hook_gov
-    if not _hook_gov.is_configured():
-        return
-    span = otel_trace.get_current_span()
-    trigger = {
-        "type": "db_query",
-        "stage": "completed",
-        "db_system": db_system,
-        "db_name": str(db_name) if db_name else None,
-        "db_operation": db_operation,
-        "db_statement": db_statement,
-        "server_address": server_address,
-        "server_port": int(server_port) if server_port else None,
-        "duration_ms": round(duration_ms, 2),
+        "rowcount": rowcount if rowcount is not None and isinstance(rowcount, int) and rowcount >= 0 else None,
         "error": error,
-        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
     }
-    identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
-    try:
-        _hook_gov.evaluate_sync(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
-    except Exception as e:
-        # Completed stage should not block — query already executed
-        logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
 
 
-async def _evaluate_started_async(
-    db_system: str,
-    db_name: Optional[str],
-    db_operation: str,
-    db_statement: str,
-    server_address: Optional[str],
-    server_port: Optional[int],
-    span_data: Optional[dict] = None,
+def _db_identifier(db_system: str, server_address: Optional[str], server_port: Optional[int], db_name: Optional[str]) -> str:
+    """Build a stable identifier string for DB governance evaluations."""
+    return f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
+
+
+def _evaluate_db_sync(
+    identifier: str,
+    span_data: dict,
+    *,
+    is_completed: bool = False,
 ) -> None:
-    """Async variant of _evaluate_started."""
+    """Send DB governance evaluation (sync).
+
+    For started stage: raises GovernanceBlockedError to block.
+    For completed stage: swallows errors (query already executed).
+    """
     from . import hook_governance as _hook_gov
     if not _hook_gov.is_configured():
         return
     span = otel_trace.get_current_span()
-    trigger = {
-        "type": "db_query",
-        "stage": "started",
-        "db_system": db_system,
-        "db_name": str(db_name) if db_name else None,
-        "db_operation": db_operation,
-        "db_statement": db_statement,
-        "server_address": server_address,
-        "server_port": int(server_port) if server_port else None,
-        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
-    }
-    identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
-    await _hook_gov.evaluate_async(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
+    if is_completed:
+        try:
+            _hook_gov.evaluate_sync(span, identifier=identifier, span_data=span_data)
+        except Exception as e:
+            logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
+    else:
+        _hook_gov.evaluate_sync(span, identifier=identifier, span_data=span_data)
 
 
-async def _evaluate_completed_async(
-    db_system: str,
-    db_name: Optional[str],
-    db_operation: str,
-    db_statement: str,
-    server_address: Optional[str],
-    server_port: Optional[int],
-    duration_ms: float,
-    error: Optional[str],
-    span_data: Optional[dict] = None,
+async def _evaluate_db_async(
+    identifier: str,
+    span_data: dict,
+    *,
+    is_completed: bool = False,
 ) -> None:
-    """Async variant of _evaluate_completed."""
+    """Send DB governance evaluation (async).
+
+    For started stage: raises GovernanceBlockedError to block.
+    For completed stage: swallows errors (query already executed).
+    """
     from . import hook_governance as _hook_gov
     if not _hook_gov.is_configured():
         return
     span = otel_trace.get_current_span()
-    trigger = {
-        "type": "db_query",
-        "stage": "completed",
-        "db_system": db_system,
-        "db_name": str(db_name) if db_name else None,
-        "db_operation": db_operation,
-        "db_statement": db_statement,
-        "server_address": server_address,
-        "server_port": int(server_port) if server_port else None,
-        "duration_ms": round(duration_ms, 2),
-        "error": error,
-        "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_DB,
-    }
-    identifier = f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
-    try:
-        await _hook_gov.evaluate_async(span, hook_trigger=trigger, identifier=identifier, span_data=span_data)
-    except Exception as e:
-        logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
+    if is_completed:
+        try:
+            await _hook_gov.evaluate_async(span, identifier=identifier, span_data=span_data)
+        except Exception as e:
+            logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
+    else:
+        await _hook_gov.evaluate_async(span, identifier=identifier, span_data=span_data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -345,12 +262,13 @@ def install_cursor_tracer_hooks() -> bool:
         def _governed_query(*qargs, **qkwargs):
             # Runs inside OTel span context — get_current_span() returns DB span
             current_span = otel_trace.get_current_span()
+            ident = _db_identifier(db_system, host, port, db_name)
 
             # Build & send "started" span data entry
             started_sd = _build_db_span_data(
                 current_span, db_system, db_name, operation, stmt, host, port, "started",
             )
-            _evaluate_started(db_system, db_name, operation, stmt, host, port, span_data=started_sd)
+            _evaluate_db_sync(ident, started_sd)
 
             start = time.perf_counter()
             try:
@@ -371,10 +289,7 @@ def install_cursor_tracer_hooks() -> bool:
                     current_span, db_system, db_name, operation, stmt, host, port,
                     "completed", duration_ms=duration_ms, rowcount=rc,
                 )
-                _evaluate_completed(
-                    db_system, db_name, operation, stmt, host, port,
-                    duration_ms, None, span_data=completed_sd,
-                )
+                _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 return result
             except Exception as e:
                 from .types import GovernanceBlockedError
@@ -385,10 +300,7 @@ def install_cursor_tracer_hooks() -> bool:
                     current_span, db_system, db_name, operation, stmt, host, port,
                     "completed", duration_ms=duration_ms, error=str(e),
                 )
-                _evaluate_completed(
-                    db_system, db_name, operation, stmt, host, port,
-                    duration_ms, str(e), span_data=completed_sd,
-                )
+                _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 raise
 
         return _orig_traced_execution(self, cursor, _governed_query, *args, **kwargs)
@@ -405,11 +317,12 @@ def install_cursor_tracer_hooks() -> bool:
 
         async def _governed_query_async(*qargs, **qkwargs):
             current_span = otel_trace.get_current_span()
+            ident = _db_identifier(db_system, host, port, db_name)
 
             started_sd = _build_db_span_data(
                 current_span, db_system, db_name, operation, stmt, host, port, "started",
             )
-            await _evaluate_started_async(db_system, db_name, operation, stmt, host, port, span_data=started_sd)
+            await _evaluate_db_async(ident, started_sd)
 
             start = time.perf_counter()
             try:
@@ -426,10 +339,7 @@ def install_cursor_tracer_hooks() -> bool:
                     current_span, db_system, db_name, operation, stmt, host, port,
                     "completed", duration_ms=duration_ms, rowcount=rc,
                 )
-                await _evaluate_completed_async(
-                    db_system, db_name, operation, stmt, host, port,
-                    duration_ms, None, span_data=completed_sd,
-                )
+                await _evaluate_db_async(ident, completed_sd, is_completed=True)
                 return result
             except Exception as e:
                 from .types import GovernanceBlockedError
@@ -440,10 +350,7 @@ def install_cursor_tracer_hooks() -> bool:
                     current_span, db_system, db_name, operation, stmt, host, port,
                     "completed", duration_ms=duration_ms, error=str(e),
                 )
-                await _evaluate_completed_async(
-                    db_system, db_name, operation, stmt, host, port,
-                    duration_ms, str(e), span_data=completed_sd,
-                )
+                await _evaluate_db_async(ident, completed_sd, is_completed=True)
                 raise
 
         return await _orig_traced_execution_async(
@@ -515,11 +422,12 @@ def install_asyncpg_hooks() -> bool:
         db_name = getattr(params, "database", None) if params else None
 
         current_span = otel_trace.get_current_span()
+        ident = _db_identifier("postgresql", host, port, db_name)
 
         started_sd = _build_db_span_data(
             current_span, "postgresql", db_name, operation, stmt, host, port, "started",
         )
-        await _evaluate_started_async("postgresql", db_name, operation, stmt, host, port, span_data=started_sd)
+        await _evaluate_db_async(ident, started_sd)
         start = time.perf_counter()
         try:
             result = await wrapped(*args, **kwargs)
@@ -528,9 +436,7 @@ def install_asyncpg_hooks() -> bool:
                 current_span, "postgresql", db_name, operation, stmt, host, port,
                 "completed", duration_ms=duration_ms,
             )
-            await _evaluate_completed_async(
-                "postgresql", db_name, operation, stmt, host, port, duration_ms, None, span_data=completed_sd,
-            )
+            await _evaluate_db_async(ident, completed_sd, is_completed=True)
             return result
         except Exception as e:
             from .types import GovernanceBlockedError
@@ -541,9 +447,7 @@ def install_asyncpg_hooks() -> bool:
                 current_span, "postgresql", db_name, operation, stmt, host, port,
                 "completed", duration_ms=duration_ms, error=str(e),
             )
-            await _evaluate_completed_async(
-                "postgresql", db_name, operation, stmt, host, port, duration_ms, str(e), span_data=completed_sd,
-            )
+            await _evaluate_db_async(ident, completed_sd, is_completed=True)
             raise
 
     methods = [
@@ -632,10 +536,8 @@ def setup_pymongo_hooks() -> None:
                         span, "mongodb", event.database_name, event.command_name,
                         cmd_str, host, port, "started",
                     )
-                    _evaluate_started(
-                        "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, span_data=started_sd,
-                    )
+                    ident = _db_identifier("mongodb", host, port, event.database_name)
+                    _evaluate_db_sync(ident, started_sd)
                 except Exception as e:
                     logger.debug(f"pymongo governance started error: {e}")
 
@@ -654,10 +556,8 @@ def setup_pymongo_hooks() -> None:
                         span, "mongodb", event.database_name, event.command_name,
                         cmd_str, host, port, "completed", duration_ms=duration_ms,
                     )
-                    _evaluate_completed(
-                        "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, duration_ms, None, span_data=completed_sd,
-                    )
+                    ident = _db_identifier("mongodb", host, port, event.database_name)
+                    _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 except Exception as e:
                     logger.debug(f"pymongo governance completed error: {e}")
 
@@ -677,10 +577,8 @@ def setup_pymongo_hooks() -> None:
                         span, "mongodb", event.database_name, event.command_name,
                         cmd_str, host, port, "completed", duration_ms=duration_ms, error=err,
                     )
-                    _evaluate_completed(
-                        "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, duration_ms, err, span_data=completed_sd,
-                    )
+                    ident = _db_identifier("mongodb", host, port, event.database_name)
+                    _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 except Exception as e:
                     logger.debug(f"pymongo governance failed error: {e}")
 
@@ -740,11 +638,12 @@ def _setup_pymongo_wrapt_hooks() -> None:
             # Generate unique span_id for this pymongo operation (shared by started+completed)
             gov_sid = _generate_span_id()
 
+            ident = _db_identifier("mongodb", host, port, db_name)
             started_sd = _build_db_span_data(
                 current_span, "mongodb", db_name, operation, statement, host, port,
                 "started", gov_span_id=gov_sid,
             )
-            _evaluate_started("mongodb", db_name, operation, statement, host, port, span_data=started_sd)
+            _evaluate_db_sync(ident, started_sd)
             start = time.perf_counter()
             try:
                 result = wrapped(*args, **kwargs)
@@ -753,7 +652,7 @@ def _setup_pymongo_wrapt_hooks() -> None:
                     current_span, "mongodb", db_name, operation, statement, host, port,
                     "completed", duration_ms=duration_ms, gov_span_id=gov_sid,
                 )
-                _evaluate_completed("mongodb", db_name, operation, statement, host, port, duration_ms, None, span_data=completed_sd)
+                _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 return result
             except GovernanceBlockedError:
                 raise
@@ -763,7 +662,7 @@ def _setup_pymongo_wrapt_hooks() -> None:
                     current_span, "mongodb", db_name, operation, statement, host, port,
                     "completed", duration_ms=duration_ms, error=str(e), gov_span_id=gov_sid,
                 )
-                _evaluate_completed("mongodb", db_name, operation, statement, host, port, duration_ms, str(e), span_data=completed_sd)
+                _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 raise
             finally:
                 _pymongo_wrapt_depth.value = getattr(_pymongo_wrapt_depth, 'value', 1) - 1
@@ -814,8 +713,9 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
         except AttributeError:
             host, port, db_name = "localhost", 6379, "0"
 
+        ident = _db_identifier("redis", host, port, db_name)
         started_sd = _build_db_span_data(span, "redis", db_name, command, statement, host, port, "started")
-        _evaluate_started("redis", db_name, command, statement, host, port, span_data=started_sd)
+        _evaluate_db_sync(ident, started_sd)
         if len(_redis_span_meta) >= _REDIS_META_MAX:
             _redis_span_meta.clear()
         _redis_span_meta[id(span)] = (time.perf_counter(), command, statement, host, port, db_name)
@@ -831,11 +731,12 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
         db_name = meta[5] if meta and len(meta) > 5 else "0"
         duration_ms = (time.perf_counter() - start_time) * 1000
 
+        ident = _db_identifier("redis", host, port, db_name)
         completed_sd = _build_db_span_data(
             span, "redis", db_name, command, statement, host, port,
             "completed", duration_ms=duration_ms,
         )
-        _evaluate_completed("redis", db_name, command, statement, host, port, duration_ms, None, span_data=completed_sd)
+        _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
     return _request_hook, _response_hook
 
@@ -884,10 +785,11 @@ def setup_sqlalchemy_hooks(engine) -> None:
 
         current_span = otel_trace.get_current_span()
 
+        ident = _db_identifier(db_system, host, port, db_name)
         started_sd = _build_db_span_data(
             current_span, db_system, db_name, operation, str(statement), host, port, "started",
         )
-        _evaluate_started(db_system, db_name, operation, str(statement), host, port, span_data=started_sd)
+        _evaluate_db_sync(ident, started_sd)
 
     def _after_execute(conn, cursor, statement, parameters, context, executemany):
         start = _sa_timings.pop((id(conn), id(cursor)), None)
@@ -899,11 +801,12 @@ def setup_sqlalchemy_hooks(engine) -> None:
         port = conn.engine.url.port
 
         current_span = otel_trace.get_current_span()
+        ident = _db_identifier(db_system, host, port, db_name)
         completed_sd = _build_db_span_data(
             current_span, db_system, db_name, operation, str(statement), host, port,
             "completed", duration_ms=duration_ms,
         )
-        _evaluate_completed(db_system, db_name, operation, str(statement), host, port, duration_ms, None, span_data=completed_sd)
+        _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
     def _on_error(context):
         """Handle DB errors — clean up timing and send completed with error."""
@@ -921,11 +824,12 @@ def setup_sqlalchemy_hooks(engine) -> None:
         error_msg = str(context.original_exception) if hasattr(context, "original_exception") else "Unknown error"
 
         current_span = otel_trace.get_current_span()
+        ident = _db_identifier(db_system, host, port, db_name)
         completed_sd = _build_db_span_data(
             current_span, db_system, db_name, operation, statement, host, port,
             "completed", duration_ms=duration_ms, error=error_msg,
         )
-        _evaluate_completed(db_system, db_name, operation, statement, host, port, duration_ms, error_msg, span_data=completed_sd)
+        _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
     try:
         event.listen(engine, "before_cursor_execute", _before_execute)

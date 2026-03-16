@@ -30,19 +30,20 @@ from . import hook_governance as _hook_gov
 logger = logging.getLogger(__name__)
 
 
-def _build_traced_span_data(span, func_name: str, module: str, stage: str, error: Optional[str] = None, duration_ms: Optional[float] = None) -> dict:
-    """Build span data dict for a @traced function call (matches governance span format)."""
+def _build_traced_span_data(
+    span, func_name: str, module: str, stage: str,
+    error: Optional[str] = None, duration_ms: Optional[float] = None,
+    args: Any = None, result: Any = None,
+) -> dict:
+    """Build span data dict for a @traced function call.
+
+    attributes: OTel-original only. All custom data at root level.
+    """
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-
     raw_attrs = getattr(span, 'attributes', None)
-    attrs = dict(raw_attrs) if raw_attrs and isinstance(raw_attrs, dict) else {
-        "code.function": func_name,
-        "code.namespace": module,
-    }
-    if error:
-        attrs["openbox.governance.error"] = error
+    attrs = dict(raw_attrs) if raw_attrs and isinstance(raw_attrs, dict) else {}
 
     now_ns = _time.time_ns()
     duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
@@ -62,6 +63,14 @@ def _build_traced_span_data(span, func_name: str, module: str, stage: str, error
         "attributes": attrs,
         "status": {"code": "ERROR" if error else "UNSET", "description": error},
         "events": [],
+        # Hook type identification
+        "hook_type": "function_call",
+        # Function-specific root fields
+        "function": func_name,
+        "module": module,
+        "args": args,
+        "result": result,
+        "error": error,
     }
 
 # Get tracer for internal function tracing
@@ -157,21 +166,9 @@ def traced(
 
                     # Governance: started stage
                     if _hook_gov.is_configured():
-                        started_trigger = {
-                            "type": "function_call",
-                            "function": func.__name__,
-                            "module": func.__module__,
-                            "stage": "started",
-                            "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                        }
-                        if capture_args:
-                            started_trigger["args"] = _safe_serialize(
-                                {"args": args, "kwargs": kwargs}, max_arg_length
-                            )
-                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started")
-                        await _hook_gov.evaluate_async(
-                            span, started_trigger, func.__name__, span_data=started_sd
-                        )
+                        _args_data = _safe_serialize({"args": args, "kwargs": kwargs}, max_arg_length) if capture_args else None
+                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started", args=_args_data)
+                        await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=started_sd)
 
                     import time as _time
                     _start = _time.perf_counter()
@@ -187,21 +184,9 @@ def traced(
 
                         # Governance: completed stage
                         if _hook_gov.is_configured():
-                            completed_trigger = {
-                                "type": "function_call",
-                                "function": func.__name__,
-                                "module": func.__module__,
-                                "stage": "completed",
-                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                            }
-                            if capture_result:
-                                completed_trigger["result"] = _safe_serialize(
-                                    result, max_arg_length
-                                )
-                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms)
-                            await _hook_gov.evaluate_async(
-                                span, completed_trigger, func.__name__, span_data=completed_sd
-                            )
+                            _result_data = _safe_serialize(result, max_arg_length) if capture_result else None
+                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms, result=_result_data)
+                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=completed_sd)
 
                         return result
 
@@ -213,23 +198,10 @@ def traced(
 
                         # Governance: completed stage with error
                         if _hook_gov.is_configured():
-                            error_trigger = {
-                                "type": "function_call",
-                                "function": func.__name__,
-                                "module": func.__module__,
-                                "stage": "completed",
-                                "error": {
-                                    "type": type(e).__name__,
-                                    "message": str(e),
-                                },
-                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                            }
                             error_sd = _build_traced_span_data(
                                 span, func.__name__, func.__module__, "completed", error=str(e)
                             )
-                            await _hook_gov.evaluate_async(
-                                span, error_trigger, func.__name__, span_data=error_sd
-                            )
+                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=error_sd)
 
                         raise
 
@@ -250,21 +222,9 @@ def traced(
 
                     # Governance: started stage
                     if _hook_gov.is_configured():
-                        started_trigger = {
-                            "type": "function_call",
-                            "function": func.__name__,
-                            "module": func.__module__,
-                            "stage": "started",
-                            "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                        }
-                        if capture_args:
-                            started_trigger["args"] = _safe_serialize(
-                                {"args": args, "kwargs": kwargs}, max_arg_length
-                            )
-                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started")
-                        _hook_gov.evaluate_sync(
-                            span, started_trigger, func.__name__, span_data=started_sd
-                        )
+                        _args_data = _safe_serialize({"args": args, "kwargs": kwargs}, max_arg_length) if capture_args else None
+                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started", args=_args_data)
+                        _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=started_sd)
 
                     import time as _time
                     _start = _time.perf_counter()
@@ -280,21 +240,9 @@ def traced(
 
                         # Governance: completed stage
                         if _hook_gov.is_configured():
-                            completed_trigger = {
-                                "type": "function_call",
-                                "function": func.__name__,
-                                "module": func.__module__,
-                                "stage": "completed",
-                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                            }
-                            if capture_result:
-                                completed_trigger["result"] = _safe_serialize(
-                                    result, max_arg_length
-                                )
-                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms)
-                            _hook_gov.evaluate_sync(
-                                span, completed_trigger, func.__name__, span_data=completed_sd
-                            )
+                            _result_data = _safe_serialize(result, max_arg_length) if capture_result else None
+                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms, result=_result_data)
+                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=completed_sd)
 
                         return result
 
@@ -306,23 +254,10 @@ def traced(
 
                         # Governance: completed stage with error
                         if _hook_gov.is_configured():
-                            error_trigger = {
-                                "type": "function_call",
-                                "function": func.__name__,
-                                "module": func.__module__,
-                                "stage": "completed",
-                                "error": {
-                                    "type": type(e).__name__,
-                                    "message": str(e),
-                                },
-                                "attribute_key_identifiers": _hook_gov.DEDUP_KEYS_FUNCTION,
-                            }
                             error_sd = _build_traced_span_data(
                                 span, func.__name__, func.__module__, "completed", error=str(e)
                             )
-                            _hook_gov.evaluate_sync(
-                                span, error_trigger, func.__name__, span_data=error_sd
-                            )
+                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=error_sd)
 
                         raise
 
