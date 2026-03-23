@@ -60,10 +60,8 @@ def _serialize_value(value: Any) -> Any:
         return str(value)
 
 
-class GovernanceHaltError(Exception):
-    """Raised when governance halts workflow execution."""
-    def __init__(self, message: str):
-        super().__init__(message)
+# Re-export from errors.py for backward compatibility
+from .errors import GovernanceHaltError  # noqa: F401
 
 
 async def _send_governance_event(

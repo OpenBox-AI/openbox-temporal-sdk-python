@@ -46,6 +46,7 @@ dependencies = [
     "opentelemetry-instrumentation-asyncpg>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-mysql>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-pymysql>=0.59b0,<0.61b0",
+    "opentelemetry-instrumentation-sqlite3>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-pymongo>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-redis>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",

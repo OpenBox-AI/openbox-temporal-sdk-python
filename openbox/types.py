@@ -12,19 +12,8 @@ def rfc3339_now() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
 
 
-class GovernanceBlockedError(Exception):
-    """Raised by OTel hooks when governance blocks an operation."""
-
-    def __init__(self, verdict: Union[str, "Verdict"], reason: str, url: str = ""):
-        # Normalize to Verdict enum for consistent downstream comparisons
-        if isinstance(verdict, str):
-            from_string = Verdict.from_string  # avoid circular at class level
-            self.verdict = from_string(verdict)
-        else:
-            self.verdict = verdict
-        self.reason = reason
-        self.url = url
-        super().__init__(f"Governance {self.verdict.value}: {reason}")
+# Re-export from errors.py for backward compatibility
+from .errors import GovernanceBlockedError  # noqa: F401
 
 
 class WorkflowEventType(str, Enum):

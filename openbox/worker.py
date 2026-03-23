@@ -23,6 +23,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Dict,
     Optional,
     Sequence,
     Type,
@@ -202,6 +203,7 @@ def create_openbox_worker(
     # 5. Create interceptors
     from .workflow_interceptor import GovernanceInterceptor
     from .activity_interceptor import ActivityGovernanceInterceptor
+    from .client import GovernanceClient
 
     workflow_interceptor = GovernanceInterceptor(
         api_url=openbox_url,
@@ -210,11 +212,20 @@ def create_openbox_worker(
         config=config,
     )
 
+    # Shared GovernanceClient: persistent auth headers, single config source
+    governance_client = GovernanceClient(
+        api_url=openbox_url,
+        api_key=openbox_api_key,
+        timeout=governance_timeout,
+        on_api_error=governance_policy,
+    )
+
     activity_interceptor = ActivityGovernanceInterceptor(
         api_url=openbox_url,
         api_key=openbox_api_key,
         span_processor=span_processor,
         config=config,
+        client=governance_client,
     )
 
     # 6. Get governance activities

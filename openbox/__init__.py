@@ -21,10 +21,26 @@ from .config import (
     initialize,
     get_global_config,
     GovernanceConfig,
+)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Errors (unified hierarchy in errors.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from .errors import (
+    OpenBoxError,
     OpenBoxConfigError,
     OpenBoxAuthError,
     OpenBoxNetworkError,
     OpenBoxInsecureURLError,
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GovernanceAPIError,
+    GuardrailsValidationError,
+    ApprovalExpiredError,
+    ApprovalRejectedError,
+    ApprovalTimeoutError,
+    extract_governance_error,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -49,7 +65,25 @@ from .span_processor import WorkflowSpanProcessor
 # Interceptors
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from .workflow_interceptor import GovernanceInterceptor, GovernanceHaltError
+from .workflow_interceptor import GovernanceInterceptor
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Verdict Handler
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from .verdict_handler import enforce_verdict, VerdictEnforcementResult
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HITL — Human-in-the-Loop approval helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Governance HTTP Client (sandbox-safe — httpx imported lazily inside methods)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from .client import GovernanceClient
 
 # NOTE: ActivityGovernanceInterceptor is NOT imported here because it imports
 # OpenTelemetry which uses importlib_metadata -> os.stat, causing sandbox issues.
@@ -98,10 +132,20 @@ __all__ = [
     "initialize",
     "get_global_config",
     "GovernanceConfig",
+    # Errors (unified hierarchy)
+    "OpenBoxError",
     "OpenBoxConfigError",
     "OpenBoxAuthError",
     "OpenBoxNetworkError",
     "OpenBoxInsecureURLError",
+    "GovernanceBlockedError",
+    "GovernanceHaltError",
+    "GovernanceAPIError",
+    "GuardrailsValidationError",
+    "ApprovalExpiredError",
+    "ApprovalRejectedError",
+    "ApprovalTimeoutError",
+    "extract_governance_error",
     # Types
     "Verdict",
     "WorkflowEventType",
@@ -112,5 +156,13 @@ __all__ = [
     "WorkflowSpanProcessor",
     # Interceptors
     "GovernanceInterceptor",
-    "GovernanceHaltError",
+    # Verdict handler
+    "enforce_verdict",
+    "VerdictEnforcementResult",
+    # HITL helpers
+    "handle_approval_response",
+    "raise_approval_pending",
+    "should_skip_hitl",
+    # Governance HTTP client
+    "GovernanceClient",
 ]

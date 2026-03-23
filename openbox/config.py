@@ -32,33 +32,13 @@ def _build_auth_headers(api_key: str) -> dict:
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_[a-zA-Z0-9_]+$")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Exceptions
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class OpenBoxConfigError(Exception):
-    """Raised when OpenBox configuration fails."""
-
-    pass
-
-
-class OpenBoxAuthError(OpenBoxConfigError):
-    """Raised when API key validation fails."""
-
-    pass
-
-
-class OpenBoxNetworkError(OpenBoxConfigError):
-    """Raised when network connectivity fails."""
-
-    pass
-
-
-class OpenBoxInsecureURLError(OpenBoxConfigError):
-    """Raised when HTTP is used for non-localhost URLs."""
-
-    pass
+# Re-export from errors.py for backward compatibility
+from .errors import (  # noqa: F401
+    OpenBoxConfigError,
+    OpenBoxAuthError,
+    OpenBoxNetworkError,
+    OpenBoxInsecureURLError,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,6 +109,10 @@ class GovernanceConfig:
     skip_hitl_activity_types: Set[str] = field(
         default_factory=lambda: {"send_governance_event"}
     )
+
+    # Reserved for future non-retry polling interval (ms).
+    # Temporal currently uses its native retry backoff for HITL polling.
+    hitl_poll_interval_ms: int = 5000
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
