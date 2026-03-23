@@ -32,7 +32,12 @@ from .types import Verdict
 
 
 def _serialize_value(value: Any) -> Any:
-    """Convert a value to JSON-serializable format for workflow result."""
+    """Convert a value to JSON-serializable format for workflow result.
+
+    NOTE: Intentionally duplicated from activity_interceptor._serialize_value.
+    Workflow interceptor runs inside Temporal sandbox — cannot import from
+    activity_interceptor (which has non-sandbox-safe imports like httpx).
+    """
     if value is None:
         return None
     if isinstance(value, (str, int, float, bool)):
@@ -96,9 +101,17 @@ async def _send_governance_event(
         error_str = str(e)
         error_type = type(e).__name__
 
-        # ApplicationError with type="GovernanceStop" (non-retryable, terminates workflow)
-        # This is raised when governance API returns action='stop'
-        if "ApplicationError" in error_type or "Governance blocked:" in error_str:
+        # GovernanceHalt: workflow should terminate (client.terminate() already called,
+        # but re-raise to ensure workflow code path stops)
+        if "GovernanceHalt" in error_str:
+            raise GovernanceHaltError(error_str)
+
+        # GovernanceBlock: activity blocked, workflow continues
+        if "GovernanceBlock" in error_str:
+            return None
+
+        # Legacy GovernanceStop (backward compat) → treat as halt
+        if "GovernanceStop" in error_str:
             raise GovernanceHaltError(error_str)
 
         # Activity raised GovernanceAPIError (fail_closed and API unreachable)

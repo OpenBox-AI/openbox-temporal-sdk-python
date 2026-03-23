@@ -315,12 +315,12 @@ class TestSendGovernanceEvent:
 
     @pytest.mark.asyncio
     async def test_raises_governance_halt_error_for_application_error(self, mock_workflow):
-        """Test that ApplicationError raises GovernanceHaltError."""
+        """Test that ApplicationError with GovernanceHalt raises GovernanceHaltError."""
         # Create a custom ApplicationError class to simulate the real one
         class ApplicationError(Exception):
             pass
 
-        error = ApplicationError("Governance blocked: Policy violation")
+        error = ApplicationError("GovernanceHalt: Policy violation")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         with pytest.raises(GovernanceHaltError) as exc_info:
@@ -331,12 +331,12 @@ class TestSendGovernanceEvent:
                 timeout=30.0,
             )
 
-        assert "Governance blocked:" in str(exc_info.value)
+        assert "GovernanceHalt" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_blocked_message(self, mock_workflow):
-        """Test that error with 'Governance blocked:' message raises GovernanceHaltError."""
-        error = Exception("Governance blocked: High risk detected")
+    async def test_raises_governance_halt_error_for_governance_halt_message(self, mock_workflow):
+        """Test that error with 'GovernanceHalt' in message raises GovernanceHaltError."""
+        error = Exception("GovernanceHalt: High risk detected")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         with pytest.raises(GovernanceHaltError) as exc_info:
@@ -347,7 +347,7 @@ class TestSendGovernanceEvent:
                 timeout=30.0,
             )
 
-        assert "Governance blocked: High risk detected" in str(exc_info.value)
+        assert "GovernanceHalt: High risk detected" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_raises_governance_halt_error_for_governance_api_error(self, mock_workflow):

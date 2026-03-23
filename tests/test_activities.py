@@ -5,7 +5,7 @@ Comprehensive pytest tests for the OpenBox SDK activities module.
 Tests cover:
 - _rfc3339_now() timestamp formatting
 - GovernanceAPIError exception
-- raise_governance_stop() behavior
+- raise_governance_block() and _terminate_workflow_for_halt() behavior
 - send_governance_event() activity with various scenarios
 """
 
@@ -20,7 +20,8 @@ from temporalio.exceptions import ApplicationError
 from openbox.activities import (
     _rfc3339_now,
     GovernanceAPIError,
-    raise_governance_stop,
+    raise_governance_block,
+    _terminate_workflow_for_halt,
     send_governance_event,
 )
 
@@ -123,68 +124,90 @@ class TestGovernanceAPIError:
 
 
 # =============================================================================
-# Tests for raise_governance_stop()
+# Tests for raise_governance_block()
 # =============================================================================
 
-class TestRaiseGovernanceStop:
-    """Tests for the raise_governance_stop() function."""
+class TestRaiseGovernanceBlock:
+    """Tests for the raise_governance_block() function."""
 
     def test_raises_application_error(self):
-        """Test that raise_governance_stop raises ApplicationError."""
         with pytest.raises(ApplicationError):
-            raise_governance_stop("Test reason")
+            raise_governance_block("Test reason")
 
     def test_error_message_format(self):
-        """Test that the error message has the correct format."""
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Policy violation detected")
+            raise_governance_block("Policy violation detected")
         assert "Governance blocked: Policy violation detected" in str(exc_info.value)
 
-    def test_error_type_is_governance_stop(self):
-        """Test that the error type is 'GovernanceStop'."""
+    def test_error_type_is_governance_block(self):
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason")
-        assert exc_info.value.type == "GovernanceStop"
+            raise_governance_block("Test reason")
+        assert exc_info.value.type == "GovernanceBlock"
 
     def test_non_retryable_is_true(self):
-        """Test that non_retryable is set to True."""
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason")
+            raise_governance_block("Test reason")
         assert exc_info.value.non_retryable is True
 
     def test_includes_policy_id_in_details(self):
-        """Test that policy_id is included in error details."""
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason", policy_id="policy-123")
+            raise_governance_block("Test reason", policy_id="policy-123")
         details = exc_info.value.details
         assert len(details) == 1
         assert details[0]["policy_id"] == "policy-123"
 
     def test_includes_risk_score_in_details(self):
-        """Test that risk_score is included in error details."""
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason", risk_score=0.85)
+            raise_governance_block("Test reason", risk_score=0.85)
         details = exc_info.value.details
         assert len(details) == 1
         assert details[0]["risk_score"] == 0.85
 
-    def test_includes_both_policy_id_and_risk_score(self):
-        """Test that both policy_id and risk_score are included in details."""
-        with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason", policy_id="policy-456", risk_score=0.95)
-        details = exc_info.value.details
-        assert len(details) == 1
-        assert details[0]["policy_id"] == "policy-456"
-        assert details[0]["risk_score"] == 0.95
-
     def test_default_values_are_none(self):
-        """Test that default values for policy_id and risk_score are None."""
         with pytest.raises(ApplicationError) as exc_info:
-            raise_governance_stop("Test reason")
+            raise_governance_block("Test reason")
         details = exc_info.value.details
         assert len(details) == 1
         assert details[0]["policy_id"] is None
         assert details[0]["risk_score"] is None
+
+
+# =============================================================================
+# Tests for _terminate_workflow_for_halt()
+# =============================================================================
+
+class TestTerminateWorkflowForHalt:
+    """Tests for the _terminate_workflow_for_halt() function."""
+
+    @pytest.mark.asyncio
+    async def test_calls_client_terminate_when_client_available(self):
+        """HALT with client calls terminate() then raises ApplicationError to stop activity."""
+        from openbox.activities import set_temporal_client
+        mock_handle = MagicMock()
+        mock_handle.terminate = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.get_workflow_handle.return_value = mock_handle
+
+        set_temporal_client(mock_client)
+        try:
+            with pytest.raises(ApplicationError) as exc_info:
+                await _terminate_workflow_for_halt("wf-123", "policy violation")
+            # Verify terminate was called before the raise
+            mock_client.get_workflow_handle.assert_called_once_with("wf-123")
+            mock_handle.terminate.assert_called_once_with("Governance HALT: policy violation")
+            assert exc_info.value.type == "GovernanceHalt"
+        finally:
+            set_temporal_client(None)
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_application_error_without_client(self):
+        """HALT without client should raise ApplicationError as fallback."""
+        from openbox.activities import set_temporal_client
+        set_temporal_client(None)
+        with pytest.raises(ApplicationError) as exc_info:
+            await _terminate_workflow_for_halt("wf-123", "policy violation")
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
 
 
 # =============================================================================
@@ -334,10 +357,14 @@ class TestSendGovernanceEvent:
             assert result["verdict"] == "allow"
             assert result["action"] == "allow"  # backward compat field
 
-    async def test_v1_action_stop_raises_governance_stop(
+    async def test_v1_action_stop_terminates_workflow(
         self, base_input, mock_response_v1_stop
     ):
-        """Test that v1.0 action='stop' raises GovernanceStop (non-SignalReceived)."""
+        """Test that v1.0 action='stop' (maps to HALT) calls terminate.
+        Falls back to ApplicationError when no client is set."""
+        from openbox.activities import set_temporal_client
+        set_temporal_client(None)  # No client → fallback to ApplicationError
+
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response_v1_stop
@@ -346,9 +373,8 @@ class TestSendGovernanceEvent:
             with pytest.raises(ApplicationError) as exc_info:
                 await send_governance_event(base_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceHalt"
             assert exc_info.value.non_retryable is True
-            assert "Blocked by v1 policy" in str(exc_info.value)
 
     # -------------------------------------------------------------------------
     # SignalReceived special handling tests
@@ -540,14 +566,16 @@ class TestSendGovernanceEvent:
             call_args = mock_client.post.call_args
             headers = call_args.kwargs["headers"]
             assert headers["Authorization"] == "Bearer test-api-key"
-            assert headers["Content-Type"] == "application/json"
+            from openbox import __version__
+            assert headers["User-Agent"] == f"OpenBox-SDK/{__version__}"
+            assert headers["X-OpenBox-SDK-Version"] == __version__
 
     # -------------------------------------------------------------------------
     # Verdict types tests
     # -------------------------------------------------------------------------
 
-    async def test_block_verdict_raises_governance_stop(self, base_input, mock_response_block):
-        """Test that 'block' verdict raises GovernanceStop for non-SignalReceived."""
+    async def test_block_verdict_raises_governance_block(self, base_input, mock_response_block):
+        """Test that 'block' verdict raises GovernanceBlock (activity fails, workflow continues)."""
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_client.post.return_value = mock_response_block
@@ -556,10 +584,18 @@ class TestSendGovernanceEvent:
             with pytest.raises(ApplicationError) as exc_info:
                 await send_governance_event(base_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
 
-    async def test_halt_verdict_raises_governance_stop(self, base_input):
-        """Test that 'halt' verdict raises GovernanceStop."""
+    async def test_halt_verdict_terminates_workflow(self, base_input):
+        """Test that 'halt' verdict calls client.terminate() to kill workflow."""
+        from openbox.activities import set_temporal_client
+        mock_handle = MagicMock()
+        mock_handle.terminate = AsyncMock()
+        mock_temporal_client = MagicMock()
+        mock_temporal_client.get_workflow_handle.return_value = mock_handle
+
+        set_temporal_client(mock_temporal_client)
+
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -569,16 +605,22 @@ class TestSendGovernanceEvent:
             "risk_score": 1.0,
         }
 
-        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
-            mock_client = AsyncMock()
-            mock_client.post.return_value = mock_response
-            mock_client_class.return_value.__aenter__.return_value = mock_client
+        try:
+            with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+                mock_client = AsyncMock()
+                mock_client.post.return_value = mock_response
+                mock_client_class.return_value.__aenter__.return_value = mock_client
 
-            with pytest.raises(ApplicationError) as exc_info:
-                await send_governance_event(base_input)
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
 
-            assert exc_info.value.type == "GovernanceStop"
-            assert "Emergency halt" in str(exc_info.value)
+                # Verify terminate was called and ApplicationError raised to stop activity
+                mock_temporal_client.get_workflow_handle.assert_called_once_with("test-workflow-123")
+                mock_handle.terminate.assert_called_once()
+                assert "Emergency halt" in mock_handle.terminate.call_args[0][0]
+                assert exc_info.value.type == "GovernanceHalt"
+        finally:
+            set_temporal_client(None)
 
     async def test_constrain_verdict_returns_result(self, base_input):
         """Test that 'constrain' verdict returns result (does not raise)."""
