@@ -212,6 +212,12 @@ def setup_opentelemetry_for_governance(
         if setup_file_io_instrumentation():
             instrumented.append("file_io")
 
+    # 8. Context propagation for async activities using run_in_executor
+    # Without this, OTel trace context is lost in executor threads and
+    # hook governance silently skips HTTP/DB/file spans from those threads.
+    from .context_propagation import install_context_propagating_executor
+    install_context_propagating_executor()
+
     logger.info(f"OpenTelemetry governance setup complete. Instrumented: {instrumented}")
 
 
