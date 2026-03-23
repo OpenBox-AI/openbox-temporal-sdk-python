@@ -23,6 +23,7 @@ from openbox.types import (
     WorkflowSpanBuffer,
     GovernanceVerdictResponse,
     GuardrailsCheckResult,
+    GovernanceBlockedError,
 )
 from openbox.config import GovernanceConfig
 
@@ -98,6 +99,9 @@ def mock_span_processor():
     processor.get_buffer.return_value = None
     processor.get_verdict.return_value = None
     processor.get_pending_body.return_value = None
+    processor.get_activity_abort.return_value = None
+    processor.get_halt_requested.return_value = None
+    processor.clear_halt_requested = MagicMock()
     return processor
 
 
@@ -597,7 +601,7 @@ class TestActivityInterceptor:
     async def test_checks_pending_verdict_raises_governance_stop(
         self, mock_span_processor, mock_activity_info
     ):
-        """Test that pending BLOCK verdict raises GovernanceStop."""
+        """Test that pending BLOCK verdict raises GovernanceBlock."""
         mock_span_processor.get_verdict.return_value = {
             "verdict": "block",
             "reason": "Blocked by policy",
@@ -627,7 +631,7 @@ class TestActivityInterceptor:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert "Governance blocked" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -832,10 +836,10 @@ class TestActivityInterceptor:
         assert payload["event_type"] == "ActivityStarted"
 
     @pytest.mark.asyncio
-    async def test_raises_governance_stop_on_block_verdict(
+    async def test_raises_governance_block_on_block_verdict(
         self, mock_span_processor, mock_activity_info
     ):
-        """Test that GovernanceStop is raised for BLOCK verdict."""
+        """Test that GovernanceBlock is raised for BLOCK verdict."""
         mock_span_processor.get_buffer.return_value = None
         mock_span_processor.get_verdict.return_value = None
 
@@ -880,7 +884,7 @@ class TestActivityInterceptor:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceBlock"
             assert "Policy violation" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -2022,7 +2026,7 @@ class TestEdgeCases:
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "GovernanceStop"
+            assert exc_info.value.type == "GovernanceHalt"
             assert "Workflow halted by policy" in str(exc_info.value)
 
     @pytest.mark.asyncio
@@ -2079,3 +2083,275 @@ class TestEdgeCases:
         # Verify output was redacted in place
         assert output_data.prompt == "[REDACTED]"
         assert result.prompt == "[REDACTED]"
+
+
+# =============================================================================
+# Tests for Hook-Level REQUIRE_APPROVAL → ApprovalPending
+# =============================================================================
+
+
+class TestHookLevelRequireApproval:
+    """Tests for GovernanceBlockedError handling during activity execution.
+
+    When hook-level governance (HTTP/file/DB/function) returns REQUIRE_APPROVAL,
+    the activity interceptor should raise retryable ApprovalPending instead of
+    non-retryable GovernanceStop.
+    """
+
+    @pytest.fixture
+    def mock_activity_info(self):
+        info = MagicMock()
+        info.workflow_id = "test-workflow-id"
+        info.workflow_run_id = "test-run-id"
+        info.workflow_type = "TestWorkflow"
+        info.activity_id = "test-activity-id"
+        info.activity_type = "test_activity"
+        info.task_queue = "test-queue"
+        info.attempt = 1
+        return info
+
+    @pytest.fixture
+    def mock_span_processor(self):
+        processor = MagicMock()
+        processor.get_buffer.return_value = None
+        processor.get_verdict.return_value = None
+        processor.get_pending_body.return_value = None
+        processor.get_halt_requested.return_value = None
+        processor.clear_halt_requested = MagicMock()
+        return processor
+
+    def _make_interceptor(self, mock_span_processor, config=None, activity_raises=None):
+        """Helper: create interceptor with mock next that raises GovernanceBlockedError."""
+        config = config or GovernanceConfig(send_activity_start_event=False, hitl_enabled=True)
+        mock_next = AsyncMock()
+        if activity_raises:
+            mock_next.execute_activity = AsyncMock(side_effect=activity_raises)
+        else:
+            mock_next.execute_activity = AsyncMock(return_value="result")
+        interceptor = _ActivityInterceptor(
+            next_interceptor=mock_next,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            span_processor=mock_span_processor,
+            config=config,
+        )
+        return interceptor
+
+    def _mock_tracer_context(self):
+        """Helper: create mock trace/span context managers."""
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value.trace_id = 123
+        mock_span.get_span_context.return_value.span_id = 456
+        mock_tracer = MagicMock()
+        mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
+        mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+        return mock_tracer
+
+    @pytest.mark.asyncio
+    async def test_require_approval_raises_approval_pending(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Hook REQUIRE_APPROVAL → retryable ApprovalPending error."""
+        buffer = WorkflowSpanBuffer(
+            workflow_id="test-workflow-id",
+            run_id="test-run-id",
+            workflow_type="TestWorkflow",
+            task_queue="test-queue",
+        )
+        mock_span_processor.get_buffer.return_value = buffer
+
+        error = GovernanceBlockedError("require_approval", "Needs human review", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "ApprovalPending"
+            assert exc_info.value.non_retryable is False
+            assert "Approval required" in str(exc_info.value)
+            assert buffer.pending_approval is True
+
+    @pytest.mark.asyncio
+    async def test_block_verdict_raises_governance_block(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Hook BLOCK → non-retryable GovernanceBlock."""
+        mock_span_processor.get_buffer.return_value = None
+
+        error = GovernanceBlockedError("block", "Policy violation", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "GovernanceBlock"
+            assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_require_approval_hitl_disabled_raises_governance_block(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """When HITL disabled, REQUIRE_APPROVAL falls through to GovernanceBlock."""
+        config = GovernanceConfig(send_activity_start_event=False, hitl_enabled=False)
+        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, config=config, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "GovernanceBlock"
+            assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_require_approval_skip_hitl_activity_raises_governance_block(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """When activity is in skip_hitl_activity_types, REQUIRE_APPROVAL → GovernanceBlock."""
+        config = GovernanceConfig(
+            send_activity_start_event=False,
+            hitl_enabled=True,
+            skip_hitl_activity_types={"test_activity"},
+        )
+        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, config=config, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "GovernanceBlock"
+            assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_request_approval_alias_raises_approval_pending(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Verify 'request_approval' alias also triggers ApprovalPending path."""
+        buffer = WorkflowSpanBuffer(
+            workflow_id="test-workflow-id",
+            run_id="test-run-id",
+            workflow_type="TestWorkflow",
+            task_queue="test-queue",
+        )
+        mock_span_processor.get_buffer.return_value = buffer
+
+        error = GovernanceBlockedError("request_approval", "Needs review", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "ApprovalPending"
+            assert exc_info.value.non_retryable is False
+            assert buffer.pending_approval is True
+
+    @pytest.mark.asyncio
+    async def test_require_approval_no_buffer_still_raises_approval_pending(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """When get_buffer returns None, ApprovalPending still raised (pending_approval not set)."""
+        mock_span_processor.get_buffer.return_value = None
+
+        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
+        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+
+        mock_httpx = MagicMock()
+        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
+        mock_httpx.AsyncClient.return_value = mock_client
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity, \
+             patch("openbox.activity_interceptor.trace") as mock_trace, \
+             patch.dict(sys.modules, {"httpx": mock_httpx}):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+
+            assert exc_info.value.type == "ApprovalPending"
+            assert exc_info.value.non_retryable is False
