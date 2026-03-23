@@ -272,12 +272,12 @@ class TestCreateOpenboxWorkerWithConfig:
         )
 
         # Verify ActivityGovernanceInterceptor was created with correct args
-        mock_activity_interceptor.assert_called_once_with(
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=mock_config,
-        )
+        call_kwargs = mock_activity_interceptor.call_args.kwargs
+        assert call_kwargs["api_url"] == "http://localhost:8086"
+        assert call_kwargs["api_key"] == "obx_test_key123"
+        assert call_kwargs["span_processor"] == mock_span_processor
+        assert call_kwargs["config"] == mock_config
+        assert "client" in call_kwargs  # GovernanceClient injected by worker
 
     @patch("openbox.worker.Worker")
     @patch("openbox.worker.validate_api_key")

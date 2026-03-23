@@ -70,6 +70,9 @@ from .config import GovernanceConfig
 from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
 from .hook_governance import build_auth_headers
 from .activities import _terminate_workflow_for_halt
+from .verdict_handler import enforce_verdict
+from .errors import GovernanceHaltError, GuardrailsValidationError
+from .client import GovernanceClient
 
 
 def _serialize_value(value: Any) -> Any:
@@ -117,11 +120,19 @@ class ActivityGovernanceInterceptor(Interceptor):
         api_key: str,
         span_processor: WorkflowSpanProcessor,
         config: Optional[GovernanceConfig] = None,
+        client: Optional[GovernanceClient] = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.span_processor = span_processor
         self.config = config or GovernanceConfig()
+        # Use provided client or create one internally (backward compat)
+        self._client = client or GovernanceClient(
+            api_url=api_url,
+            api_key=api_key,
+            timeout=self.config.api_timeout,
+            on_api_error=self.config.on_api_error,
+        )
 
     def intercept_activity(
         self, next_interceptor: ActivityInboundInterceptor
@@ -132,6 +143,7 @@ class ActivityGovernanceInterceptor(Interceptor):
             self.api_key,
             self.span_processor,
             self.config,
+            self._client,
         )
 
 
@@ -143,12 +155,20 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         api_key: str,
         span_processor: WorkflowSpanProcessor,
         config: GovernanceConfig,
+        client: Optional[GovernanceClient] = None,
     ):
         super().__init__(next_interceptor)
         self._api_url = api_url
         self._api_key = api_key
         self._span_processor = span_processor
         self._config = config
+        # Use provided GovernanceClient for HTTP calls (or create one for direct instantiation)
+        self._client = client or GovernanceClient(
+            api_url=api_url,
+            api_key=api_key,
+            timeout=config.api_timeout,
+            on_api_error=config.on_api_error,
+        )
 
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
         info = activity.info()
@@ -209,64 +229,36 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # ═══ Check for pending approval on retry ═══
         # If there's a pending approval, poll OpenBox Core for status
+        from .hitl import handle_approval_response, should_skip_hitl, raise_approval_pending
         approval_granted = False
-        if self._config.hitl_enabled and info.activity_type not in self._config.skip_hitl_activity_types:
+        if not should_skip_hitl(
+            info.activity_type,
+            hitl_enabled=self._config.hitl_enabled,
+            skip_types=self._config.skip_hitl_activity_types,
+        ):
             buffer = self._span_processor.get_buffer(info.workflow_id)
             if buffer and buffer.pending_approval:
                 activity.logger.info(f"Polling approval status for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
 
-                # Poll OpenBox Core for approval status
-                approval_response = await self._poll_approval_status(
-                    workflow_id=info.workflow_id,
-                    run_id=info.workflow_run_id,
-                    activity_id=info.activity_id,
+                # Poll OpenBox Core for approval status, delegate response handling
+                approval_response = await self._client.poll_approval(
+                    info.workflow_id, info.workflow_run_id, info.activity_id
                 )
 
-                if approval_response:
-                    from temporalio.exceptions import ApplicationError
+                activity.logger.info(f"Processing approval response: expired={approval_response.get('expired') if approval_response else None}, verdict={approval_response.get('verdict') if approval_response else None}")
 
-                    activity.logger.info(f"Processing approval response: expired={approval_response.get('expired')}, verdict={approval_response.get('verdict')}")
-
-                    # Check for approval expiration first
-                    if approval_response.get("expired"):
-                        buffer.pending_approval = False
-                        activity.logger.info(f"TERMINATING WORKFLOW - Approval expired for activity {info.activity_type}")
-                        raise ApplicationError(
-                            f"Approval expired for activity {info.activity_type} (workflow_id={info.workflow_id}, run_id={info.workflow_run_id}, activity_id={info.activity_id})",
-                            type="ApprovalExpired",
-                            non_retryable=True,
-                        )
-
-                    verdict = Verdict.from_string(approval_response.get("verdict") or approval_response.get("action"))
-
-                    if verdict == Verdict.ALLOW:
-                        # Approved - clear pending and proceed
-                        activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
-                        buffer.pending_approval = False
-                        approval_granted = True
-                    elif verdict.should_stop():
-                        # Rejected - clear pending and fail
-                        buffer.pending_approval = False
-                        reason = approval_response.get("reason", "Activity rejected")
-                        raise ApplicationError(
-                            f"Activity rejected: {reason}",
-                            type="ApprovalRejected",
-                            non_retryable=True,
-                        )
-                    else:  # REQUIRE_APPROVAL or CONSTRAIN (still pending)
-                        raise ApplicationError(
-                            f"Awaiting approval for activity {info.activity_type}",
-                            type="ApprovalPending",
-                            non_retryable=False,
-                        )
-                else:
-                    # Failed to poll - raise retryable error
-                    from temporalio.exceptions import ApplicationError
-                    raise ApplicationError(
-                        f"Failed to check approval status, retrying...",
-                        type="ApprovalPending",
-                        non_retryable=False,
-                    )
+                # Raises ApplicationError for expired/rejected/pending; returns True for ALLOW
+                approved = handle_approval_response(
+                    approval_response,
+                    info.activity_type,
+                    info.workflow_id,
+                    info.workflow_run_id,
+                    info.activity_id,
+                )
+                if approved:
+                    activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
+                    buffer.pending_approval = False
+                    approval_granted = True
 
         # Clear any stale abort flag from previous attempt
         self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
@@ -331,58 +323,44 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             info.workflow_id, info.activity_id, _activity_event_context
         )
 
-        # If governance returned BLOCK/HALT, fail the activity before it runs
-        if governance_verdict and governance_verdict.verdict.should_stop():
-            reason = governance_verdict.reason or "No reason provided"
-            if governance_verdict.verdict == Verdict.HALT:
-                await _terminate_workflow_for_halt(info.workflow_id, reason)
-            else:
+        # ═══ Enforce ActivityStarted governance verdict ═══
+        if governance_verdict:
+            try:
+                verdict_result = enforce_verdict(governance_verdict, "activity_start")
+                if (
+                    verdict_result.requires_hitl
+                    and not should_skip_hitl(
+                        info.activity_type,
+                        hitl_enabled=self._config.hitl_enabled,
+                        skip_types=self._config.skip_hitl_activity_types,
+                    )
+                ):
+                    buffer = self._span_processor.get_buffer(info.workflow_id)
+                    if buffer:
+                        buffer.pending_approval = True
+                        activity.logger.info(
+                            f"Pending approval stored: workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
+                        )
+                    raise_approval_pending(
+                        f"Approval required: {governance_verdict.reason or 'Activity requires human approval'}"
+                    )
+            except GovernanceHaltError as e:
+                await _terminate_workflow_for_halt(info.workflow_id, str(e))
+            except GovernanceBlockedError as e:
                 from temporalio.exceptions import ApplicationError
                 raise ApplicationError(
-                    f"Governance blocked: {reason}",
+                    f"Governance blocked: {e.reason}",
                     type="GovernanceBlock",
                     non_retryable=True,
                 )
-
-        # Check guardrails validation_passed - if False, stop the activity
-        if (
-            governance_verdict
-            and governance_verdict.guardrails_result
-            and not governance_verdict.guardrails_result.validation_passed
-        ):
-            from temporalio.exceptions import ApplicationError
-            reasons = governance_verdict.guardrails_result.get_reason_strings()
-            reason_str = "; ".join(reasons) if reasons else "Guardrails validation failed"
-            activity.logger.info(f"Guardrails validation failed: {reason_str}")
-            raise ApplicationError(
-                f"Guardrails validation failed: {reason_str}",
-                type="GuardrailsValidationFailed",
-                non_retryable=True,
-            )
-
-        # ═══ Handle REQUIRE_APPROVAL verdict (pre-execution) ═══
-        if (
-            self._config.hitl_enabled
-            and governance_verdict
-            and governance_verdict.verdict.requires_approval()
-            and info.activity_type not in self._config.skip_hitl_activity_types
-        ):
-            from temporalio.exceptions import ApplicationError
-
-            # Mark approval as pending in span buffer
-            buffer = self._span_processor.get_buffer(info.workflow_id)
-            if buffer:
-                buffer.pending_approval = True
-                activity.logger.info(
-                    f"Pending approval stored: workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
+            except GuardrailsValidationError as e:
+                from temporalio.exceptions import ApplicationError
+                activity.logger.info(f"Guardrails validation failed: {e}")
+                raise ApplicationError(
+                    f"Guardrails validation failed: {e}",
+                    type="GuardrailsValidationFailed",
+                    non_retryable=True,
                 )
-
-            # Raise retryable error - Temporal will retry the activity
-            raise ApplicationError(
-                f"Approval required: {governance_verdict.reason or 'Activity requires human approval'}",
-                type="ApprovalPending",
-                non_retryable=False,  # Retryable!
-            )
 
         # Debug: Log governance verdict details
         if governance_verdict:
@@ -477,9 +455,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                 # REQUIRE_APPROVAL → retryable, reuse HITL polling flow
                 if (
-                    self._config.hitl_enabled
-                    and e.verdict.requires_approval()
-                    and info.activity_type not in self._config.skip_hitl_activity_types
+                    e.verdict.requires_approval()
+                    and not should_skip_hitl(
+                        info.activity_type,
+                        hitl_enabled=self._config.hitl_enabled,
+                        skip_types=self._config.skip_hitl_activity_types,
+                    )
                 ):
                     buffer = self._span_processor.get_buffer(info.workflow_id)
                     if buffer:
@@ -488,11 +469,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             f"Hook REQUIRE_APPROVAL: pending approval for {info.activity_type} "
                             f"(resource: {e.url})"
                         )
-                    raise ApplicationError(
-                        f"Approval required: {e.reason}",
-                        type="ApprovalPending",
-                        non_retryable=False,
-                    )
+                    raise_approval_pending(f"Approval required: {e.reason}")
 
                 # Hook-level BLOCK/HALT → raise non-retryable error to stop activity.
                 # Preserve verdict in error type for the activity interceptor to
@@ -546,58 +523,44 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         error=error,
                     )
 
-                # If governance returned BLOCK/HALT, fail the activity after it completes
-                if completed_verdict and completed_verdict.verdict.should_stop():
-                    reason = completed_verdict.reason or "No reason provided"
-                    if completed_verdict.verdict == Verdict.HALT:
-                        await _terminate_workflow_for_halt(info.workflow_id, reason)
-                    else:
+                # ═══ Enforce ActivityCompleted governance verdict ═══
+                if completed_verdict:
+                    try:
+                        completed_result = enforce_verdict(completed_verdict, "activity_end")
+                        if (
+                            completed_result.requires_hitl
+                            and not should_skip_hitl(
+                                info.activity_type,
+                                hitl_enabled=self._config.hitl_enabled,
+                                skip_types=self._config.skip_hitl_activity_types,
+                            )
+                        ):
+                            buffer = self._span_processor.get_buffer(info.workflow_id)
+                            if buffer:
+                                buffer.pending_approval = True
+                                activity.logger.info(
+                                    f"Pending approval stored (post-execution): workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
+                                )
+                            raise_approval_pending(
+                                f"Approval required for output: {completed_verdict.reason or 'Activity output requires human approval'}"
+                            )
+                    except GovernanceHaltError as e:
+                        await _terminate_workflow_for_halt(info.workflow_id, str(e))
+                    except GovernanceBlockedError as e:
                         from temporalio.exceptions import ApplicationError
                         raise ApplicationError(
-                            f"Governance blocked: {reason}",
+                            f"Governance blocked: {e.reason}",
                             type="GovernanceBlock",
                             non_retryable=True,
                         )
-
-                # Check guardrails validation_passed for output - if False, stop
-                if (
-                    completed_verdict
-                    and completed_verdict.guardrails_result
-                    and not completed_verdict.guardrails_result.validation_passed
-                ):
-                    from temporalio.exceptions import ApplicationError
-                    reasons = completed_verdict.guardrails_result.get_reason_strings()
-                    reason_str = "; ".join(reasons) if reasons else "Guardrails output validation failed"
-                    activity.logger.info(f"Guardrails output validation failed: {reason_str}")
-                    raise ApplicationError(
-                        f"Guardrails validation failed: {reason_str}",
-                        type="GuardrailsValidationFailed",
-                        non_retryable=True,
-                    )
-
-                # ═══ Handle REQUIRE_APPROVAL verdict (post-execution) ═══
-                if (
-                    self._config.hitl_enabled
-                    and completed_verdict
-                    and completed_verdict.verdict.requires_approval()
-                    and info.activity_type not in self._config.skip_hitl_activity_types
-                ):
-                    from temporalio.exceptions import ApplicationError
-
-                    # Mark approval as pending in span buffer
-                    buffer = self._span_processor.get_buffer(info.workflow_id)
-                    if buffer:
-                        buffer.pending_approval = True
-                        activity.logger.info(
-                            f"Pending approval stored (post-execution): workflow_id={info.workflow_id}, run_id={info.workflow_run_id}"
+                    except GuardrailsValidationError as e:
+                        from temporalio.exceptions import ApplicationError
+                        activity.logger.info(f"Guardrails output validation failed: {e}")
+                        raise ApplicationError(
+                            f"Guardrails validation failed: {e}",
+                            type="GuardrailsValidationFailed",
+                            non_retryable=True,
                         )
-
-                    # Raise retryable error - Temporal will retry the activity
-                    raise ApplicationError(
-                        f"Approval required for output: {completed_verdict.reason or 'Activity output requires human approval'}",
-                        type="ApprovalPending",
-                        non_retryable=False,  # Retryable!
-                    )
 
                 # Apply output redaction if governance returned guardrails_result for activity_output
                 if (
@@ -621,20 +584,14 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         return result
 
     async def _send_activity_event(self, info, event_type: str, **extra) -> Optional[GovernanceVerdictResponse]:
-        """Send activity event directly via HTTP (allowed in activity context).
+        """Send activity event via GovernanceClient.
+
+        Builds Temporal-specific payload (using activity.info() fields) and
+        delegates HTTP to self._client.evaluate_event().
 
         Returns:
-            GovernanceVerdictResponse with action, reason, and optional guardrails_result
-            None if API fails and policy is fail_open
-
-        NOTE: httpx and datetime are imported lazily here to avoid loading them
-        at module level. Module-level httpx import triggers Temporal sandbox
-        restrictions because httpx uses os.stat internally.
+            GovernanceVerdictResponse on success, None on fail-open error.
         """
-        # Lazy imports - only loaded when activity interceptor actually runs
-        # (in activity context, not workflow context)
-        import httpx
-
         # Serialize extra fields to ensure no Payload objects slip through
         serialized_extra = {}
         for key, value in extra.items():
@@ -663,148 +620,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             json.dumps(payload)
         except TypeError as e:
             activity.logger.warning(f"Payload not JSON serializable, cleaning: {e}")
-            # Fallback: convert entire payload using default=str
             payload = json.loads(json.dumps(payload, default=str))
 
-        try:
-            async with httpx.AsyncClient(timeout=self._config.api_timeout) as client:
-                response = await client.post(
-                    f"{self._api_url}/api/v1/governance/evaluate",
-                    json=payload,
-                    headers=build_auth_headers(self._api_key),
-                )
-                # Check for HTTP errors
-                if response.status_code >= 400:
-                    error_msg = f"HTTP {response.status_code}"
-                    activity.logger.warning(f"Governance API error: {error_msg}")
+        return await self._client.evaluate_event(payload)
 
-                    # Respect on_api_error policy
-                    if self._config.on_api_error == "fail_closed":
-                        return GovernanceVerdictResponse(
-                            verdict=Verdict.HALT,
-                            reason=f"Governance API error: {error_msg}",
-                        )
-
-                    return None  # Fail-open: allow activity to proceed
-
-                # Parse governance response
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        activity.logger.info(f"Governance response: verdict={data.get('verdict') or data.get('action', 'unknown')}, reason={data.get('reason')}")
-
-                        verdict = GovernanceVerdictResponse.from_dict(data)
-
-                        if verdict.verdict.should_stop():
-                            activity.logger.info(
-                                f"Governance blocked activity: {verdict.reason} (policy: {verdict.policy_id})"
-                            )
-
-                        if verdict.guardrails_result:
-                            activity.logger.info(
-                                f"Guardrails redaction applied: input_type={verdict.guardrails_result.input_type}"
-                            )
-
-                        return verdict
-                    except Exception as e:
-                        activity.logger.warning(f"Failed to parse governance response: {e}")
-
-                return None  # Allow activity to proceed
-
-        except Exception as e:
-            error_msg = str(e) if str(e) else repr(e)
-            activity.logger.warning(f"Governance API error ({type(e).__name__}): {error_msg}")
-
-            # Respect on_api_error policy
-            if self._config.on_api_error == "fail_closed":
-                return GovernanceVerdictResponse(
-                    verdict=Verdict.HALT,
-                    reason=f"Governance API error: {error_msg}",
-                )
-
-            return None  # Fail-open: allow activity to proceed
-
-    async def _poll_approval_status(
-        self,
-        workflow_id: str,
-        run_id: str,
-        activity_id: str,
-    ) -> Optional[dict]:
-        """Poll OpenBox Core for approval status.
-
-        Args:
-            workflow_id: The workflow ID
-            run_id: The workflow run ID
-            activity_id: The activity ID
-
-        Returns:
-            Dict with verdict/action and optional reason. None if API call fails.
-            If approval_expiration_time has passed, returns a halt verdict with expired=True.
-        """
-        import httpx
-        from datetime import datetime, timezone
-
-        payload = {
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-            "activity_id": activity_id,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=self._config.api_timeout) as client:
-                response = await client.post(
-                    f"{self._api_url}/api/v1/governance/approval",
-                    json=payload,
-                    headers=build_auth_headers(self._api_key),
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    activity.logger.info(f"Approval status response: {data}")
-
-                    # Check for approval expiration (skip if field is missing, null, or empty)
-                    expiration_time_str = data.get("approval_expiration_time")
-                    activity.logger.info(f"Checking expiration: approval_expiration_time={expiration_time_str}")
-
-                    if expiration_time_str:
-                        try:
-                            # Parse timestamp - handle multiple formats:
-                            # - "2026-01-11T17:43:39Z" (ISO with Z)
-                            # - "2026-01-11T17:43:39+00:00" (ISO with offset)
-                            # - "2026-01-11 17:43:39" (space-separated from DB)
-                            normalized = expiration_time_str.replace('Z', '+00:00').replace(' ', 'T')
-                            expiration_time = datetime.fromisoformat(normalized)
-
-                            # If no timezone info (naive), assume UTC
-                            if expiration_time.tzinfo is None:
-                                expiration_time = expiration_time.replace(tzinfo=timezone.utc)
-
-                            current_time = datetime.now(timezone.utc)
-
-                            activity.logger.info(
-                                f"Expiration check: expiration_time={expiration_time.isoformat()}, "
-                                f"current_time={current_time.isoformat()}, "
-                                f"is_expired={current_time > expiration_time}"
-                            )
-
-                            if current_time > expiration_time:
-                                activity.logger.info(
-                                    f"Approval EXPIRED - terminating workflow"
-                                )
-                                # Mark as expired - caller will terminate like HALT verdict
-                                data["expired"] = True
-                                return data
-                        except (ValueError, TypeError) as e:
-                            activity.logger.warning(
-                                f"Failed to parse approval_expiration_time '{expiration_time_str}': {e}"
-                            )
-                            # Continue with normal processing if parsing fails
-
-                    return data
-                else:
-                    activity.logger.warning(f"Failed to get approval status: HTTP {response.status_code}")
-                    return None
-
-        except Exception as e:
-            activity.logger.warning(f"Failed to poll approval status: {e}")
-            return None

@@ -50,9 +50,8 @@ def set_temporal_client(client) -> None:
     _temporal_client = client
 
 
-class GovernanceAPIError(Exception):
-    """Raised when governance API fails and policy is fail_closed."""
-    pass
+# Re-export from errors.py for backward compatibility
+from .errors import GovernanceAPIError  # noqa: F401
 
 
 async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:

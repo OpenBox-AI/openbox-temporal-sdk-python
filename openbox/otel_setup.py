@@ -17,6 +17,7 @@ Supported database libraries:
 - asyncpg (PostgreSQL async)
 - mysql-connector-python
 - pymysql
+- sqlite3 (stdlib)
 - pymongo (MongoDB)
 - redis
 - sqlalchemy (ORM)
@@ -98,7 +99,7 @@ def setup_opentelemetry_for_governance(
         instrument_databases: Whether to instrument database libraries (default: True)
         db_libraries: Set of database libraries to instrument (None = all available).
                       Valid values: "psycopg2", "asyncpg", "mysql", "pymysql",
-                      "pymongo", "redis", "sqlalchemy"
+                      "sqlite3", "pymongo", "redis", "sqlalchemy"
         instrument_file_io: Whether to instrument file I/O operations (default: False)
         sqlalchemy_engine: Optional SQLAlchemy Engine instance to instrument. Required
                           when the engine is created before instrumentation runs (e.g.,
@@ -231,6 +232,7 @@ def setup_database_instrumentation(
                       - "asyncpg" (PostgreSQL async)
                       - "mysql" (mysql-connector-python)
                       - "pymysql"
+                      - "sqlite3" (stdlib)
                       - "pymongo" (MongoDB)
                       - "redis"
                       - "sqlalchemy" (ORM)
@@ -284,6 +286,15 @@ def setup_database_instrumentation(
             logger.info("Instrumented: pymysql")
         except ImportError:
             logger.debug("pymysql OTel instrumentation not available")
+
+    if db_libraries is None or "sqlite3" in db_libraries:
+        try:
+            from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
+            SQLite3Instrumentor().instrument()
+            instrumented.append("sqlite3")
+            logger.info("Instrumented: sqlite3")
+        except ImportError:
+            logger.debug("sqlite3 OTel instrumentation not available")
 
     # pymongo OTel (CommandListener already registered above)
     if db_libraries is None or "pymongo" in db_libraries:
@@ -349,7 +360,7 @@ def setup_database_instrumentation(
     # OTel dbapi instrumentors silently discard request_hook/response_hook kwargs.
     # Instead, we patch CursorTracer.traced_execution to inject governance hooks
     # around the query_method call (runs inside the OTel span context).
-    dbapi_libs = {"psycopg2", "mysql", "pymysql"}
+    dbapi_libs = {"psycopg2", "mysql", "pymysql", "sqlite3"}
     if any(lib in instrumented for lib in dbapi_libs):
         if _db_gov.install_cursor_tracer_hooks():
             logger.info("CursorTracer governance hooks installed for dbapi libs")
@@ -393,6 +404,13 @@ def uninstrument_databases() -> None:
         from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
 
         PyMySQLInstrumentor().uninstrument()
+    except (ImportError, Exception):
+        pass
+
+    try:
+        from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
+
+        SQLite3Instrumentor().uninstrument()
     except (ImportError, Exception):
         pass
 

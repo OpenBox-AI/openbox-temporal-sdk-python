@@ -1646,14 +1646,14 @@ class TestActivityInterceptor:
         assert "Connection error" in result.reason
 
     # =========================================================================
-    # Tests for _poll_approval_status()
+    # Tests for poll_approval (via GovernanceClient — replaces _poll_approval_status)
     # =========================================================================
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_returns_status(
         self, mock_span_processor, governance_config
     ):
-        """Test that _poll_approval_status returns approval status dict."""
+        """Test that _client.poll_approval returns approval status dict."""
         mock_next = AsyncMock()
 
         interceptor = _ActivityInterceptor(
@@ -1675,7 +1675,7 @@ class TestActivityInterceptor:
              patch.dict(sys.modules, {"httpx": mock_httpx}):
             mock_activity.logger = MagicMock()
 
-            result = await interceptor._poll_approval_status(
+            result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
                 activity_id="act-789",
@@ -1695,7 +1695,7 @@ class TestActivityInterceptor:
     async def test_poll_approval_status_checks_expiration(
         self, mock_span_processor, governance_config
     ):
-        """Test that _poll_approval_status checks expiration and sets expired=True."""
+        """Test that _client.poll_approval checks expiration and sets expired=True."""
         mock_next = AsyncMock()
 
         interceptor = _ActivityInterceptor(
@@ -1717,7 +1717,7 @@ class TestActivityInterceptor:
              patch.dict(sys.modules, {"httpx": mock_httpx}):
             mock_activity.logger = MagicMock()
 
-            result = await interceptor._poll_approval_status(
+            result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
                 activity_id="act-789",
@@ -1729,7 +1729,7 @@ class TestActivityInterceptor:
     async def test_poll_approval_status_handles_various_timestamp_formats(
         self, mock_span_processor, governance_config
     ):
-        """Test that _poll_approval_status handles various timestamp formats."""
+        """Test that _client.poll_approval handles various timestamp formats."""
         mock_next = AsyncMock()
 
         interceptor = _ActivityInterceptor(
@@ -1758,7 +1758,7 @@ class TestActivityInterceptor:
                  patch.dict(sys.modules, {"httpx": mock_httpx}):
                 mock_activity.logger = MagicMock()
 
-                result = await interceptor._poll_approval_status(
+                result = await interceptor._client.poll_approval(
                     workflow_id="wf-123",
                     run_id="run-456",
                     activity_id="act-789",
@@ -1770,7 +1770,7 @@ class TestActivityInterceptor:
     async def test_poll_approval_status_returns_none_on_api_error(
         self, mock_span_processor, governance_config
     ):
-        """Test that _poll_approval_status returns None on API error."""
+        """Test that _client.poll_approval returns None on API error."""
         mock_next = AsyncMock()
 
         interceptor = _ActivityInterceptor(
@@ -1789,7 +1789,7 @@ class TestActivityInterceptor:
              patch.dict(sys.modules, {"httpx": mock_httpx}):
             mock_activity.logger = MagicMock()
 
-            result = await interceptor._poll_approval_status(
+            result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
                 activity_id="act-789",
@@ -1801,7 +1801,7 @@ class TestActivityInterceptor:
     async def test_poll_approval_status_returns_none_on_exception(
         self, mock_span_processor, governance_config
     ):
-        """Test that _poll_approval_status returns None on exception."""
+        """Test that _client.poll_approval returns None on exception."""
         mock_next = AsyncMock()
 
         interceptor = _ActivityInterceptor(
@@ -1821,7 +1821,7 @@ class TestActivityInterceptor:
              patch.dict(sys.modules, {"httpx": mock_httpx}):
             mock_activity.logger = MagicMock()
 
-            result = await interceptor._poll_approval_status(
+            result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
                 activity_id="act-789",
@@ -1855,7 +1855,7 @@ class TestActivityInterceptor:
              patch.dict(sys.modules, {"httpx": mock_httpx}):
             mock_activity.logger = MagicMock()
 
-            result = await interceptor._poll_approval_status(
+            result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
                 activity_id="act-789",
