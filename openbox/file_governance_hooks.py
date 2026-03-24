@@ -329,14 +329,26 @@ def setup_file_io_instrumentation() -> bool:
             raise
 
     builtins.open = traced_open
-    logger.info("Instrumented: file I/O (builtins.open)")
+
+    # Also patch io.open — Python 3.12+ pathlib calls io.open() directly,
+    # bypassing builtins.open. Without this, Path.write_text() etc. are invisible.
+    import io
+    if not hasattr(io, '_openbox_original_open'):
+        io._openbox_original_open = io.open
+        io.open = traced_open
+
+    logger.info("Instrumented: file I/O (builtins.open + io.open)")
     return True
 
 
 def uninstrument_file_io() -> None:
-    """Restore original open() function."""
+    """Restore original open() functions."""
     import builtins
     if hasattr(builtins, '_openbox_original_open'):
         builtins.open = builtins._openbox_original_open
         delattr(builtins, '_openbox_original_open')
-        logger.info("Uninstrumented: file I/O")
+    import io
+    if hasattr(io, '_openbox_original_open'):
+        io.open = io._openbox_original_open
+        delattr(io, '_openbox_original_open')
+    logger.info("Uninstrumented: file I/O")

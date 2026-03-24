@@ -60,7 +60,7 @@ def create_openbox_worker(
     db_libraries: Optional[set] = None,
     sqlalchemy_engine: Optional[Any] = None,
     # File I/O instrumentation
-    instrument_file_io: bool = False,
+    instrument_file_io: bool = True,
     # Standard Worker options
     activity_executor: Optional[Executor] = None,
     workflow_task_executor: Optional[ThreadPoolExecutor] = None,
