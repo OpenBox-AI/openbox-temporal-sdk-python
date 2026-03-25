@@ -1,6 +1,6 @@
 # Code Standards & Best Practices
 
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-03-23
 
 ---
 
@@ -191,13 +191,19 @@ logger.info("Message")  # Triggers sandbox violation
 # ✅ Safe to export (workflow-safe)
 from .types import Verdict, WorkflowEventType
 from .workflow_interceptor import GovernanceInterceptor
+from .errors import OpenBoxError, GovernanceBlockedError
+from .client import GovernanceClient
+from .verdict_handler import enforce_verdict
 
 # ❌ NOT exported (uses OTel/httpx)
 # from .activity_interceptor import ActivityGovernanceInterceptor
 # from .activities import send_governance_event
+# from .hook_governance import evaluate_sync, evaluate_async
 
 # Users must import directly:
 # from openbox.activity_interceptor import ActivityGovernanceInterceptor
+# from openbox.otel_setup import setup_opentelemetry_for_governance
+# from openbox.tracing import traced
 ```
 
 ---
@@ -292,36 +298,54 @@ def create_openbox_worker(
 
 #### Exception Hierarchy
 
-```python
-OpenBoxConfigError (base)
-├── OpenBoxAuthError (invalid API key)
-└── OpenBoxNetworkError (connectivity issues)
+**OpenBox Unified Exception Hierarchy** (`openbox/errors.py`):
 
-ApplicationError (Temporal)
-├── GovernanceStop (BLOCK/HALT verdicts)
-├── GuardrailsValidationFailed (guardrails failure)
-├── ApprovalPending (awaiting approval, retryable)
-├── ApprovalExpired (approval expired, non-retryable)
-└── ApprovalRejected (approval denied, non-retryable)
+```python
+OpenBoxError (base)
+├── OpenBoxConfigError
+│   ├── OpenBoxAuthError (invalid API key)
+│   ├── OpenBoxNetworkError (connectivity issues)
+│   └── OpenBoxInsecureURLError (non-HTTPS for non-localhost)
+├── GovernanceBlockedError (hook/activity verdict BLOCK)
+├── GovernanceHaltError (verdict HALT, workflow termination)
+├── GovernanceAPIError (API failure, fail_closed policy)
+├── GuardrailsValidationError (guardrails validation_passed=false)
+├── ApprovalExpiredError (HITL approval window expired)
+├── ApprovalRejectedError (HITL approval explicitly rejected)
+└── ApprovalTimeoutError (HITL polling exceeded max wait)
 ```
+
+**Temporal ApplicationError** (for activities):
+- Raised by activity interceptor for governance verdicts
+- Uses Temporal's non-retryable flag for BLOCK/HALT
+- Wraps OpenBox errors when needed
 
 #### Non-Retryable vs Retryable
 
+**Using OpenBox Exceptions:**
+
 ```python
-# ✅ Non-retryable - Terminates workflow immediately
-raise ApplicationError(
-    "Governance blocked: Policy violation",
-    type="GovernanceStop",
-    non_retryable=True,  # ✅ No retry
+from openbox.errors import GovernanceBlockedError, ApprovalTimeoutError
+
+# ✅ Non-retryable - Raises and terminates activity
+raise GovernanceBlockedError(
+    verdict="halt",
+    reason="Policy violation detected",
+    url="https://api.example.com/data"
 )
 
-# ✅ Retryable - Temporal will retry with backoff
+# ✅ Retryable - Temporal retries with backoff
 raise ApplicationError(
     "Awaiting approval",
     type="ApprovalPending",
     non_retryable=False,  # ✅ Retryable
 )
 ```
+
+**Best Practices:**
+- Use `OpenBoxError` and subclasses for SDK errors
+- Use Temporal `ApplicationError` only when wrapping for activity context
+- Always set `non_retryable=True` for BLOCK/HALT verdicts
 
 #### Error Logging
 
@@ -738,5 +762,5 @@ chore: update dependencies to latest versions
 
 ---
 
-**Document Version:** 1.0
-**Last Updated:** 2026-01-31
+**Document Version:** 1.1
+**Last Updated:** 2026-03-23

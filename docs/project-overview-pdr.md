@@ -3,8 +3,8 @@
 **Project Name:** OpenBox SDK for Temporal Workflows
 **Version:** 1.1.0
 **Status:** Alpha
-**Last Updated:** 2026-03-16
-**Total LOC:** 3,700+ (across 11 Python files)
+**Last Updated:** 2026-03-23
+**Total LOC:** 6,000+ (across 17 Python files)
 
 ---
 
@@ -73,6 +73,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Supported Databases**:
   - PostgreSQL (`psycopg2`, `asyncpg`)
   - MySQL (`mysql-connector-python`, `pymysql`)
+  - SQLite (`sqlite3`)
   - MongoDB (`pymongo`)
   - Redis (`redis`)
   - SQLAlchemy ORM
@@ -172,9 +173,14 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 #### FR-11: Worker Factory Function
 - **Requirement**: Provide simple factory function for zero-code setup
 - **Function**: `create_openbox_worker()` in `worker.py`
+- **Configuration Parameters**:
+  - `session_id` (optional) - Session identifier for governance context
+  - `agent_name` (optional) - Agent name for governance evaluation
+  - `tool_type_map` (optional) - Mapping of tool names to types
+  - `hitl_poll_interval_ms` (default: 5000ms) - Approval polling interval
 - **Acceptance Criteria**:
   - Validates API key format and connectivity
-  - Sets up span processor and OTel instrumentation
+  - Sets up span processor and OTel instrumentation (including SQLite)
   - Configures hook-level governance
   - Creates workflow + activity interceptors
   - Returns fully configured `Worker` instance
@@ -407,6 +413,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - `pymongo>=4.0.0` + `opentelemetry-instrumentation-pymongo>=0.59b0`
 - `redis>=5.0.0` + `opentelemetry-instrumentation-redis>=0.59b0`
 - `sqlalchemy>=2.0.0` + `opentelemetry-instrumentation-sqlalchemy>=0.59b0`
+- `sqlite3` (built-in) + `opentelemetry-instrumentation-sqlite3>=0.59b0`
 
 ---
 
