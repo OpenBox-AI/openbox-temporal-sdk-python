@@ -1,9 +1,9 @@
 # Codebase Summary
 
-**Generated:** 2026-03-16
+**Generated:** 2026-03-23
 **Repository:** openbox-temporal-sdk-python
 **Version:** 1.1.0 (Alpha)
-**Total LOC:** 3,700+ (across 11 Python files)
+**Total LOC:** 6,000+ (across 17 Python files)
 
 ---
 
@@ -22,6 +22,10 @@ openbox-temporal-sdk-python/
 │   ├── types.py               # Type definitions (workflow-safe)
 │   ├── config.py              # Configuration and initialization
 │   ├── worker.py              # Worker factory function
+│   ├── errors.py              # Unified exception hierarchy
+│   ├── client.py              # GovernanceClient (centralized HTTP client)
+│   ├── hitl.py                # HITL approval handling
+│   ├── verdict_handler.py      # Centralized verdict enforcement
 │   ├── workflow_interceptor.py # Workflow lifecycle interceptor
 │   ├── activity_interceptor.py # Activity lifecycle interceptor
 │   ├── activities.py          # Governance event activity
@@ -116,7 +120,11 @@ openbox-temporal-sdk-python/
 - `send_start_event` - Send WorkflowStarted events (default: True)
 - `send_activity_start_event` - Send ActivityStarted events (default: True)
 - `hitl_enabled` - Enable approval polling (default: True)
+- `hitl_poll_interval_ms` - Approval polling interval in milliseconds (default: 5000)
 - `skip_hitl_activity_types` - Activity types to skip approval (default: `{"send_governance_event"}`)
+- `session_id` - Session identifier for governance context (optional)
+- `agent_name` - Agent name for governance context (optional)
+- `tool_type_map` - Mapping of tool names to types for governance (default: empty dict)
 
 #### Exceptions
 - `OpenBoxConfigError` - Base configuration error
@@ -127,7 +135,82 @@ openbox-temporal-sdk-python/
 
 ---
 
-### 4. Worker Factory (`worker.py`)
+### 4. Exception Hierarchy (`errors.py`)
+
+**Purpose:** Unified exception hierarchy for SDK errors (framework-agnostic)
+**Key Exceptions:**
+- `OpenBoxError(Exception)` - Base exception for all SDK errors
+- `OpenBoxConfigError(OpenBoxError)` - Configuration-related errors
+- `OpenBoxAuthError(OpenBoxConfigError)` - Invalid API key
+- `OpenBoxNetworkError(OpenBoxConfigError)` - Network connectivity issues
+- `OpenBoxInsecureURLError(OpenBoxConfigError)` - Insecure URL (non-HTTPS)
+- `GovernanceBlockedError(OpenBoxError)` - Operation blocked by hook-level governance
+- `GovernanceAPIError(OpenBoxError)` - API failure (from activities)
+- `GovernanceHaltError(OpenBoxError)` - Workflow-level halt requested
+- `ApprovalPending(OpenBoxError)` - Retryable error pending approval
+- `ApprovalExpired(OpenBoxError)` - Approval has expired
+- `GovernanceStop(OpenBoxError)` - Generic governance stop
+
+**Lines of Code:** 160+
+
+---
+
+### 5. Governance Client (`client.py`)
+
+**Purpose:** Centralized HTTP client for activity-level governance events
+**Key Components:**
+- `GovernanceClient` - Persistent async HTTP client wrapping httpx.AsyncClient
+- `_send_event()` - POST event to `/api/v1/governance/evaluate`
+- `_poll_approval()` - POST to `/api/v1/governance/approval`
+
+**Characteristics:**
+- Single persistent client per activity lifecycle (no per-request creation)
+- Lazy initialization (created on first use)
+- Thread-safe client acquisition via asyncio.Lock
+- Timeout and retry handling
+- Shared with activity interceptor via dependency injection
+
+**Lines of Code:** 200+
+
+---
+
+### 6. HITL Module (`hitl.py`)
+
+**Purpose:** Encapsulate approval polling and expiration logic
+**Key Components:**
+- `poll_approval_status()` - Async function for polling approval with expiration check
+- `is_approval_expired()` - Check if approval_expiration_time has passed
+
+**Integration Points:**
+- Called from activity interceptor when REQUIRE_APPROVAL verdict received
+- Handles RFC3339 timestamp parsing and UTC comparison
+- Raises `ApprovalExpired` if poll result indicates expiration
+
+**Lines of Code:** 80+
+
+---
+
+### 7. Verdict Handler (`verdict_handler.py`)
+
+**Purpose:** Centralized verdict enforcement (DRY up duplicate logic)
+**Key Functions:**
+- `enforce_verdict()` - Check verdict and raise appropriate exception
+  - `ALLOW` - No-op
+  - `CONSTRAIN` - Log warning
+  - `REQUIRE_APPROVAL` - Raise `ApprovalPending`
+  - `BLOCK` - Raise `GovernanceStop`
+  - `HALT` - Raise `GovernanceStop`
+
+**Used By:**
+- activity_interceptor.py - After receiving governance response
+- hook_governance.py - After hook-level evaluation
+- workflow_interceptor.py - For signal verdicts
+
+**Lines of Code:** 100+
+
+---
+
+### 8. Worker Factory (`worker.py`)
 
 **Purpose:** Zero-code setup via `create_openbox_worker()` factory
 **Function Signature:**
@@ -168,7 +251,7 @@ def create_openbox_worker(
 
 ---
 
-### 5. Workflow Interceptor (`workflow_interceptor.py`)
+### 9. Workflow Interceptor (`workflow_interceptor.py`)
 
 **Purpose:** Capture workflow lifecycle events (sent via activity for determinism)
 **Key Components:**
@@ -198,7 +281,7 @@ def create_openbox_worker(
 
 ---
 
-### 6. Activity Interceptor (`activity_interceptor.py`)
+### 10. Activity Interceptor (`activity_interceptor.py`)
 
 **Purpose:** Capture activity lifecycle events with input/output and spans
 **Key Components:**
@@ -241,7 +324,7 @@ def create_openbox_worker(
 
 ---
 
-### 7. Governance Event Activity (`activities.py`)
+### 11. Governance Event Activity (`activities.py`)
 
 **Purpose:** Execute HTTP calls to OpenBox Core from workflow context
 **Activity:** `send_governance_event`
@@ -271,7 +354,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 8. Span Processor (`span_processor.py`)
+### 12. Span Processor (`span_processor.py`)
 
 **Purpose:** Buffer spans per workflow and merge body/header data
 **Key Components:**
@@ -312,7 +395,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 9. Hook-Level Governance (`hook_governance.py`)
+### 13. Hook-Level Governance (`hook_governance.py`)
 
 **Purpose:** Real-time governance evaluation for each operation (HTTP, DB, file, function)
 **Key Components:**
@@ -360,7 +443,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 10. OpenTelemetry Setup (`otel_setup.py`)
+### 14. OpenTelemetry Setup (`otel_setup.py`)
 
 **Purpose:** Instrument HTTP, database, and file I/O libraries
 **Main Function:** `setup_opentelemetry_for_governance()`
@@ -371,6 +454,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 - `httpx` - Hooks + Client.send patching for body capture
 - `urllib3` - Hooks for request/response bodies
 - `urllib` - Hook for request body only
+- `sqlite3` - OTel instrumentation for SQLite queries
 
 **Hooks:**
 - `_requests_request_hook()` / `_requests_response_hook()`
@@ -435,7 +519,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 11. DB Governance Hooks (`db_governance_hooks.py`)
+### 15. DB Governance Hooks (`db_governance_hooks.py`)
 
 **Purpose:** Per-library database governance wrappers for started/completed stages
 **Key Components:**
@@ -481,7 +565,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-### 12. Function Tracing (`tracing.py`)
+### 16. Function Tracing (`tracing.py`)
 
 **Purpose:** `@traced` decorator for custom function tracing with hook-level governance
 **Key Components:**
@@ -598,6 +682,10 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 | `types.py` | 200+ | Type definitions |
 | `config.py` | 320 | Configuration |
 | `worker.py` | 280+ | Worker factory |
+| `errors.py` | 160+ | Exception hierarchy |
+| `client.py` | 200+ | Centralized HTTP client |
+| `hitl.py` | 80+ | Approval polling |
+| `verdict_handler.py` | 100+ | Verdict enforcement |
 | `workflow_interceptor.py` | 263 | Workflow events |
 | `activity_interceptor.py` | 754 | Activity events |
 | `activities.py` | 163 | Governance activity |
@@ -608,7 +696,7 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 | `file_governance_hooks.py` | 342 | File I/O hooks + TracedFile wrapper |
 | `db_governance_hooks.py` | 900+ | DB governance hooks + span data builder |
 | `tracing.py` | 450+ | @traced decorator + span data builder |
-| **Total** | **~5,000+** | **Core SDK** |
+| **Total** | **~5,600+** | **Core SDK** |
 
 ---
 
@@ -675,5 +763,5 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
 
 ---
 
-**Document Version:** 1.2
-**Last Updated:** 2026-03-16
+**Document Version:** 1.3
+**Last Updated:** 2026-03-23

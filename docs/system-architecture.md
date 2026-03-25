@@ -1,8 +1,8 @@
 # System Architecture
 
-**Last Updated:** 2026-03-16
-**Version:** 1.1.0
-**Total LOC:** 3,700+ (across 11 Python files)
+**Last Updated:** 2026-03-23
+**Version:** 1.2.1
+**Total LOC:** 6,000+ (across 17 Python files)
 
 ---
 
@@ -169,9 +169,75 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
 
 ---
 
-### 2. Span Buffering Layer
+### 2. Shared Infrastructure Modules
 
-#### WorkflowSpanProcessor
+#### Exception Hierarchy (`openbox/errors.py`)
+
+**Responsibility:** Unified, framework-agnostic exception definitions
+
+**Exception Tree:**
+```
+OpenBoxError (base)
+├── OpenBoxConfigError
+│   ├── OpenBoxAuthError
+│   ├── OpenBoxNetworkError
+│   └── OpenBoxInsecureURLError
+├── GovernanceBlockedError
+├── GovernanceAPIError
+├── GovernanceHaltError
+├── ApprovalPending
+├── ApprovalExpired
+└── GovernanceStop
+```
+
+**Used By:** All SDK modules for type-safe error handling
+
+**Code Location:** `openbox/errors.py`
+
+#### Governance Client (`openbox/client.py`)
+
+**Responsibility:** Centralized async HTTP client for activity-level events
+
+**Key Characteristics:**
+- Persistent `httpx.AsyncClient` (replaces per-request clients)
+- Handles both governance evaluation and approval polling
+- Shared with `ActivityGovernanceInterceptor` via dependency injection
+- Timeout and retry handling built-in
+
+**Code Location:** `openbox/client.py`
+
+#### HITL Module (`openbox/hitl.py`)
+
+**Responsibility:** Encapsulate approval polling and expiration logic
+
+**Key Functions:**
+- `poll_approval_status()` - Async polling with expiration check
+- `is_approval_expired()` - RFC3339 timestamp comparison
+
+**Used By:** Activity interceptor on REQUIRE_APPROVAL verdict
+
+**Code Location:** `openbox/hitl.py`
+
+#### Verdict Handler (`openbox/verdict_handler.py`)
+
+**Responsibility:** Centralized verdict enforcement (DRY)
+
+**Key Functions:**
+- `enforce_verdict()` - Type-safe verdict → exception mapping
+  - `ALLOW` → continue
+  - `CONSTRAIN` → log warning
+  - `REQUIRE_APPROVAL` → raise `ApprovalPending`
+  - `BLOCK` / `HALT` → raise `GovernanceStop`
+
+**Used By:** Activity interceptor, hook governance, workflow interceptor
+
+**Code Location:** `openbox/verdict_handler.py`
+
+---
+
+### 3. Span Buffering Layer
+
+#### WorkflowSpanProcessor (continued)
 
 **Responsibility:** Buffer spans per workflow and merge body/header data
 
@@ -218,7 +284,7 @@ class WorkflowSpanProcessor:
 
 ---
 
-### 3. Hook-Level Governance Layer
+### 4. Hook-Level Governance Layer
 
 #### Hook Governance Module (`hook_governance.py`)
 
@@ -300,7 +366,7 @@ class WorkflowSpanProcessor:
 
 ---
 
-### 4. Instrumentation Layer
+### 5. Instrumentation Layer
 
 #### HTTP Instrumentation
 
@@ -391,6 +457,7 @@ class WorkflowSpanProcessor:
 **Supported Databases:**
 - PostgreSQL: `psycopg2` (sync), `asyncpg` (async)
 - MySQL: `mysql-connector-python`, `pymysql`
+- SQLite: `sqlite3` (built-in, new in v1.1)
 - MongoDB: `pymongo`
 - Redis: `redis`
 - SQLAlchemy: `sqlalchemy` (ORM)
@@ -582,7 +649,7 @@ class WorkflowSpanProcessor:
 
 ---
 
-### 5. Governance Integration Layer
+### 6. Governance Integration Layer
 
 #### OpenBox Core API
 
@@ -1045,7 +1112,7 @@ Authorization: Bearer {api_key}
 
 ---
 
-**Document Version:** 1.2
-**Last Updated:** 2026-03-16
+**Document Version:** 1.3
+**Last Updated:** 2026-03-23
 
 See `./docs/project-roadmap.md` for future enhancements and planned features.
