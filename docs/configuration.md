@@ -29,13 +29,22 @@
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `hitl_enabled` | `bool` | `True` | Enable approval polling for `REQUIRE_APPROVAL` |
+| `hitl_poll_interval_ms` | `int` | `5000` | Polling interval in milliseconds for approval status |
+
+## Governance Context
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `session_id` | `str` | `None` | Session identifier for governance context (optional) |
+| `agent_name` | `str` | `None` | Agent name for governance context (optional) |
+| `tool_type_map` | `dict` | `{}` | Mapping of tool names to types for governance evaluation |
 
 ## Instrumentation
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `instrument_databases` | `bool` | `True` | Capture database queries |
-| `db_libraries` | `set` | `None` | `"psycopg2"`, `"asyncpg"`, `"mysql"`, `"pymysql"`, `"pymongo"`, `"redis"`, `"sqlalchemy"` |
+| `instrument_databases` | `bool` | `True` | Capture database queries (includes sqlite3) |
+| `db_libraries` | `set` | `None` | `"psycopg2"`, `"asyncpg"`, `"mysql"`, `"pymysql"`, `"pymongo"`, `"redis"`, `"sqlalchemy"`, `"sqlite3"` |
 | `instrument_file_io` | `bool` | `False` | Capture file operations |
 
 ## Example
