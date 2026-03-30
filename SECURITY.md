@@ -11,7 +11,7 @@
 
 Please do not open a public GitHub issue for a suspected security vulnerability.
 
-Report vulnerabilities privately to `tino@openbox.ai` with:
+Report vulnerabilities privately to `devops@openbox.ai` with:
 
 - a description of the issue
 - affected version(s)

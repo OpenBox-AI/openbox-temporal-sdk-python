@@ -313,9 +313,14 @@ jobs:
       - release-quality
       - release-security
       - release-image-security
+    outputs:
+      image_name: ${{ steps.image.outputs.name }}
+      image_digest: ${{ steps.build.outputs.digest }}
     permissions:
       contents: read
       id-token: write
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Checkout repository
@@ -362,6 +367,9 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Ensure ECR repository exists
         env:
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
@@ -369,19 +377,44 @@ jobs:
           aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" >/dev/null 2>&1 || \
           aws ecr create-repository --repository-name "${ECR_REPOSITORY}" >/dev/null
 
-      - name: Build, tag, and push image to Amazon ECR
+      - name: Compute image name
+        id: image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          IMAGE_SHA: ${{ github.sha }}
         run: |
-          image_uri_tag="${ECR_REGISTRY}/${ECR_REPOSITORY}:${RELEASE_TAG}"
-          image_uri_sha="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_SHA}"
-          docker build \
-            -f "${{ steps.dockerfile.outputs.path }}" \
-            -t "${image_uri_tag}" \
-            -t "${image_uri_sha}" \
-            "${{ steps.dockerfile.outputs.context }}"
-          docker push "${image_uri_tag}"
-          docker push "${image_uri_sha}"
+          image_name="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+          echo "name=${image_name}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.dockerfile.outputs.context }}
+          file: ${{ steps.dockerfile.outputs.path }}
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+
+      - name: Generate GitHub build provenance attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  generate-slsa-provenance:
+    name: Generate SLSA provenance
+    needs:
+      - push-ecr-image
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/slsa-generator.yml
+    with:
+      image: ${{ needs.push-ecr-image.outputs.image_name }}
+      digest: ${{ needs.push-ecr-image.outputs.image_digest }}
+      aws_region: ${{ vars.AWS_REGION }}
+      aws_role_to_assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+    secrets: inherit
