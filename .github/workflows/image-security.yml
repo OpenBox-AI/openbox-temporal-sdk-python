@@ -1,0 +1,101 @@
+name: Image Security
+
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "**/Dockerfile"
+      - "**/*.dockerfile"
+      - ".github/workflows/image-security.yml"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: image-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: local/openbox-temporal-sdk-python
+
+jobs:
+  image-security:
+    name: Build and scan image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Dockerfile
+        id: dockerfile
+        run: |
+          dockerfile="$(find . -type f \( -iname 'Dockerfile' -o -iname '*.dockerfile' \) | sort | head -n 1)"
+          if [ -z "${dockerfile}" ]; then
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            echo "No Dockerfile found in repository; image scan will be skipped."
+            exit 0
+          fi
+          context_dir="$(dirname "${dockerfile}")"
+          echo "found=true" >> "${GITHUB_OUTPUT}"
+          echo "path=${dockerfile}" >> "${GITHUB_OUTPUT}"
+          echo "context=${context_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build image tagged by commit SHA
+        if: steps.dockerfile.outputs.found == 'true'
+        env:
+          IMAGE_REF: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          docker build \
+            -f "${{ steps.dockerfile.outputs.path }}" \
+            -t "${IMAGE_REF}" \
+            "${{ steps.dockerfile.outputs.context }}"
+          echo "IMAGE_REF=${IMAGE_REF}" >> "${GITHUB_ENV}"
+
+      - name: Run Trivy image scan
+        if: steps.dockerfile.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_REF }}
+          format: sarif
+          output: trivy-image-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          limit-severities-for-sarif: true
+
+      - name: Upload image SARIF to GitHub Security
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy-image
+
+      - name: Generate image SBOM
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE_REF }}
+          format: cyclonedx
+          output: trivy-image-sbom.cdx.json
+          skip-setup-trivy: true
+
+      - name: Upload image security artifacts
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-security-results
+          path: |
+            trivy-image-results.sarif
+            trivy-image-sbom.cdx.json
+          if-no-files-found: error
+
+      - name: Report skipped image scan
+        if: steps.dockerfile.outputs.found != 'true'
+        run: echo "Image security workflow skipped because this repository does not contain a Dockerfile."

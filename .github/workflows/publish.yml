@@ -1,46 +1,387 @@
-name: Publish to PyPI
+name: Release to ECR
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  COVERAGE_THRESHOLD: "80"
 
 jobs:
-  publish:
-    name: Build and Publish
+  release-governance:
+    name: Release Governance
     runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      id-token: write  # Required for trusted publishing
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag format
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          pattern='^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'
+          if [[ ! "${TAG_NAME}" =~ ${pattern} ]]; then
+            echo "Invalid release tag: ${TAG_NAME}"
+            echo "Expected format: v<major>.<minor>.<patch>"
+            exit 1
+          fi
+
+      - name: Verify governance files exist
+        run: |
+          required_files=(
+            ".github/CODEOWNERS"
+            ".github/pull_request_template.md"
+            ".gitleaks.toml"
+            "SECURITY.md"
+            "LICENSE"
+          )
+          for file in "${required_files[@]}"; do
+            if [ ! -f "${file}" ]; then
+              echo "Missing required governance file: ${file}"
+              exit 1
+            fi
+          done
+
+      - name: Verify CODEOWNERS coverage for protected files
+        run: |
+          declare -a required_patterns=(
+            "/.github/workflows/"
+            "/.github/CODEOWNERS"
+            "/.github/pull_request_template.md"
+            "/.gitleaks.toml"
+            "/SECURITY.md"
+          )
+          for pattern in "${required_patterns[@]}"; do
+            if ! awk '!/^#/ && NF >= 2 {print $1}' .github/CODEOWNERS | grep -Fxq "${pattern}"; then
+              echo "Missing CODEOWNERS entry: ${pattern}"
+              exit 1
+            fi
+          done
+
+      - name: Verify package version matches tag
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          pkg_version="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          if [ "${tag_version}" != "${pkg_version}" ]; then
+            echo "Tag version (${tag_version}) does not match package version (${pkg_version})"
+            exit 1
+          fi
+          echo "Version verified: ${pkg_version}"
+
+  release-quality:
+    name: Release Quality
+    runs-on: ubuntu-latest
+    needs:
+      - release-governance
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install build dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install hatch twine
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
 
-      - name: Verify version matches tag
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run Black
+        run: uv run black --check .
+
+      - name: Run isort
+        run: uv run isort --check-only .
+
+      - name: Run mypy
+        run: uv run mypy openbox
+
+      - name: Run unit tests with coverage
         run: |
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Error: Tag version ($TAG_VERSION) does not match package version ($PKG_VERSION)"
-            exit 1
-          fi
-          echo "Version verified: $PKG_VERSION"
+          uv run pytest tests/ \
+            --cov=openbox \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-fail-under=${COVERAGE_THRESHOLD} \
+            -v
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build
 
       - name: Build package
-        run: hatch build
+        run: python -m build
 
-      - name: Publish to PyPI
+      - name: Set up Java
+        if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache SonarQube packages
+        if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarQube scan
+        if: ${{ secrets.SONAR_TOKEN != '' && secrets.SONAR_HOST_URL != '' }}
+        uses: SonarSource/sonarqube-scan-action@v7
         env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  release-security:
+    name: Release Security
+    runs-on: ubuntu-latest
+    needs:
+      - release-governance
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          vuln-type: os,library
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-release-fs-results.sarif
+          exit-code: "1"
+          limit-severities-for-sarif: true
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-release-fs-results.sarif
+          category: trivy-release-fs
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-release-fs-results
+          path: trivy-release-fs-results.sarif
+          if-no-files-found: error
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+
+  release-image-security:
+    name: Release Image Security
+    runs-on: ubuntu-latest
+    needs:
+      - release-governance
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Dockerfile
+        id: dockerfile
+        run: |
+          dockerfile="$(find . -type f \( -iname 'Dockerfile' -o -iname '*.dockerfile' \) | sort | head -n 1)"
+          if [ -z "${dockerfile}" ]; then
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          context_dir="$(dirname "${dockerfile}")"
+          echo "found=true" >> "${GITHUB_OUTPUT}"
+          echo "path=${dockerfile}" >> "${GITHUB_OUTPUT}"
+          echo "context=${context_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build image tagged by release tag and commit SHA
+        if: steps.dockerfile.outputs.found == 'true'
+        env:
+          LOCAL_IMAGE_TAG: local/openbox-temporal-sdk-python:${{ github.ref_name }}
+          LOCAL_IMAGE_SHA: local/openbox-temporal-sdk-python:${{ github.sha }}
+        run: |
+          docker build \
+            -f "${{ steps.dockerfile.outputs.path }}" \
+            -t "${LOCAL_IMAGE_TAG}" \
+            -t "${LOCAL_IMAGE_SHA}" \
+            "${{ steps.dockerfile.outputs.context }}"
+          echo "LOCAL_IMAGE_TAG=${LOCAL_IMAGE_TAG}" >> "${GITHUB_ENV}"
+
+      - name: Run Trivy image scan
+        if: steps.dockerfile.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE_TAG }}
+          format: sarif
+          output: trivy-release-image-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          limit-severities-for-sarif: true
+
+      - name: Upload image SARIF to GitHub Security
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-release-image-results.sarif
+          category: trivy-release-image
+
+      - name: Generate image SBOM
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: image
+          image-ref: ${{ env.LOCAL_IMAGE_TAG }}
+          format: cyclonedx
+          output: trivy-release-image-sbom.cdx.json
+          skip-setup-trivy: true
+
+      - name: Upload image security artifacts
+        if: always() && steps.dockerfile.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-image-security-results
+          path: |
+            trivy-release-image-results.sarif
+            trivy-release-image-sbom.cdx.json
+          if-no-files-found: error
+
+      - name: Fail when Dockerfile is missing
+        if: steps.dockerfile.outputs.found != 'true'
+        run: |
+          echo "Release image build requires a Dockerfile, but none was found."
+          exit 1
+
+  push-ecr-image:
+    name: Build and push image to Amazon ECR
+    runs-on: ubuntu-latest
+    environment: release
+    needs:
+      - release-quality
+      - release-security
+      - release-image-security
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Dockerfile
+        id: dockerfile
+        run: |
+          dockerfile="$(find . -type f \( -iname 'Dockerfile' -o -iname '*.dockerfile' \) | sort | head -n 1)"
+          if [ -z "${dockerfile}" ]; then
+            echo "Release image push requires a Dockerfile, but none was found."
+            exit 1
+          fi
+          context_dir="$(dirname "${dockerfile}")"
+          echo "path=${dockerfile}" >> "${GITHUB_OUTPUT}"
+          echo "context=${context_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate AWS release configuration
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          if [ -z "${AWS_REGION}" ]; then
+            echo "Repository variable AWS_REGION is required."
+            exit 1
+          fi
+          if [ -z "${AWS_ROLE_TO_ASSUME}" ]; then
+            echo "Repository variable AWS_ROLE_TO_ASSUME is required."
+            exit 1
+          fi
+          if [ -z "${ECR_REPOSITORY}" ]; then
+            echo "Repository variable ECR_REPOSITORY is required."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: |
+          aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${ECR_REPOSITORY}" >/dev/null
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          IMAGE_SHA: ${{ github.sha }}
+        run: |
+          image_uri_tag="${ECR_REGISTRY}/${ECR_REPOSITORY}:${RELEASE_TAG}"
+          image_uri_sha="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_SHA}"
+          docker build \
+            -f "${{ steps.dockerfile.outputs.path }}" \
+            -t "${image_uri_tag}" \
+            -t "${image_uri_sha}" \
+            "${{ steps.dockerfile.outputs.context }}"
+          docker push "${image_uri_tag}"
+          docker push "${image_uri_sha}"

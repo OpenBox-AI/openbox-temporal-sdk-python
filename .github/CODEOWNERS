@@ -1,0 +1,11 @@
+# Default owner
+* @datle-krnl
+
+# Governance and release controls
+/.github/workflows/ @datle-krnl
+/.github/CODEOWNERS @datle-krnl
+/.github/pull_request_template.md @datle-krnl
+/.gitleaks.toml @datle-krnl
+/SECURITY.md @datle-krnl
+/LICENSE @datle-krnl
+/pyproject.toml @datle-krnl
