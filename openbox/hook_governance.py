@@ -105,19 +105,35 @@ def extract_span_context(span) -> tuple:
     Handles NonRecordingSpan, MagicMock, and missing attributes safely.
     Returns 16-char hex span_id, 32-char hex trace_id, and parent_span_id (or None).
     """
-    span_ctx = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
+    span_ctx = (
+        span.get_span_context()
+        if hasattr(span, "get_span_context")
+        else getattr(span, "context", None)
+    )
     try:
-        span_id = format(span_ctx.span_id, "016x") if span_ctx and isinstance(span_ctx.span_id, int) else "0" * 16
+        span_id = (
+            format(span_ctx.span_id, "016x")
+            if span_ctx and isinstance(span_ctx.span_id, int)
+            else "0" * 16
+        )
     except (AttributeError, TypeError):
         span_id = "0" * 16
     try:
-        trace_id = format(span_ctx.trace_id, "032x") if span_ctx and isinstance(span_ctx.trace_id, int) else "0" * 32
+        trace_id = (
+            format(span_ctx.trace_id, "032x")
+            if span_ctx and isinstance(span_ctx.trace_id, int)
+            else "0" * 32
+        )
     except (AttributeError, TypeError):
         trace_id = "0" * 32
 
     parent_span_id = None
-    parent = getattr(span, 'parent', None)
-    if parent and hasattr(parent, 'span_id') and isinstance(getattr(parent, 'span_id', None), int):
+    parent = getattr(span, "parent", None)
+    if (
+        parent
+        and hasattr(parent, "span_id")
+        and isinstance(getattr(parent, "span_id", None), int)
+    ):
         parent_span_id = format(parent.span_id, "016x")
 
     return span_id, trace_id, parent_span_id
@@ -134,6 +150,7 @@ def build_auth_headers(api_key: str) -> dict:
     Shared by all modules that call OpenBox Core API.
     """
     from . import __version__
+
     return {
         "Authorization": f"Bearer {api_key}",
         "User-Agent": f"OpenBox-SDK/{__version__}",
@@ -159,14 +176,20 @@ def _build_payload(
 
     # Look up activity context by trace_id
     # Use get_span_context() for compatibility with both _Span and NonRecordingSpan
-    span_context = span.get_span_context() if hasattr(span, 'get_span_context') else span.context
+    span_context = (
+        span.get_span_context() if hasattr(span, "get_span_context") else span.context
+    )
     trace_id = span_context.trace_id
     logger.debug(f"[GOV] _build_payload: looking up trace_id={trace_id}")
     activity_context = _span_processor.get_activity_context_by_trace(trace_id)
     if activity_context is None:
-        logger.debug(f"[GOV] _build_payload: NO activity context for trace_id={trace_id} — skipping")
+        logger.debug(
+            f"[GOV] _build_payload: NO activity context for trace_id={trace_id} — skipping"
+        )
         return None
-    logger.debug(f"[GOV] _build_payload: found activity context wf={activity_context.get('workflow_id')}")
+    logger.debug(
+        f"[GOV] _build_payload: found activity context wf={activity_context.get('workflow_id')}"
+    )
 
     workflow_id = activity_context.get("workflow_id")
     activity_id = activity_context.get("activity_id")
@@ -181,6 +204,7 @@ def _build_payload(
     payload["span_count"] = 1 if span_data else 0
     payload["hook_trigger"] = True
     from .types import rfc3339_now
+
     payload["timestamp"] = rfc3339_now()
 
     # Ensure JSON-serializable (Temporal Payload objects slip through from activity_context)
@@ -200,8 +224,12 @@ def _resolve_activity_ids(span) -> Optional[tuple]:
     """
     if _span_processor is None:
         return None
-    span_context = span.get_span_context() if hasattr(span, 'get_span_context') else getattr(span, 'context', None)
-    if not span_context or not isinstance(getattr(span_context, 'trace_id', None), int):
+    span_context = (
+        span.get_span_context()
+        if hasattr(span, "get_span_context")
+        else getattr(span, "context", None)
+    )
+    if not span_context or not isinstance(getattr(span_context, "trace_id", None), int):
         return None
     activity_ctx = _span_processor.get_activity_context_by_trace(span_context.trace_id)
     if not activity_ctx or not isinstance(activity_ctx, dict):
@@ -215,7 +243,9 @@ def _check_activity_abort(span) -> Optional[str]:
     Returns abort reason if aborted, None otherwise.
     """
     # Skip if span_processor lacks abort method (MagicMock/old processors)
-    if not hasattr(_span_processor, 'get_activity_abort') or not callable(getattr(_span_processor, 'get_activity_abort', None)):
+    if not hasattr(_span_processor, "get_activity_abort") or not callable(
+        getattr(_span_processor, "get_activity_abort", None)
+    ):
         return None
     ids = _resolve_activity_ids(span)
     if not ids:
@@ -243,7 +273,11 @@ def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> 
     """
     from .types import GovernanceBlockedError
 
-    verdict_str = (data.get("verdict") or data.get("action", "continue")).lower().replace("-", "_")
+    verdict_str = (
+        (data.get("verdict") or data.get("action", "continue"))
+        .lower()
+        .replace("-", "_")
+    )
     if verdict_str in ("stop", "block", "halt"):
         if span:
             reason = data.get("reason", "Blocked by governance")
@@ -251,7 +285,9 @@ def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> 
             if ids:
                 _span_processor.set_activity_abort(ids[0], ids[1], reason)
                 # For HALT, also set halt-requested flag so activity interceptor calls terminate()
-                if verdict_str in ("halt", "stop") and hasattr(_span_processor, 'set_halt_requested'):
+                if verdict_str in ("halt", "stop") and hasattr(
+                    _span_processor, "set_halt_requested"
+                ):
                     _span_processor.set_halt_requested(ids[0], ids[1], reason)
         raise GovernanceBlockedError(
             verdict_str, data.get("reason", "Blocked by governance"), identifier
@@ -260,7 +296,9 @@ def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> 
         if span:
             _set_activity_abort(span, data.get("reason", "Approval required"))
         raise GovernanceBlockedError(
-            verdict_str, data.get("reason", "Approval required - blocked at hook level"), identifier
+            verdict_str,
+            data.get("reason", "Approval required - blocked at hook level"),
+            identifier,
         )
 
 
@@ -327,7 +365,9 @@ def evaluate_sync(
     except Exception as e:
         logger.warning(f"Hook governance evaluation failed: {e}")
         if _on_api_error == FAIL_CLOSED:
-            raise GovernanceBlockedError("halt", f"Governance evaluation error: {e}", identifier)
+            raise GovernanceBlockedError(
+                "halt", f"Governance evaluation error: {e}", identifier
+            )
 
 
 async def evaluate_async(
@@ -373,4 +413,6 @@ async def evaluate_async(
     except Exception as e:
         logger.warning(f"Hook governance evaluation failed: {e}")
         if _on_api_error == FAIL_CLOSED:
-            raise GovernanceBlockedError("halt", f"Governance evaluation error: {e}", identifier)
+            raise GovernanceBlockedError(
+                "halt", f"Governance evaluation error: {e}", identifier
+            )

@@ -70,7 +70,9 @@ async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
         except Exception as e:
             logger.warning(f"HALT: failed to terminate workflow {workflow_id}: {e}")
     else:
-        logger.warning(f"HALT: _temporal_client is None, cannot terminate workflow {workflow_id}")
+        logger.warning(
+            f"HALT: _temporal_client is None, cannot terminate workflow {workflow_id}"
+        )
 
     # Always raise to stop the current activity execution.
     # Even after successful terminate(), the activity code keeps running
@@ -82,7 +84,9 @@ async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
     )
 
 
-def raise_governance_block(reason: str, policy_id: str = None, risk_score: float = None):
+def raise_governance_block(
+    reason: str, policy_id: str = None, risk_score: float = None
+):
     """Raise non-retryable ApplicationError for BLOCK verdict — blocks activity only."""
     details = {"policy_id": policy_id, "risk_score": risk_score}
     raise ApplicationError(
@@ -136,14 +140,18 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
             if response.status_code == 200:
                 data = response.json()
                 # Parse verdict (v1.1) or action (v1.0)
-                verdict = Verdict.from_string(data.get("verdict") or data.get("action", "continue"))
+                verdict = Verdict.from_string(
+                    data.get("verdict") or data.get("action", "continue")
+                )
                 reason = data.get("reason")
                 policy_id = data.get("policy_id")
                 risk_score = data.get("risk_score", 0.0)
 
                 # Check if governance wants to stop (BLOCK or HALT)
                 if verdict.should_stop():
-                    logger.info(f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})")
+                    logger.info(
+                        f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})"
+                    )
 
                     # For SignalReceived events, return result instead of raising/terminating
                     # The workflow interceptor will store verdict for activity interceptor to check
@@ -194,5 +202,3 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
         if on_api_error == "fail_closed":
             raise GovernanceAPIError(str(e))
         return {"success": False, "error": str(e)}
-
-

@@ -67,13 +67,26 @@ def configure(span_processor: "WorkflowSpanProcessor") -> None:
 # Shared helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _classify_sql(query: Any) -> str:
     """Extract SQL verb from a query string (SELECT, INSERT, UPDATE, etc.)."""
     if not query:
         return "UNKNOWN"
     q = str(query).strip().upper()
-    for verb in ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-                 "ALTER", "TRUNCATE", "BEGIN", "COMMIT", "ROLLBACK", "EXPLAIN"):
+    for verb in (
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "EXPLAIN",
+    ):
         if q.startswith(verb):
             return verb
     return "UNKNOWN"
@@ -82,6 +95,7 @@ def _classify_sql(query: Any) -> str:
 def _generate_span_id() -> str:
     """Generate a random 16-hex-char span ID for pymongo governance spans."""
     import random
+
     return format(random.getrandbits(64), "016x")
 
 
@@ -121,10 +135,10 @@ def _build_db_span_data(
         span_id_hex = current_span_id
         parent_span_id = default_parent
 
-    raw_attrs = getattr(span, 'attributes', None)
+    raw_attrs = getattr(span, "attributes", None)
     attrs = dict(raw_attrs) if raw_attrs and isinstance(raw_attrs, dict) else {}
 
-    span_name = getattr(span, 'name', None)
+    span_name = getattr(span, "name", None)
     if not span_name or not isinstance(span_name, str):
         span_name = f"{db_operation} {db_system}"
     now_ns = time.time_ns()
@@ -151,12 +165,21 @@ def _build_db_span_data(
         "db_statement": db_statement,
         "server_address": server_address,
         "server_port": int(server_port) if server_port else None,
-        "rowcount": rowcount if rowcount is not None and isinstance(rowcount, int) and rowcount >= 0 else None,
+        "rowcount": (
+            rowcount
+            if rowcount is not None and isinstance(rowcount, int) and rowcount >= 0
+            else None
+        ),
         "error": error,
     }
 
 
-def _db_identifier(db_system: str, server_address: Optional[str], server_port: Optional[int], db_name: Optional[str]) -> str:
+def _db_identifier(
+    db_system: str,
+    server_address: Optional[str],
+    server_port: Optional[int],
+    db_name: Optional[str],
+) -> str:
     """Build a stable identifier string for DB governance evaluations."""
     return f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
 
@@ -173,6 +196,7 @@ def _evaluate_db_sync(
     For completed stage: swallows errors (query already executed).
     """
     from . import hook_governance as _hook_gov
+
     if not _hook_gov.is_configured():
         return
     span = otel_trace.get_current_span()
@@ -180,7 +204,9 @@ def _evaluate_db_sync(
         try:
             _hook_gov.evaluate_sync(span, identifier=identifier, span_data=span_data)
         except Exception as e:
-            logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
+            logger.debug(
+                f"DB governance completed evaluation error (non-blocking): {e}"
+            )
     else:
         _hook_gov.evaluate_sync(span, identifier=identifier, span_data=span_data)
 
@@ -197,14 +223,19 @@ async def _evaluate_db_async(
     For completed stage: swallows errors (query already executed).
     """
     from . import hook_governance as _hook_gov
+
     if not _hook_gov.is_configured():
         return
     span = otel_trace.get_current_span()
     if is_completed:
         try:
-            await _hook_gov.evaluate_async(span, identifier=identifier, span_data=span_data)
+            await _hook_gov.evaluate_async(
+                span, identifier=identifier, span_data=span_data
+            )
         except Exception as e:
-            logger.debug(f"DB governance completed evaluation error (non-blocking): {e}")
+            logger.debug(
+                f"DB governance completed evaluation error (non-blocking): {e}"
+            )
     else:
         await _hook_gov.evaluate_async(span, identifier=identifier, span_data=span_data)
 
@@ -266,7 +297,14 @@ def install_cursor_tracer_hooks() -> bool:
 
             # Build & send "started" span data entry
             started_sd = _build_db_span_data(
-                current_span, db_system, db_name, operation, stmt, host, port, "started",
+                current_span,
+                db_system,
+                db_name,
+                operation,
+                stmt,
+                host,
+                port,
+                "started",
             )
             _evaluate_db_sync(ident, started_sd)
 
@@ -286,19 +324,36 @@ def install_cursor_tracer_hooks() -> bool:
 
                 # Build & send "completed" span data entry
                 completed_sd = _build_db_span_data(
-                    current_span, db_system, db_name, operation, stmt, host, port,
-                    "completed", duration_ms=duration_ms, rowcount=rc,
+                    current_span,
+                    db_system,
+                    db_name,
+                    operation,
+                    stmt,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    rowcount=rc,
                 )
                 _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 return result
             except Exception as e:
                 from .types import GovernanceBlockedError
+
                 if isinstance(e, GovernanceBlockedError):
                     raise
                 duration_ms = (time.perf_counter() - start) * 1000
                 completed_sd = _build_db_span_data(
-                    current_span, db_system, db_name, operation, stmt, host, port,
-                    "completed", duration_ms=duration_ms, error=str(e),
+                    current_span,
+                    db_system,
+                    db_name,
+                    operation,
+                    stmt,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    error=str(e),
                 )
                 _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 raise
@@ -320,7 +375,14 @@ def install_cursor_tracer_hooks() -> bool:
             ident = _db_identifier(db_system, host, port, db_name)
 
             started_sd = _build_db_span_data(
-                current_span, db_system, db_name, operation, stmt, host, port, "started",
+                current_span,
+                db_system,
+                db_name,
+                operation,
+                stmt,
+                host,
+                port,
+                "started",
             )
             await _evaluate_db_async(ident, started_sd)
 
@@ -336,19 +398,36 @@ def install_cursor_tracer_hooks() -> bool:
                 except Exception:
                     pass
                 completed_sd = _build_db_span_data(
-                    current_span, db_system, db_name, operation, stmt, host, port,
-                    "completed", duration_ms=duration_ms, rowcount=rc,
+                    current_span,
+                    db_system,
+                    db_name,
+                    operation,
+                    stmt,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    rowcount=rc,
                 )
                 await _evaluate_db_async(ident, completed_sd, is_completed=True)
                 return result
             except Exception as e:
                 from .types import GovernanceBlockedError
+
                 if isinstance(e, GovernanceBlockedError):
                     raise
                 duration_ms = (time.perf_counter() - start) * 1000
                 completed_sd = _build_db_span_data(
-                    current_span, db_system, db_name, operation, stmt, host, port,
-                    "completed", duration_ms=duration_ms, error=str(e),
+                    current_span,
+                    db_system,
+                    db_name,
+                    operation,
+                    stmt,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    error=str(e),
                 )
                 await _evaluate_db_async(ident, completed_sd, is_completed=True)
                 raise
@@ -372,6 +451,7 @@ def _uninstall_cursor_tracer_hooks() -> None:
 
     try:
         from opentelemetry.instrumentation.dbapi import CursorTracer
+
         CursorTracer.traced_execution = _orig_traced_execution
         CursorTracer.traced_execution_async = _orig_traced_execution_async
     except ImportError:
@@ -417,15 +497,30 @@ def install_asyncpg_hooks() -> bool:
 
         # Extract connection metadata
         params = getattr(instance, "_params", None)
-        host = getattr(instance, "_addr", ("unknown",))[0] if hasattr(instance, "_addr") else "unknown"
-        port = getattr(instance, "_addr", (None, 5432))[1] if hasattr(instance, "_addr") else 5432
+        host = (
+            getattr(instance, "_addr", ("unknown",))[0]
+            if hasattr(instance, "_addr")
+            else "unknown"
+        )
+        port = (
+            getattr(instance, "_addr", (None, 5432))[1]
+            if hasattr(instance, "_addr")
+            else 5432
+        )
         db_name = getattr(params, "database", None) if params else None
 
         current_span = otel_trace.get_current_span()
         ident = _db_identifier("postgresql", host, port, db_name)
 
         started_sd = _build_db_span_data(
-            current_span, "postgresql", db_name, operation, stmt, host, port, "started",
+            current_span,
+            "postgresql",
+            db_name,
+            operation,
+            stmt,
+            host,
+            port,
+            "started",
         )
         await _evaluate_db_async(ident, started_sd)
         start = time.perf_counter()
@@ -433,19 +528,35 @@ def install_asyncpg_hooks() -> bool:
             result = await wrapped(*args, **kwargs)
             duration_ms = (time.perf_counter() - start) * 1000
             completed_sd = _build_db_span_data(
-                current_span, "postgresql", db_name, operation, stmt, host, port,
-                "completed", duration_ms=duration_ms,
+                current_span,
+                "postgresql",
+                db_name,
+                operation,
+                stmt,
+                host,
+                port,
+                "completed",
+                duration_ms=duration_ms,
             )
             await _evaluate_db_async(ident, completed_sd, is_completed=True)
             return result
         except Exception as e:
             from .types import GovernanceBlockedError
+
             if isinstance(e, GovernanceBlockedError):
                 raise
             duration_ms = (time.perf_counter() - start) * 1000
             completed_sd = _build_db_span_data(
-                current_span, "postgresql", db_name, operation, stmt, host, port,
-                "completed", duration_ms=duration_ms, error=str(e),
+                current_span,
+                "postgresql",
+                db_name,
+                operation,
+                stmt,
+                host,
+                port,
+                "completed",
+                duration_ms=duration_ms,
+                error=str(e),
             )
             await _evaluate_db_async(ident, completed_sd, is_completed=True)
             raise
@@ -468,7 +579,9 @@ def install_asyncpg_hooks() -> bool:
 
     if patched > 0:
         _asyncpg_patched = True
-        logger.info(f"asyncpg governance hooks installed: {patched}/{len(methods)} methods")
+        logger.info(
+            f"asyncpg governance hooks installed: {patched}/{len(methods)} methods"
+        )
         return True
 
     logger.debug("No asyncpg methods patched for governance")
@@ -522,7 +635,7 @@ def setup_pymongo_hooks() -> None:
 
             def started(self, event):
                 # Skip if wrapt wrapper is already handling this operation
-                if getattr(_pymongo_wrapt_depth, 'value', 0) > 0:
+                if getattr(_pymongo_wrapt_depth, "value", 0) > 0:
                     return
                 try:
                     span = otel_trace.get_current_span()
@@ -533,8 +646,14 @@ def setup_pymongo_hooks() -> None:
                         _pymongo_pending_commands.clear()
                     _pymongo_pending_commands[event.request_id] = cmd_str
                     started_sd = _build_db_span_data(
-                        span, "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, "started",
+                        span,
+                        "mongodb",
+                        event.database_name,
+                        event.command_name,
+                        cmd_str,
+                        host,
+                        port,
+                        "started",
                     )
                     ident = _db_identifier("mongodb", host, port, event.database_name)
                     _evaluate_db_sync(ident, started_sd)
@@ -543,7 +662,7 @@ def setup_pymongo_hooks() -> None:
 
             def succeeded(self, event):
                 # Skip if wrapt wrapper is already handling this operation
-                if getattr(_pymongo_wrapt_depth, 'value', 0) > 0:
+                if getattr(_pymongo_wrapt_depth, "value", 0) > 0:
                     _pymongo_pending_commands.pop(event.request_id, None)
                     return
                 try:
@@ -551,10 +670,19 @@ def setup_pymongo_hooks() -> None:
                     host, port = _extract_pymongo_address(event)
                     duration_ms = event.duration_micros / 1000.0
                     # Reuse command string from started event for consistency
-                    cmd_str = _pymongo_pending_commands.pop(event.request_id, event.command_name)
+                    cmd_str = _pymongo_pending_commands.pop(
+                        event.request_id, event.command_name
+                    )
                     completed_sd = _build_db_span_data(
-                        span, "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, "completed", duration_ms=duration_ms,
+                        span,
+                        "mongodb",
+                        event.database_name,
+                        event.command_name,
+                        cmd_str,
+                        host,
+                        port,
+                        "completed",
+                        duration_ms=duration_ms,
                     )
                     ident = _db_identifier("mongodb", host, port, event.database_name)
                     _evaluate_db_sync(ident, completed_sd, is_completed=True)
@@ -563,7 +691,7 @@ def setup_pymongo_hooks() -> None:
 
             def failed(self, event):
                 # Skip if wrapt wrapper is already handling this operation
-                if getattr(_pymongo_wrapt_depth, 'value', 0) > 0:
+                if getattr(_pymongo_wrapt_depth, "value", 0) > 0:
                     _pymongo_pending_commands.pop(event.request_id, None)
                     return
                 try:
@@ -572,10 +700,20 @@ def setup_pymongo_hooks() -> None:
                     duration_ms = event.duration_micros / 1000.0
                     err = str(event.failure)
                     # Reuse command string from started event for consistency
-                    cmd_str = _pymongo_pending_commands.pop(event.request_id, event.command_name)
+                    cmd_str = _pymongo_pending_commands.pop(
+                        event.request_id, event.command_name
+                    )
                     completed_sd = _build_db_span_data(
-                        span, "mongodb", event.database_name, event.command_name,
-                        cmd_str, host, port, "completed", duration_ms=duration_ms, error=err,
+                        span,
+                        "mongodb",
+                        event.database_name,
+                        event.command_name,
+                        cmd_str,
+                        host,
+                        port,
+                        "completed",
+                        duration_ms=duration_ms,
+                        error=err,
                     )
                     ident = _db_identifier("mongodb", host, port, event.database_name)
                     _evaluate_db_sync(ident, completed_sd, is_completed=True)
@@ -613,7 +751,7 @@ def _setup_pymongo_wrapt_hooks() -> None:
             # Increment depth counter — tracks nesting (find_one → find internally).
             # Only the outermost call (depth 0→1) fires governance.
             # Inner calls and CommandListener are suppressed when depth > 0.
-            depth = getattr(_pymongo_wrapt_depth, 'value', 0)
+            depth = getattr(_pymongo_wrapt_depth, "value", 0)
             _pymongo_wrapt_depth.value = depth + 1
 
             # Nested call — just pass through, outer wrapper handles governance
@@ -621,7 +759,9 @@ def _setup_pymongo_wrapt_hooks() -> None:
                 try:
                     return wrapped(*args, **kwargs)
                 finally:
-                    _pymongo_wrapt_depth.value = getattr(_pymongo_wrapt_depth, 'value', 1) - 1
+                    _pymongo_wrapt_depth.value = (
+                        getattr(_pymongo_wrapt_depth, "value", 1) - 1
+                    )
 
             # Outermost call — fire governance
             db_name = instance.database.name
@@ -640,8 +780,15 @@ def _setup_pymongo_wrapt_hooks() -> None:
 
             ident = _db_identifier("mongodb", host, port, db_name)
             started_sd = _build_db_span_data(
-                current_span, "mongodb", db_name, operation, statement, host, port,
-                "started", gov_span_id=gov_sid,
+                current_span,
+                "mongodb",
+                db_name,
+                operation,
+                statement,
+                host,
+                port,
+                "started",
+                gov_span_id=gov_sid,
             )
             _evaluate_db_sync(ident, started_sd)
             start = time.perf_counter()
@@ -649,8 +796,16 @@ def _setup_pymongo_wrapt_hooks() -> None:
                 result = wrapped(*args, **kwargs)
                 duration_ms = (time.perf_counter() - start) * 1000
                 completed_sd = _build_db_span_data(
-                    current_span, "mongodb", db_name, operation, statement, host, port,
-                    "completed", duration_ms=duration_ms, gov_span_id=gov_sid,
+                    current_span,
+                    "mongodb",
+                    db_name,
+                    operation,
+                    statement,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    gov_span_id=gov_sid,
                 )
                 _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 return result
@@ -659,29 +814,57 @@ def _setup_pymongo_wrapt_hooks() -> None:
             except Exception as e:
                 duration_ms = (time.perf_counter() - start) * 1000
                 completed_sd = _build_db_span_data(
-                    current_span, "mongodb", db_name, operation, statement, host, port,
-                    "completed", duration_ms=duration_ms, error=str(e), gov_span_id=gov_sid,
+                    current_span,
+                    "mongodb",
+                    db_name,
+                    operation,
+                    statement,
+                    host,
+                    port,
+                    "completed",
+                    duration_ms=duration_ms,
+                    error=str(e),
+                    gov_span_id=gov_sid,
                 )
                 _evaluate_db_sync(ident, completed_sd, is_completed=True)
                 raise
             finally:
-                _pymongo_wrapt_depth.value = getattr(_pymongo_wrapt_depth, 'value', 1) - 1
+                _pymongo_wrapt_depth.value = (
+                    getattr(_pymongo_wrapt_depth, "value", 1) - 1
+                )
 
-        methods = ("find", "find_one", "insert_one", "insert_many",
-                   "update_one", "update_many", "delete_one", "delete_many",
-                   "aggregate", "count_documents")
+        methods = (
+            "find",
+            "find_one",
+            "insert_one",
+            "insert_many",
+            "update_one",
+            "update_many",
+            "delete_one",
+            "delete_many",
+            "aggregate",
+            "count_documents",
+        )
         patched = 0
         for method in methods:
             try:
-                wrapt.wrap_function_wrapper("pymongo.collection", f"Collection.{method}", _collection_wrapper)
-                _installed_patches.append(("pymongo.collection", f"Collection.{method}"))
+                wrapt.wrap_function_wrapper(
+                    "pymongo.collection", f"Collection.{method}", _collection_wrapper
+                )
+                _installed_patches.append(
+                    ("pymongo.collection", f"Collection.{method}")
+                )
                 patched += 1
             except (AttributeError, TypeError):
                 pass
         if patched > 0:
-            logger.info(f"pymongo wrapt hooks installed: {patched}/{len(methods)} methods")
+            logger.info(
+                f"pymongo wrapt hooks installed: {patched}/{len(methods)} methods"
+            )
         else:
-            logger.debug("pymongo Collection wrapt hooks failed (C extension or immutable)")
+            logger.debug(
+                "pymongo Collection wrapt hooks failed (C extension or immutable)"
+            )
     except ImportError:
         logger.debug("wrapt not available for pymongo blocking hooks")
 
@@ -714,11 +897,20 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
             host, port, db_name = "localhost", 6379, "0"
 
         ident = _db_identifier("redis", host, port, db_name)
-        started_sd = _build_db_span_data(span, "redis", db_name, command, statement, host, port, "started")
+        started_sd = _build_db_span_data(
+            span, "redis", db_name, command, statement, host, port, "started"
+        )
         _evaluate_db_sync(ident, started_sd)
         if len(_redis_span_meta) >= _REDIS_META_MAX:
             _redis_span_meta.clear()
-        _redis_span_meta[id(span)] = (time.perf_counter(), command, statement, host, port, db_name)
+        _redis_span_meta[id(span)] = (
+            time.perf_counter(),
+            command,
+            statement,
+            host,
+            port,
+            db_name,
+        )
 
     def _response_hook(span, instance, response):
         """OTel Redis response hook — 'completed' stage."""
@@ -733,8 +925,15 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
 
         ident = _db_identifier("redis", host, port, db_name)
         completed_sd = _build_db_span_data(
-            span, "redis", db_name, command, statement, host, port,
-            "completed", duration_ms=duration_ms,
+            span,
+            "redis",
+            db_name,
+            command,
+            statement,
+            host,
+            port,
+            "completed",
+            duration_ms=duration_ms,
         )
         _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
@@ -754,8 +953,13 @@ def _get_sa_db_system(engine) -> str:
     """Extract db_system from SQLAlchemy engine dialect name."""
     dialect = getattr(engine, "dialect", None)
     name = getattr(dialect, "name", "") if dialect else ""
-    mapping = {"postgresql": "postgresql", "mysql": "mysql", "sqlite": "sqlite",
-               "oracle": "oracle", "mssql": "mssql"}
+    mapping = {
+        "postgresql": "postgresql",
+        "mysql": "mysql",
+        "sqlite": "sqlite",
+        "oracle": "oracle",
+        "mssql": "mssql",
+    }
     return mapping.get(name, name or "unknown")
 
 
@@ -787,7 +991,14 @@ def setup_sqlalchemy_hooks(engine) -> None:
 
         ident = _db_identifier(db_system, host, port, db_name)
         started_sd = _build_db_span_data(
-            current_span, db_system, db_name, operation, str(statement), host, port, "started",
+            current_span,
+            db_system,
+            db_name,
+            operation,
+            str(statement),
+            host,
+            port,
+            "started",
         )
         _evaluate_db_sync(ident, started_sd)
 
@@ -803,8 +1014,15 @@ def setup_sqlalchemy_hooks(engine) -> None:
         current_span = otel_trace.get_current_span()
         ident = _db_identifier(db_system, host, port, db_name)
         completed_sd = _build_db_span_data(
-            current_span, db_system, db_name, operation, str(statement), host, port,
-            "completed", duration_ms=duration_ms,
+            current_span,
+            db_system,
+            db_name,
+            operation,
+            str(statement),
+            host,
+            port,
+            "completed",
+            duration_ms=duration_ms,
         )
         _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
@@ -817,17 +1035,33 @@ def setup_sqlalchemy_hooks(engine) -> None:
         duration_ms = (time.perf_counter() - start) * 1000 if start else 0.0
         db_system = _get_sa_db_system(context.engine)
         db_name = context.engine.url.database
-        statement = str(getattr(context, "statement", "")) if hasattr(context, "statement") else ""
+        statement = (
+            str(getattr(context, "statement", ""))
+            if hasattr(context, "statement")
+            else ""
+        )
         operation = _classify_sql(statement)
         host = context.engine.url.host
         port = context.engine.url.port
-        error_msg = str(context.original_exception) if hasattr(context, "original_exception") else "Unknown error"
+        error_msg = (
+            str(context.original_exception)
+            if hasattr(context, "original_exception")
+            else "Unknown error"
+        )
 
         current_span = otel_trace.get_current_span()
         ident = _db_identifier(db_system, host, port, db_name)
         completed_sd = _build_db_span_data(
-            current_span, db_system, db_name, operation, statement, host, port,
-            "completed", duration_ms=duration_ms, error=error_msg,
+            current_span,
+            db_system,
+            db_name,
+            operation,
+            statement,
+            host,
+            port,
+            "completed",
+            duration_ms=duration_ms,
+            error=error_msg,
         )
         _evaluate_db_sync(ident, completed_sd, is_completed=True)
 
@@ -848,6 +1082,7 @@ def setup_sqlalchemy_hooks(engine) -> None:
 # Cleanup
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def uninstrument_all() -> None:
     """Remove all installed DB governance hooks."""
     # Restore original CursorTracer methods
@@ -858,6 +1093,7 @@ def uninstrument_all() -> None:
     for engine, event_name, listener_fn in _sqlalchemy_listeners:
         try:
             from sqlalchemy import event
+
             event.remove(engine, event_name, listener_fn)
         except Exception:
             pass

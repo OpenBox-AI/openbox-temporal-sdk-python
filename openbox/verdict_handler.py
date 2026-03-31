@@ -9,12 +9,17 @@ Hook governance keeps its own _handle_verdict() (different contract — Governan
 + abort flags, not ApplicationError). Workflow interceptor verdict handling runs in sandbox
 (limited imports) so stays inlined.
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Literal
 
-from .errors import GovernanceBlockedError, GovernanceHaltError, GuardrailsValidationError
+from .errors import (
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GuardrailsValidationError,
+)
 from .types import GovernanceVerdictResponse, Verdict
 
 logger = logging.getLogger(__name__)
@@ -67,7 +72,9 @@ def enforce_verdict(
 
     # 2. BLOCK — non-retryable activity failure
     if verdict == Verdict.BLOCK:
-        raise GovernanceBlockedError(verdict, reason or "Action blocked by governance policy")
+        raise GovernanceBlockedError(
+            verdict, reason or "Action blocked by governance policy"
+        )
 
     # 3. Guardrails validation failure — checked before REQUIRE_APPROVAL so a
     #    guardrails failure is never silently swallowed by an approval flow

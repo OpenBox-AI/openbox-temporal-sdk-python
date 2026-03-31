@@ -35,14 +35,19 @@ def setup_governance(
         "activity_id": activity_id,
     }
     buffer = WorkflowSpanBuffer(
-        workflow_id=workflow_id, run_id="run-1",
-        workflow_type=workflow_type, task_queue=task_queue,
+        workflow_id=workflow_id,
+        run_id="run-1",
+        workflow_type=workflow_type,
+        task_queue=task_queue,
     )
     processor.get_buffer.return_value = buffer
 
     hook_gov.configure(
-        "http://localhost:9090", "test-key", processor,
-        api_timeout=5.0, on_api_error=on_api_error,
+        "http://localhost:9090",
+        "test-key",
+        processor,
+        api_timeout=5.0,
+        on_api_error=on_api_error,
     )
     return processor
 

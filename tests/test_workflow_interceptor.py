@@ -25,7 +25,6 @@ from openbox.workflow_interceptor import (
 from openbox.types import Verdict
 from openbox.config import GovernanceConfig
 
-
 # =============================================================================
 # Tests for _serialize_value()
 # =============================================================================
@@ -68,7 +67,7 @@ class TestSerializeValue:
 
     def test_bytes_decode_utf8_unicode(self):
         """Test that bytes with unicode decode correctly."""
-        result = _serialize_value("unicode: \u4e2d\u6587".encode('utf-8'))
+        result = _serialize_value("unicode: \u4e2d\u6587".encode("utf-8"))
         assert result == "unicode: \u4e2d\u6587"
 
     def test_bytes_fallback_to_base64(self):
@@ -77,11 +76,12 @@ class TestSerializeValue:
         invalid_bytes = b"\xff\xfe\x00\x01"
         result = _serialize_value(invalid_bytes)
         # Should be base64 encoded
-        expected = base64.b64encode(invalid_bytes).decode('ascii')
+        expected = base64.b64encode(invalid_bytes).decode("ascii")
         assert result == expected
 
     def test_dataclass_converts_to_dict(self):
         """Test that dataclass converts to dict via asdict()."""
+
         @dataclass
         class SampleData:
             name: str
@@ -93,6 +93,7 @@ class TestSerializeValue:
 
     def test_dataclass_nested(self):
         """Test that nested dataclass converts correctly."""
+
         @dataclass
         class Inner:
             x: int
@@ -108,6 +109,7 @@ class TestSerializeValue:
 
     def test_dataclass_type_not_instance(self):
         """Test that dataclass type (not instance) is handled differently."""
+
         @dataclass
         class SampleData:
             name: str
@@ -155,6 +157,7 @@ class TestSerializeValue:
 
     def test_dict_with_dataclass_value(self):
         """Test that dict with dataclass values serializes correctly."""
+
         @dataclass
         class Item:
             id: int
@@ -164,6 +167,7 @@ class TestSerializeValue:
 
     def test_other_object_fallback_to_str(self):
         """Test that other objects fallback to str()."""
+
         class CustomObject:
             def __str__(self):
                 return "CustomObject<test>"
@@ -173,6 +177,7 @@ class TestSerializeValue:
 
     def test_complex_nested_structure(self):
         """Test serialization of complex nested structures."""
+
         @dataclass
         class Result:
             status: str
@@ -314,8 +319,11 @@ class TestSendGovernanceEvent:
         assert result == expected_result
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_application_error(self, mock_workflow):
+    async def test_raises_governance_halt_error_for_application_error(
+        self, mock_workflow
+    ):
         """Test that ApplicationError with GovernanceHalt raises GovernanceHaltError."""
+
         # Create a custom ApplicationError class to simulate the real one
         class ApplicationError(Exception):
             pass
@@ -334,7 +342,9 @@ class TestSendGovernanceEvent:
         assert "GovernanceHalt" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_halt_message(self, mock_workflow):
+    async def test_raises_governance_halt_error_for_governance_halt_message(
+        self, mock_workflow
+    ):
         """Test that error with 'GovernanceHalt' in message raises GovernanceHaltError."""
         error = Exception("GovernanceHalt: High risk detected")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
@@ -350,7 +360,9 @@ class TestSendGovernanceEvent:
         assert "GovernanceHalt: High risk detected" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_api_error(self, mock_workflow):
+    async def test_raises_governance_halt_error_for_governance_api_error(
+        self, mock_workflow
+    ):
         """Test that GovernanceAPIError raises GovernanceHaltError."""
         error = Exception("GovernanceAPIError: API unreachable")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
@@ -366,8 +378,11 @@ class TestSendGovernanceEvent:
         assert "GovernanceAPIError" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_api_error_type(self, mock_workflow):
+    async def test_raises_governance_halt_error_for_governance_api_error_type(
+        self, mock_workflow
+    ):
         """Test that exception with GovernanceAPIError in type name raises GovernanceHaltError."""
+
         # Create a custom GovernanceAPIError class to simulate the real one
         class GovernanceAPIError(Exception):
             pass
@@ -646,7 +661,8 @@ class TestInboundInterceptor:
 
         # Find the WorkflowStarted call
         started_calls = [
-            c for c in calls
+            c
+            for c in calls
             if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowStarted"
         ]
         assert len(started_calls) == 1
@@ -680,8 +696,10 @@ class TestInboundInterceptor:
         # Check that no WorkflowStarted event was sent
         calls = mock_workflow_module.execute_activity.call_args_list
         started_calls = [
-            c for c in calls
-            if c.kwargs.get("args", [[{}]])[0].get("payload", {}).get("event_type") == "WorkflowStarted"
+            c
+            for c in calls
+            if c.kwargs.get("args", [[{}]])[0].get("payload", {}).get("event_type")
+            == "WorkflowStarted"
         ]
         assert len(started_calls) == 0
 
@@ -690,6 +708,7 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test execute_workflow sends WorkflowCompleted event on success."""
+
         @dataclass
         class WorkflowResult:
             status: str
@@ -700,7 +719,9 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            config=GovernanceConfig(send_start_event=False),  # Disable start to simplify test
+            config=GovernanceConfig(
+                send_start_event=False
+            ),  # Disable start to simplify test
         )
 
         mock_input = MagicMock()
@@ -718,7 +739,8 @@ class TestInboundInterceptor:
         # Find the WorkflowCompleted call
         calls = mock_workflow_module.execute_activity.call_args_list
         completed_calls = [
-            c for c in calls
+            c
+            for c in calls
             if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowCompleted"
         ]
         assert len(completed_calls) == 1
@@ -726,7 +748,10 @@ class TestInboundInterceptor:
         assert completed_payload["workflow_id"] == "wf-123"
         assert completed_payload["workflow_type"] == "TestWorkflow"
         # Check serialized output
-        assert completed_payload["workflow_output"] == {"status": "success", "data": {"key": "value"}}
+        assert completed_payload["workflow_output"] == {
+            "status": "success",
+            "data": {"key": "value"},
+        }
 
     @pytest.mark.asyncio
     async def test_execute_workflow_sends_failed_event_on_failure(
@@ -743,7 +768,9 @@ class TestInboundInterceptor:
         inbound_class = interceptor.workflow_interceptor_class(mock_input)
 
         mock_next = AsyncMock()
-        mock_next.execute_workflow = AsyncMock(side_effect=ValueError("Something went wrong"))
+        mock_next.execute_workflow = AsyncMock(
+            side_effect=ValueError("Something went wrong")
+        )
         inbound = inbound_class(mock_next)
 
         execute_input = MagicMock()
@@ -754,7 +781,8 @@ class TestInboundInterceptor:
         # Find the WorkflowFailed call
         calls = mock_workflow_module.execute_activity.call_args_list
         failed_calls = [
-            c for c in calls
+            c
+            for c in calls
             if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowFailed"
         ]
         assert len(failed_calls) == 1
@@ -797,7 +825,8 @@ class TestInboundInterceptor:
         # Find the WorkflowFailed call
         calls = mock_workflow_module.execute_activity.call_args_list
         failed_calls = [
-            c for c in calls
+            c
+            for c in calls
             if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowFailed"
         ]
         assert len(failed_calls) == 1
@@ -850,7 +879,8 @@ class TestInboundInterceptor:
         # Find the WorkflowFailed call
         calls = mock_workflow_module.execute_activity.call_args_list
         failed_calls = [
-            c for c in calls
+            c
+            for c in calls
             if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowFailed"
         ]
         error_info = failed_calls[0].kwargs["args"][0]["payload"]["error"]
@@ -967,10 +997,12 @@ class TestInboundInterceptor:
     ):
         """Test handle_signal stores verdict in span_processor if BLOCK verdict."""
         mock_span_processor = MagicMock()
-        mock_workflow_module.execute_activity = AsyncMock(return_value={
-            "verdict": "block",
-            "reason": "High risk signal",
-        })
+        mock_workflow_module.execute_activity = AsyncMock(
+            return_value={
+                "verdict": "block",
+                "reason": "High risk signal",
+            }
+        )
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
@@ -1006,10 +1038,12 @@ class TestInboundInterceptor:
     ):
         """Test handle_signal stores verdict in span_processor if HALT verdict."""
         mock_span_processor = MagicMock()
-        mock_workflow_module.execute_activity = AsyncMock(return_value={
-            "verdict": "halt",
-            "reason": "Critical alert",
-        })
+        mock_workflow_module.execute_activity = AsyncMock(
+            return_value={
+                "verdict": "halt",
+                "reason": "Critical alert",
+            }
+        )
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
@@ -1044,10 +1078,12 @@ class TestInboundInterceptor:
     ):
         """Test handle_signal does not store verdict if ALLOW verdict."""
         mock_span_processor = MagicMock()
-        mock_workflow_module.execute_activity = AsyncMock(return_value={
-            "verdict": "allow",
-            "reason": "Signal approved",
-        })
+        mock_workflow_module.execute_activity = AsyncMock(
+            return_value={
+                "verdict": "allow",
+                "reason": "Signal approved",
+            }
+        )
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
@@ -1077,10 +1113,12 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal does not fail if no span_processor."""
-        mock_workflow_module.execute_activity = AsyncMock(return_value={
-            "verdict": "block",
-            "reason": "High risk",
-        })
+        mock_workflow_module.execute_activity = AsyncMock(
+            return_value={
+                "verdict": "block",
+                "reason": "High risk",
+            }
+        )
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
@@ -1111,10 +1149,12 @@ class TestInboundInterceptor:
     ):
         """Test handle_signal uses action field if verdict not present (v1.0 compat)."""
         mock_span_processor = MagicMock()
-        mock_workflow_module.execute_activity = AsyncMock(return_value={
-            "action": "stop",  # v1.0 style
-            "reason": "Blocked by v1 policy",
-        })
+        mock_workflow_module.execute_activity = AsyncMock(
+            return_value={
+                "action": "stop",  # v1.0 style
+                "reason": "Blocked by v1 policy",
+            }
+        )
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
@@ -1195,7 +1235,9 @@ class TestInterceptorClosures:
             mock_info.task_queue = "closure-queue"
             mock_workflow.info.return_value = mock_info
             mock_workflow.patched.return_value = True
-            mock_workflow.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+            mock_workflow.execute_activity = AsyncMock(
+                return_value={"verdict": "allow"}
+            )
 
             config = GovernanceConfig(
                 api_timeout=45.0,
@@ -1282,7 +1324,9 @@ class TestEdgeCases:
             mock_info.task_queue = "queue"
             mock_workflow.info.return_value = mock_info
             mock_workflow.patched.return_value = True
-            mock_workflow.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+            mock_workflow.execute_activity = AsyncMock(
+                return_value={"verdict": "allow"}
+            )
 
             interceptor = GovernanceInterceptor(
                 api_url="https://api.openbox.ai",
@@ -1301,10 +1345,14 @@ class TestEdgeCases:
             # Check WorkflowCompleted was sent with None output
             calls = mock_workflow.execute_activity.call_args_list
             completed_calls = [
-                c for c in calls
+                c
+                for c in calls
                 if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowCompleted"
             ]
-            assert completed_calls[0].kwargs["args"][0]["payload"]["workflow_output"] is None
+            assert (
+                completed_calls[0].kwargs["args"][0]["payload"]["workflow_output"]
+                is None
+            )
 
     @pytest.mark.asyncio
     async def test_handle_signal_with_empty_args(self):
@@ -1317,7 +1365,9 @@ class TestEdgeCases:
             mock_info.task_queue = "queue"
             mock_workflow.info.return_value = mock_info
             mock_workflow.patched.return_value = True
-            mock_workflow.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+            mock_workflow.execute_activity = AsyncMock(
+                return_value={"verdict": "allow"}
+            )
 
             interceptor = GovernanceInterceptor(
                 api_url="https://api.openbox.ai",

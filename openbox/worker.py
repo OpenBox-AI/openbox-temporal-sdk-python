@@ -161,6 +161,7 @@ def create_openbox_worker(
 
     # 0. Store Temporal client reference for HALT terminate calls
     from .activities import set_temporal_client
+
     set_temporal_client(client)
 
     # 1. Validate API key (also validates URL security - HTTPS required for non-localhost)
@@ -175,6 +176,7 @@ def create_openbox_worker(
 
     # 3. Setup OTel HTTP, database, and file I/O instrumentation
     from .otel_setup import setup_opentelemetry_for_governance
+
     setup_opentelemetry_for_governance(
         span_processor,
         api_url=openbox_url,
@@ -238,9 +240,15 @@ def create_openbox_worker(
     print("OpenBox SDK initialized successfully")
     print(f"  - Governance policy: {governance_policy}")
     print(f"  - Governance timeout: {governance_timeout}s")
-    print("  - Events: WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted")
-    print(f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}")
-    print(f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}")
+    print(
+        "  - Events: WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted"
+    )
+    print(
+        f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}"
+    )
+    print(
+        f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}"
+    )
     print(f"  - Approval polling: {'enabled' if hitl_enabled else 'disabled'}")
     print("  - Hook governance: enabled")
 

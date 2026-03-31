@@ -22,7 +22,6 @@ from typing import Optional, Dict, Any, List
 from openbox.span_processor import WorkflowSpanProcessor
 from openbox.types import WorkflowSpanBuffer, Verdict
 
-
 # =============================================================================
 # Mock OTel Types for Testing
 # =============================================================================
@@ -30,6 +29,7 @@ from openbox.types import WorkflowSpanBuffer, Verdict
 
 class MockStatusCode(Enum):
     """Mock OTel StatusCode enum."""
+
     UNSET = 0
     OK = 1
     ERROR = 2
@@ -38,6 +38,7 @@ class MockStatusCode(Enum):
 @dataclass
 class MockStatus:
     """Mock OTel Status."""
+
     status_code: MockStatusCode = MockStatusCode.UNSET
     description: Optional[str] = None
 
@@ -45,6 +46,7 @@ class MockStatus:
 @dataclass
 class MockSpanContext:
     """Mock OTel SpanContext."""
+
     trace_id: int = 0x123456789ABCDEF0123456789ABCDEF0
     span_id: int = 0xABCDEF0123456789
     is_valid: bool = True
@@ -53,6 +55,7 @@ class MockSpanContext:
 @dataclass
 class MockSpanKind(Enum):
     """Mock OTel SpanKind."""
+
     INTERNAL = 0
     SERVER = 1
     CLIENT = 2
@@ -63,6 +66,7 @@ class MockSpanKind(Enum):
 @dataclass
 class MockEvent:
     """Mock OTel Event."""
+
     name: str
     timestamp: int
     attributes: Optional[Dict[str, Any]] = None
@@ -71,6 +75,7 @@ class MockEvent:
 @dataclass
 class MockParentSpan:
     """Mock parent span for testing."""
+
     span_id: int = 0x1111111111111111
 
 
@@ -361,7 +366,9 @@ class TestVerdictStorage:
 
     def test_set_verdict_with_run_id(self, processor):
         """Test storing a verdict with run_id."""
-        processor.set_verdict("wf-123", Verdict.HALT, "critical error", run_id="run-456")
+        processor.set_verdict(
+            "wf-123", Verdict.HALT, "critical error", run_id="run-456"
+        )
         assert processor._verdicts["wf-123"]["run_id"] == "run-456"
 
     def test_set_verdict_without_reason(self, processor):
@@ -409,7 +416,9 @@ class TestVerdictStorage:
     def test_verdict_all_types(self, processor):
         """Test all verdict types can be stored."""
         for verdict in Verdict:
-            processor.set_verdict(f"wf-{verdict.value}", verdict, f"reason-{verdict.value}")
+            processor.set_verdict(
+                f"wf-{verdict.value}", verdict, f"reason-{verdict.value}"
+            )
             assert processor._verdicts[f"wf-{verdict.value}"]["verdict"] == verdict
 
 
@@ -501,7 +510,9 @@ class TestOnStart:
 class TestOnEnd:
     """Tests for on_end method."""
 
-    def test_on_end_forwards_to_fallback(self, processor_with_fallback, mock_fallback, sample_buffer):
+    def test_on_end_forwards_to_fallback(
+        self, processor_with_fallback, mock_fallback, sample_buffer
+    ):
         """Test that spans are forwarded to fallback processor."""
         processor_with_fallback.register_workflow("wf-123", sample_buffer)
         span = MockReadableSpan(
@@ -511,9 +522,7 @@ class TestOnEnd:
         processor_with_fallback.on_end(span)
         mock_fallback.on_end.assert_called_once_with(span)
 
-    def test_on_end_forwards_ignored_span_to_fallback(
-        self, mock_fallback
-    ):
+    def test_on_end_forwards_ignored_span_to_fallback(self, mock_fallback):
         """Test that ignored spans are still forwarded to fallback."""
         processor = WorkflowSpanProcessor(
             fallback_processor=mock_fallback,
@@ -572,7 +581,9 @@ class TestOnEnd:
 class TestShutdownAndForceFlush:
     """Tests for shutdown and force_flush methods."""
 
-    def test_shutdown_delegates_to_fallback(self, processor_with_fallback, mock_fallback):
+    def test_shutdown_delegates_to_fallback(
+        self, processor_with_fallback, mock_fallback
+    ):
         """Test that shutdown delegates to fallback processor."""
         processor_with_fallback.shutdown()
         mock_fallback.shutdown.assert_called_once()
@@ -581,7 +592,9 @@ class TestShutdownAndForceFlush:
         """Test shutdown without fallback processor doesn't raise."""
         processor.shutdown()  # Should not raise
 
-    def test_force_flush_delegates_to_fallback(self, processor_with_fallback, mock_fallback):
+    def test_force_flush_delegates_to_fallback(
+        self, processor_with_fallback, mock_fallback
+    ):
         """Test that force_flush delegates to fallback processor."""
         result = processor_with_fallback.force_flush(timeout_millis=5000)
         mock_fallback.force_flush.assert_called_once_with(5000)

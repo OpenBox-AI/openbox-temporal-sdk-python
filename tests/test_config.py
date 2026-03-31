@@ -29,7 +29,6 @@ from openbox.config import (
     API_KEY_PATTERN,
 )
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # GovernanceConfig Dataclass Tests
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -310,11 +309,17 @@ class TestValidateApiKeyFormat:
 
     def test_valid_live_key_long(self):
         """Test valid live key with long suffix."""
-        assert _validate_api_key_format("obx_live_abcdefghijklmnopqrstuvwxyz123456") is True
+        assert (
+            _validate_api_key_format("obx_live_abcdefghijklmnopqrstuvwxyz123456")
+            is True
+        )
 
     def test_valid_test_key_long(self):
         """Test valid test key with long suffix."""
-        assert _validate_api_key_format("obx_test_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456") is True
+        assert (
+            _validate_api_key_format("obx_test_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456")
+            is True
+        )
 
     def test_valid_key_with_underscores_in_suffix(self):
         """Test valid key with underscores in suffix."""
@@ -734,7 +739,9 @@ class TestInitializeWithValidateTrue:
 
     @patch("urllib.request.urlopen")
     @patch("urllib.request.Request")
-    def test_validate_network_error_generic_exception(self, mock_request_class, mock_urlopen):
+    def test_validate_network_error_generic_exception(
+        self, mock_request_class, mock_urlopen
+    ):
         """Test initialize() raises OpenBoxNetworkError on generic exception."""
         mock_urlopen.side_effect = Exception("Unknown error")
 
@@ -768,7 +775,9 @@ class TestInitializeWithValidateTrue:
         call_args = mock_request_class.call_args
 
         assert call_args[0][0] == "http://localhost:9000/api/v1/auth/validate"
-        assert call_args[1]["headers"]["Authorization"] == "Bearer obx_live_request_test"
+        assert (
+            call_args[1]["headers"]["Authorization"] == "Bearer obx_live_request_test"
+        )
         assert call_args[1]["headers"]["Content-Type"] == "application/json"
         assert call_args[1]["method"] == "GET"
 

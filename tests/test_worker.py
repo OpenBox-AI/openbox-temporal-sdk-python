@@ -14,7 +14,6 @@ from datetime import timedelta
 from unittest.mock import Mock, MagicMock, patch, call
 from concurrent.futures import ThreadPoolExecutor
 
-
 # ===============================================================================
 # With OpenBox Config Tests
 # ===============================================================================
@@ -538,9 +537,13 @@ class TestParameterPassthrough:
 
         mock_worker_class.assert_called_once()
         call_kwargs = mock_worker_class.call_args[1]
-        assert call_kwargs["sticky_queue_schedule_to_start_timeout"] == timedelta(seconds=20)
+        assert call_kwargs["sticky_queue_schedule_to_start_timeout"] == timedelta(
+            seconds=20
+        )
         assert call_kwargs["max_heartbeat_throttle_interval"] == timedelta(seconds=120)
-        assert call_kwargs["default_heartbeat_throttle_interval"] == timedelta(seconds=45)
+        assert call_kwargs["default_heartbeat_throttle_interval"] == timedelta(
+            seconds=45
+        )
         assert call_kwargs["graceful_shutdown_timeout"] == timedelta(seconds=30)
 
     @patch("openbox.worker.Worker")
@@ -1723,9 +1726,13 @@ class TestEdgeCases:
         assert call_kwargs["nonsticky_to_sticky_poll_ratio"] == 0.2
         assert call_kwargs["max_concurrent_activity_task_polls"] == 5
         assert call_kwargs["no_remote_activities"] is False
-        assert call_kwargs["sticky_queue_schedule_to_start_timeout"] == timedelta(seconds=10)
+        assert call_kwargs["sticky_queue_schedule_to_start_timeout"] == timedelta(
+            seconds=10
+        )
         assert call_kwargs["max_heartbeat_throttle_interval"] == timedelta(seconds=60)
-        assert call_kwargs["default_heartbeat_throttle_interval"] == timedelta(seconds=30)
+        assert call_kwargs["default_heartbeat_throttle_interval"] == timedelta(
+            seconds=30
+        )
         assert call_kwargs["graceful_shutdown_timeout"] == timedelta()
         assert call_kwargs["debug_mode"] is False
         assert call_kwargs["disable_eager_activity_execution"] is False

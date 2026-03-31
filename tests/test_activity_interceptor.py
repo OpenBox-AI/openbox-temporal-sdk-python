@@ -27,7 +27,6 @@ from openbox.types import (
 )
 from openbox.config import GovernanceConfig
 
-
 # =============================================================================
 # Helper Fixtures and Dataclasses for Testing
 # =============================================================================
@@ -36,6 +35,7 @@ from openbox.config import GovernanceConfig
 @dataclass
 class NestedData:
     """Nested dataclass for testing _deep_update_dataclass."""
+
     value: str = ""
     count: int = 0
 
@@ -43,6 +43,7 @@ class NestedData:
 @dataclass
 class OuterData:
     """Outer dataclass with nested dataclass for testing."""
+
     name: str = ""
     nested: NestedData = field(default_factory=NestedData)
     items: List[str] = field(default_factory=list)
@@ -51,12 +52,14 @@ class OuterData:
 @dataclass
 class DataWithList:
     """Dataclass with list of nested dataclasses."""
+
     entries: List[NestedData] = field(default_factory=list)
 
 
 @dataclass
 class ActivityInput:
     """Sample activity input dataclass for testing redaction."""
+
     prompt: str = ""
     user_id: str = ""
     metadata: dict = field(default_factory=dict)
@@ -64,6 +67,7 @@ class ActivityInput:
 
 class MockTemporalPayload:
     """Mock Temporal Payload object for testing serialization."""
+
     def __init__(self, data: bytes, metadata: Optional[dict] = None):
         self.data = data
         self.metadata = metadata or {}
@@ -71,6 +75,7 @@ class MockTemporalPayload:
 
 class NonSerializableObject:
     """Object that can't be JSON serialized."""
+
     def __init__(self, value):
         self._value = value
 
@@ -172,7 +177,7 @@ class TestRfc3339Now:
         # Pad milliseconds to 6 digits for fromisoformat
         parts = result_no_z.split(".")
         if len(parts) == 2:
-            parts[1] = parts[1].ljust(6, '0')
+            parts[1] = parts[1].ljust(6, "0")
             result_padded = ".".join(parts)
         else:
             result_padded = result_no_z
@@ -665,12 +670,16 @@ class TestActivityInterceptor:
 
         # Create mock httpx module
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -678,8 +687,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -715,12 +728,16 @@ class TestActivityInterceptor:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -728,8 +745,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -760,12 +781,16 @@ class TestActivityInterceptor:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -773,8 +798,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -808,12 +837,16 @@ class TestActivityInterceptor:
         mock_input.args = ["test_arg"]
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -821,8 +854,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -859,15 +896,19 @@ class TestActivityInterceptor:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "block",
-            "reason": "Policy violation",
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "block",
+                "reason": "Policy violation",
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -875,8 +916,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             from temporalio.exceptions import ApplicationError
@@ -911,20 +956,24 @@ class TestActivityInterceptor:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "allow",
-            "guardrails_result": {
-                "redacted_input": {},
-                "input_type": "activity_input",
-                "validation_passed": False,
-                "reasons": [{"reason": "PII detected"}],
-            },
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "allow",
+                "guardrails_result": {
+                    "redacted_input": {},
+                    "input_type": "activity_input",
+                    "validation_passed": False,
+                    "reasons": [{"reason": "PII detected"}],
+                },
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -932,8 +981,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             from temporalio.exceptions import ApplicationError
@@ -983,7 +1036,13 @@ class TestActivityInterceptor:
                 mock_response.json.return_value = {
                     "verdict": "allow",
                     "guardrails_result": {
-                        "redacted_input": [{"prompt": "[REDACTED]", "user_id": "user123", "metadata": {}}],
+                        "redacted_input": [
+                            {
+                                "prompt": "[REDACTED]",
+                                "user_id": "user123",
+                                "metadata": {},
+                            }
+                        ],
                         "input_type": "activity_input",
                         "validation_passed": True,
                     },
@@ -1000,9 +1059,11 @@ class TestActivityInterceptor:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1010,8 +1071,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -1057,7 +1122,9 @@ class TestActivityInterceptor:
                 mock_response.json.return_value = {
                     "verdict": "allow",
                     "guardrails_result": {
-                        "redacted_input": [{"prompt": "[REDACTED]", "user_id": "user123"}],
+                        "redacted_input": [
+                            {"prompt": "[REDACTED]", "user_id": "user123"}
+                        ],
                         "input_type": "activity_input",
                         "validation_passed": True,
                     },
@@ -1074,9 +1141,11 @@ class TestActivityInterceptor:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1084,8 +1153,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -1095,7 +1168,9 @@ class TestActivityInterceptor:
         completed_payload = captured_payloads[1]
         assert completed_payload["event_type"] == "ActivityCompleted"
         # The activity_input in the completed event should show redacted values
-        assert completed_payload["activity_input"] == [{"prompt": "[REDACTED]", "user_id": "user123"}]
+        assert completed_payload["activity_input"] == [
+            {"prompt": "[REDACTED]", "user_id": "user123"}
+        ]
 
     @pytest.mark.asyncio
     async def test_sends_activity_completed_event(
@@ -1121,12 +1196,16 @@ class TestActivityInterceptor:
         mock_input.args = [{"input": "data"}]
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1134,8 +1213,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             await interceptor.execute_activity(mock_input)
@@ -1178,15 +1261,19 @@ class TestActivityInterceptor:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "require_approval",
-            "reason": "Needs human review",
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "require_approval",
+                "reason": "Needs human review",
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1194,8 +1281,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             from temporalio.exceptions import ApplicationError
@@ -1254,9 +1345,11 @@ class TestActivityInterceptor:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1264,8 +1357,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             result = await interceptor.execute_activity(mock_input)
@@ -1321,9 +1418,11 @@ class TestActivityInterceptor:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1331,8 +1430,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             from temporalio.exceptions import ApplicationError
@@ -1392,9 +1495,11 @@ class TestActivityInterceptor:
         mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1402,8 +1507,12 @@ class TestActivityInterceptor:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             from temporalio.exceptions import ApplicationError
@@ -1435,14 +1544,18 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "allow",
-            "reason": "OK",
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "allow",
+                "reason": "OK",
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1490,11 +1603,15 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1528,11 +1645,15 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({}, status_code=500)
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {}, status_code=500
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1560,11 +1681,15 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({}, status_code=503)
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {}, status_code=503
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1598,8 +1723,10 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1631,8 +1758,10 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1665,14 +1794,18 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "allow",
-            "reason": "Approved by admin",
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "allow",
+                "reason": "Approved by admin",
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.logger = MagicMock()
 
             result = await interceptor._client.poll_approval(
@@ -1707,14 +1840,18 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "require_approval",
-            "approval_expiration_time": "2020-01-01T00:00:00Z",  # Past date
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "require_approval",
+                "approval_expiration_time": "2020-01-01T00:00:00Z",  # Past date
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.logger = MagicMock()
 
             result = await interceptor._client.poll_approval(
@@ -1748,14 +1885,18 @@ class TestActivityInterceptor:
 
         for timestamp in test_cases:
             mock_httpx = MagicMock()
-            mock_client, mock_client_instance = create_mock_httpx_client({
-                "verdict": "require_approval",
-                "approval_expiration_time": timestamp,
-            })
+            mock_client, mock_client_instance = create_mock_httpx_client(
+                {
+                    "verdict": "require_approval",
+                    "approval_expiration_time": timestamp,
+                }
+            )
             mock_httpx.AsyncClient.return_value = mock_client
 
-            with patch("openbox.activity_interceptor.activity") as mock_activity, \
-                 patch.dict(sys.modules, {"httpx": mock_httpx}):
+            with (
+                patch("openbox.activity_interceptor.activity") as mock_activity,
+                patch.dict(sys.modules, {"httpx": mock_httpx}),
+            ):
                 mock_activity.logger = MagicMock()
 
                 result = await interceptor._client.poll_approval(
@@ -1782,11 +1923,15 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({}, status_code=500)
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {}, status_code=500
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.logger = MagicMock()
 
             result = await interceptor._client.poll_approval(
@@ -1817,8 +1962,10 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Network error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.logger = MagicMock()
 
             result = await interceptor._client.poll_approval(
@@ -1845,14 +1992,18 @@ class TestActivityInterceptor:
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "require_approval",
-            "approval_expiration_time": None,  # No expiration
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "require_approval",
+                "approval_expiration_time": None,  # No expiration
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.logger = MagicMock()
 
             result = await interceptor._client.poll_approval(
@@ -1920,12 +2071,16 @@ class TestEdgeCases:
         mock_input.args = None
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1933,8 +2088,12 @@ class TestEdgeCases:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             result = await interceptor.execute_activity(mock_input)
@@ -1951,7 +2110,9 @@ class TestEdgeCases:
 
         config = GovernanceConfig(send_activity_start_event=False)
         mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(side_effect=ValueError("Activity failed"))
+        mock_next.execute_activity = AsyncMock(
+            side_effect=ValueError("Activity failed")
+        )
 
         interceptor = _ActivityInterceptor(
             next_interceptor=mock_next,
@@ -1965,12 +2126,16 @@ class TestEdgeCases:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({"verdict": "allow"})
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {"verdict": "allow"}
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -1978,8 +2143,12 @@ class TestEdgeCases:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             with pytest.raises(ValueError) as exc_info:
@@ -2054,19 +2223,27 @@ class TestEdgeCases:
         mock_input.args = []
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client({
-            "verdict": "allow",
-            "guardrails_result": {
-                "redacted_input": {"prompt": "[REDACTED]", "user_id": "user123", "metadata": {}},
-                "input_type": "activity_output",
-                "validation_passed": True,
-            },
-        })
+        mock_client, mock_client_instance = create_mock_httpx_client(
+            {
+                "verdict": "allow",
+                "guardrails_result": {
+                    "redacted_input": {
+                        "prompt": "[REDACTED]",
+                        "user_id": "user123",
+                        "metadata": {},
+                    },
+                    "input_type": "activity_output",
+                    "validation_passed": True,
+                },
+            }
+        )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
 
@@ -2074,8 +2251,12 @@ class TestEdgeCases:
             mock_span.get_span_context.return_value.trace_id = 123
             mock_span.get_span_context.return_value.span_id = 456
             mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+                return_value=mock_span
+            )
+            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+                return_value=False
+            )
             mock_trace.get_tracer.return_value = mock_tracer
 
             result = await interceptor.execute_activity(mock_input)
@@ -2122,7 +2303,9 @@ class TestHookLevelRequireApproval:
 
     def _make_interceptor(self, mock_span_processor, config=None, activity_raises=None):
         """Helper: create interceptor with mock next that raises GovernanceBlockedError."""
-        config = config or GovernanceConfig(send_activity_start_event=False, hitl_enabled=True)
+        config = config or GovernanceConfig(
+            send_activity_start_event=False, hitl_enabled=True
+        )
         mock_next = AsyncMock()
         if activity_raises:
             mock_next.execute_activity = AsyncMock(side_effect=activity_raises)
@@ -2143,8 +2326,12 @@ class TestHookLevelRequireApproval:
         mock_span.get_span_context.return_value.trace_id = 123
         mock_span.get_span_context.return_value.span_id = 456
         mock_tracer = MagicMock()
-        mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(return_value=mock_span)
-        mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(return_value=False)
+        mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+            return_value=mock_span
+        )
+        mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+            return_value=False
+        )
         return mock_tracer
 
     @pytest.mark.asyncio
@@ -2160,7 +2347,9 @@ class TestHookLevelRequireApproval:
         )
         mock_span_processor.get_buffer.return_value = buffer
 
-        error = GovernanceBlockedError("require_approval", "Needs human review", "https://api.example.com")
+        error = GovernanceBlockedError(
+            "require_approval", "Needs human review", "https://api.example.com"
+        )
         interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
 
         mock_input = MagicMock()
@@ -2170,9 +2359,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
@@ -2194,7 +2385,9 @@ class TestHookLevelRequireApproval:
         """Hook BLOCK → non-retryable GovernanceBlock."""
         mock_span_processor.get_buffer.return_value = None
 
-        error = GovernanceBlockedError("block", "Policy violation", "https://api.example.com")
+        error = GovernanceBlockedError(
+            "block", "Policy violation", "https://api.example.com"
+        )
         interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
 
         mock_input = MagicMock()
@@ -2204,9 +2397,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
@@ -2225,8 +2420,12 @@ class TestHookLevelRequireApproval:
     ):
         """When HITL disabled, REQUIRE_APPROVAL falls through to GovernanceBlock."""
         config = GovernanceConfig(send_activity_start_event=False, hitl_enabled=False)
-        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
-        interceptor = self._make_interceptor(mock_span_processor, config=config, activity_raises=error)
+        error = GovernanceBlockedError(
+            "require_approval", "Needs review", "https://api.example.com"
+        )
+        interceptor = self._make_interceptor(
+            mock_span_processor, config=config, activity_raises=error
+        )
 
         mock_input = MagicMock()
         mock_input.args = []
@@ -2235,9 +2434,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
@@ -2260,8 +2461,12 @@ class TestHookLevelRequireApproval:
             hitl_enabled=True,
             skip_hitl_activity_types={"test_activity"},
         )
-        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
-        interceptor = self._make_interceptor(mock_span_processor, config=config, activity_raises=error)
+        error = GovernanceBlockedError(
+            "require_approval", "Needs review", "https://api.example.com"
+        )
+        interceptor = self._make_interceptor(
+            mock_span_processor, config=config, activity_raises=error
+        )
 
         mock_input = MagicMock()
         mock_input.args = []
@@ -2270,9 +2475,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
@@ -2298,7 +2505,9 @@ class TestHookLevelRequireApproval:
         )
         mock_span_processor.get_buffer.return_value = buffer
 
-        error = GovernanceBlockedError("request_approval", "Needs review", "https://api.example.com")
+        error = GovernanceBlockedError(
+            "request_approval", "Needs review", "https://api.example.com"
+        )
         interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
 
         mock_input = MagicMock()
@@ -2308,9 +2517,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
@@ -2331,7 +2542,9 @@ class TestHookLevelRequireApproval:
         """When get_buffer returns None, ApprovalPending still raised (pending_approval not set)."""
         mock_span_processor.get_buffer.return_value = None
 
-        error = GovernanceBlockedError("require_approval", "Needs review", "https://api.example.com")
+        error = GovernanceBlockedError(
+            "require_approval", "Needs review", "https://api.example.com"
+        )
         interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
 
         mock_input = MagicMock()
@@ -2341,9 +2554,11 @@ class TestHookLevelRequireApproval:
         mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity, \
-             patch("openbox.activity_interceptor.trace") as mock_trace, \
-             patch.dict(sys.modules, {"httpx": mock_httpx}):
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+            patch.dict(sys.modules, {"httpx": mock_httpx}),
+        ):
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
             mock_trace.get_tracer.return_value = self._mock_tracer_context()
