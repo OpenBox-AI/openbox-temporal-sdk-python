@@ -45,15 +45,20 @@ def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
         "activity_id": "act-file-1",
     }
     buffer = WorkflowSpanBuffer(
-        workflow_id="wf-file-1", run_id="run-1",
-        workflow_type="FileWorkflow", task_queue="file-queue",
+        workflow_id="wf-file-1",
+        run_id="run-1",
+        workflow_type="FileWorkflow",
+        task_queue="file-queue",
     )
     processor.get_buffer.return_value = buffer
 
     otel_setup._span_processor = processor
     hook_gov.configure(
-        "http://localhost:9090", "test-key", processor,
-        api_timeout=5.0, on_api_error=on_api_error,
+        "http://localhost:9090",
+        "test-key",
+        processor,
+        api_timeout=5.0,
+        on_api_error=on_api_error,
     )
     otel_setup.setup_file_io_instrumentation()
     return processor
@@ -179,7 +184,9 @@ class TestFileGovernanceCompleted:
                     f.write(" world")
 
                 payload = mock.post.call_args_list[-1].kwargs["json"]
-                assert payload["spans"][0]["bytes_written"] == len("hello") + len(" world")
+                assert payload["spans"][0]["bytes_written"] == len("hello") + len(
+                    " world"
+                )
                 assert payload["spans"][0]["bytes_read"] == 0
                 assert payload["spans"][0]["operations"] == ["write", "write"]
         finally:
@@ -197,8 +204,14 @@ class TestFileGovernanceCompleted:
 
                 # open(started), read(started), read(completed), close(completed)
                 assert mock.post.call_count == 4
-                stages = [c.kwargs["json"]["spans"][0]["stage"] for c in mock.post.call_args_list]
-                ops = [c.kwargs["json"]["spans"][0]["file_operation"] for c in mock.post.call_args_list]
+                stages = [
+                    c.kwargs["json"]["spans"][0]["stage"]
+                    for c in mock.post.call_args_list
+                ]
+                ops = [
+                    c.kwargs["json"]["spans"][0]["file_operation"]
+                    for c in mock.post.call_args_list
+                ]
                 assert stages == ["started", "started", "completed", "completed"]
                 assert ops == ["open", "read", "read", "close"]
         finally:
@@ -232,8 +245,11 @@ class TestFileGovernanceDisabled:
 
         otel_setup._span_processor = processor
         hook_gov.configure(
-            "http://localhost:9090", "test-key", processor,
-            api_timeout=5.0, on_api_error="fail_open",
+            "http://localhost:9090",
+            "test-key",
+            processor,
+            api_timeout=5.0,
+            on_api_error="fail_open",
         )
         otel_setup.setup_file_io_instrumentation()
 
@@ -305,7 +321,11 @@ class TestFileReadGovernance:
 
                 calls = mock.post.call_args_list
                 # Find read-specific calls (skip open started, close completed)
-                read_calls = [c for c in calls if c.kwargs["json"]["spans"][0]["file_operation"] == "read"]
+                read_calls = [
+                    c
+                    for c in calls
+                    if c.kwargs["json"]["spans"][0]["file_operation"] == "read"
+                ]
                 assert len(read_calls) == 2
                 assert read_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
                 assert read_calls[1].kwargs["json"]["spans"][0]["stage"] == "completed"
@@ -320,13 +340,17 @@ class TestFileReadGovernance:
         try:
             # Allow open, block on first read governance call
             call_count = {"n": 0}
+
             def conditional_response(*args, **kwargs):
                 call_count["n"] += 1
                 response = MagicMock()
                 response.status_code = 200
                 # First call = open started (allow), second = read started (block)
                 if call_count["n"] == 2:
-                    response.json.return_value = {"verdict": "block", "reason": "Read blocked"}
+                    response.json.return_value = {
+                        "verdict": "block",
+                        "reason": "Read blocked",
+                    }
                 else:
                     response.json.return_value = {"verdict": "allow"}
                 return response
@@ -335,7 +359,9 @@ class TestFileReadGovernance:
             mock_instance.post.side_effect = conditional_response
             mock_instance.is_closed = False
 
-            with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
+            with patch(
+                "openbox.hook_governance._get_sync_client", return_value=mock_instance
+            ):
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     with open(tmp_path, "r") as f:
                         f.read()
@@ -356,7 +382,8 @@ class TestFileReadGovernance:
                     f.read()
 
                 read_completed = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "read"
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
@@ -382,7 +409,8 @@ class TestFileWriteGovernance:
                     f.write("test output")
 
                 write_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "write"
                 ]
                 assert len(write_calls) == 2
@@ -398,13 +426,17 @@ class TestFileWriteGovernance:
 
         try:
             call_count = {"n": 0}
+
             def conditional_response(*args, **kwargs):
                 call_count["n"] += 1
                 response = MagicMock()
                 response.status_code = 200
                 # First = open started (allow), second = write started (block)
                 if call_count["n"] == 2:
-                    response.json.return_value = {"verdict": "block", "reason": "Write denied"}
+                    response.json.return_value = {
+                        "verdict": "block",
+                        "reason": "Write denied",
+                    }
                 else:
                     response.json.return_value = {"verdict": "allow"}
                 return response
@@ -413,7 +445,9 @@ class TestFileWriteGovernance:
             mock_instance.post.side_effect = conditional_response
             mock_instance.is_closed = False
 
-            with patch("openbox.hook_governance._get_sync_client", return_value=mock_instance):
+            with patch(
+                "openbox.hook_governance._get_sync_client", return_value=mock_instance
+            ):
                 with pytest.raises(GovernanceBlockedError) as exc_info:
                     with open(tmp_path, "w") as f:
                         f.write("forbidden")
@@ -433,7 +467,8 @@ class TestFileWriteGovernance:
                     f.write("output data")
 
                 write_completed = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "write"
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
@@ -459,12 +494,17 @@ class TestFileReadlineGovernance:
                     f.readline()
 
                 readline_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "readline"
                 ]
                 assert len(readline_calls) == 2
-                assert readline_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
-                assert readline_calls[1].kwargs["json"]["spans"][0]["stage"] == "completed"
+                assert (
+                    readline_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
+                )
+                assert (
+                    readline_calls[1].kwargs["json"]["spans"][0]["stage"] == "completed"
+                )
                 assert readline_calls[1].kwargs["json"]["spans"][0]["data"] == "line1\n"
         finally:
             os.unlink(tmp_path)
@@ -484,11 +524,14 @@ class TestFileReadlinesGovernance:
                     f.readlines()
 
                 readlines_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "readlines"
                 ]
                 assert len(readlines_calls) == 2
-                assert readlines_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
+                assert (
+                    readlines_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
+                )
                 completed = readlines_calls[1].kwargs["json"]["spans"][0]
                 assert completed["stage"] == "completed"
                 assert completed["lines_count"] == 3
@@ -512,7 +555,8 @@ class TestFileWritelinesGovernance:
                     f.writelines(lines)
 
                 wl_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "writelines"
                 ]
                 assert len(wl_calls) == 2
@@ -540,7 +584,10 @@ class TestFileGovernanceCallCount:
                     f.read()
 
                 assert mock.post.call_count == 4
-                ops = [c.kwargs["json"]["spans"][0]["file_operation"] for c in mock.post.call_args_list]
+                ops = [
+                    c.kwargs["json"]["spans"][0]["file_operation"]
+                    for c in mock.post.call_args_list
+                ]
                 assert ops == ["open", "read", "read", "close"]
         finally:
             os.unlink(tmp_path)
@@ -557,7 +604,10 @@ class TestFileGovernanceCallCount:
                     f.write("b")
 
                 assert mock.post.call_count == 6
-                ops = [c.kwargs["json"]["spans"][0]["file_operation"] for c in mock.post.call_args_list]
+                ops = [
+                    c.kwargs["json"]["spans"][0]["file_operation"]
+                    for c in mock.post.call_args_list
+                ]
                 assert ops == ["open", "write", "write", "write", "write", "close"]
         finally:
             os.unlink(tmp_path)
@@ -577,11 +627,15 @@ class TestFileGovernanceCompletedData:
                     f.read()
 
                 read_completed = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "read"
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
-                assert read_completed[0].kwargs["json"]["spans"][0]["data"] == "verification"
+                assert (
+                    read_completed[0].kwargs["json"]["spans"][0]["data"]
+                    == "verification"
+                )
         finally:
             os.unlink(tmp_path)
 
@@ -596,11 +650,15 @@ class TestFileGovernanceCompletedData:
                     f.write("output_data")
 
                 write_completed = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "write"
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
-                assert write_completed[0].kwargs["json"]["spans"][0]["data"] == "output_data"
+                assert (
+                    write_completed[0].kwargs["json"]["spans"][0]["data"]
+                    == "output_data"
+                )
         finally:
             os.unlink(tmp_path)
 
@@ -615,7 +673,8 @@ class TestFileGovernanceCompletedData:
                     f.read()
 
                 started_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["stage"] == "started"
                 ]
                 for call in started_calls:
@@ -661,7 +720,8 @@ class TestFileGovernanceSpanData:
 
                 # Find read started call
                 read_started = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "read"
                     and c.kwargs["json"]["spans"][0]["stage"] == "started"
                 ]
@@ -687,8 +747,15 @@ class TestFileGovernanceSpanData:
                 payload = mock.post.call_args_list[0].kwargs["json"]
                 span_entry = payload["spans"][0]
                 required_fields = [
-                    "span_id", "trace_id", "parent_span_id", "name",
-                    "kind", "stage", "start_time", "attributes", "status",
+                    "span_id",
+                    "trace_id",
+                    "parent_span_id",
+                    "name",
+                    "kind",
+                    "stage",
+                    "start_time",
+                    "attributes",
+                    "status",
                 ]
                 for field in required_fields:
                     assert field in span_entry, f"Missing field: {field}"
@@ -706,7 +773,8 @@ class TestFileGovernanceSpanData:
                     f.write("data")
 
                 write_calls = [
-                    c for c in mock.post.call_args_list
+                    c
+                    for c in mock.post.call_args_list
                     if c.kwargs["json"]["spans"][0]["file_operation"] == "write"
                 ]
                 assert len(write_calls) >= 1

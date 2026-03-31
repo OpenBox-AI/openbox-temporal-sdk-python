@@ -15,6 +15,7 @@ Temporal HITL uses the retry-based pattern:
 handle_approval_response() takes the raw dict from GovernanceClient.poll_approval()
 and raises the same ApplicationError types as the original inline code.
 """
+
 from __future__ import annotations
 
 import logging
@@ -79,6 +80,7 @@ def handle_approval_response(
     # Check expiration before verdict (expired flag takes precedence)
     if response.get("expired"):
         from temporalio.exceptions import ApplicationError
+
         raise ApplicationError(
             f"Approval expired for activity {activity_type} "
             f"(workflow_id={workflow_id}, run_id={run_id}, activity_id={activity_id})",
@@ -87,6 +89,7 @@ def handle_approval_response(
         )
 
     from .types import Verdict
+
     verdict = Verdict.from_string(response.get("verdict") or response.get("action"))
 
     if verdict == Verdict.ALLOW:
@@ -97,6 +100,7 @@ def handle_approval_response(
         # Human explicitly rejected (BLOCK or HALT)
         reason = response.get("reason", "Activity rejected")
         from temporalio.exceptions import ApplicationError
+
         raise ApplicationError(
             f"Activity rejected: {reason}",
             type="ApprovalRejected",
@@ -117,4 +121,5 @@ def raise_approval_pending(reason: str) -> NoReturn:
         reason: Human-readable reason shown in Temporal UI / logs.
     """
     from temporalio.exceptions import ApplicationError
+
     raise ApplicationError(reason, type="ApprovalPending", non_retryable=False)

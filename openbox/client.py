@@ -11,6 +11,7 @@ Note: httpx is imported lazily inside methods to avoid loading it at module
 level. Module-level httpx import triggers Temporal sandbox restrictions
 (os.stat). This mirrors the existing pattern in activity_interceptor.py.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,7 +21,6 @@ from typing import Optional
 from .types import GovernanceVerdictResponse, Verdict
 
 logger = logging.getLogger(__name__)
-
 
 
 def _check_expiration(data: dict) -> dict:
@@ -42,7 +42,9 @@ def _check_expiration(data: dict) -> dict:
         if current_time > expiration_time:
             data["expired"] = True
     except (ValueError, TypeError) as e:
-        logger.warning(f"Failed to parse approval_expiration_time '{expiration_time_str}': {e}")
+        logger.warning(
+            f"Failed to parse approval_expiration_time '{expiration_time_str}': {e}"
+        )
 
     return data
 
@@ -71,9 +73,12 @@ class GovernanceClient:
         self._on_api_error = on_api_error
         # Cache auth headers at construction (immutable after init)
         from .hook_governance import build_auth_headers
+
         self._cached_headers = build_auth_headers(api_key)
 
-    async def evaluate_event(self, payload: dict) -> Optional[GovernanceVerdictResponse]:
+    async def evaluate_event(
+        self, payload: dict
+    ) -> Optional[GovernanceVerdictResponse]:
         """Send governance event to /api/v1/governance/evaluate.
 
         Args:
@@ -158,7 +163,9 @@ class GovernanceClient:
                     _check_expiration(data)
                     return data
 
-                logger.warning(f"Failed to get approval status: HTTP {response.status_code}")
+                logger.warning(
+                    f"Failed to get approval status: HTTP {response.status_code}"
+                )
                 return None
 
         except Exception as e:

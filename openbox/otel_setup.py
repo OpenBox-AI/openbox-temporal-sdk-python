@@ -116,8 +116,11 @@ def setup_opentelemetry_for_governance(
 
     # Configure governance modules
     _hook_gov.configure(
-        api_url, api_key, span_processor,
-        api_timeout=api_timeout, on_api_error=on_api_error,
+        api_url,
+        api_key,
+        span_processor,
+        api_timeout=api_timeout,
+        on_api_error=on_api_error,
     )
     _db_gov.configure(span_processor)
 
@@ -194,7 +197,9 @@ def setup_opentelemetry_for_governance(
     # 5. httpx body capture (separate from OTel - patches Client.send)
     setup_httpx_body_capture(span_processor)
 
-    logger.info(f"OpenTelemetry HTTP instrumentation complete. Instrumented: {instrumented}")
+    logger.info(
+        f"OpenTelemetry HTTP instrumentation complete. Instrumented: {instrumented}"
+    )
 
     # 6. Database instrumentation (optional)
     if sqlalchemy_engine is not None and not instrument_databases:
@@ -203,7 +208,9 @@ def setup_opentelemetry_for_governance(
             "engine will not be instrumented"
         )
     if instrument_databases:
-        db_instrumented = setup_database_instrumentation(db_libraries, sqlalchemy_engine)
+        db_instrumented = setup_database_instrumentation(
+            db_libraries, sqlalchemy_engine
+        )
         if db_instrumented:
             instrumented.extend(db_instrumented)
 
@@ -216,9 +223,12 @@ def setup_opentelemetry_for_governance(
     # Without this, OTel trace context is lost in executor threads and
     # hook governance silently skips HTTP/DB/file spans from those threads.
     from .context_propagation import install_context_propagating_executor
+
     install_context_propagating_executor()
 
-    logger.info(f"OpenTelemetry governance setup complete. Instrumented: {instrumented}")
+    logger.info(
+        f"OpenTelemetry governance setup complete. Instrumented: {instrumented}"
+    )
 
 
 def setup_database_instrumentation(
@@ -260,6 +270,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "psycopg2" in db_libraries:
         try:
             from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
+
             Psycopg2Instrumentor().instrument()
             instrumented.append("psycopg2")
             logger.info("Instrumented: psycopg2")
@@ -269,6 +280,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "asyncpg" in db_libraries:
         try:
             from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
             AsyncPGInstrumentor().instrument()
             instrumented.append("asyncpg")
             logger.info("Instrumented: asyncpg")
@@ -278,6 +290,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "mysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.mysql import MySQLInstrumentor
+
             MySQLInstrumentor().instrument()
             instrumented.append("mysql")
             logger.info("Instrumented: mysql")
@@ -287,6 +300,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "pymysql" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
+
             PyMySQLInstrumentor().instrument()
             instrumented.append("pymysql")
             logger.info("Instrumented: pymysql")
@@ -296,6 +310,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "sqlite3" in db_libraries:
         try:
             from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
+
             SQLite3Instrumentor().instrument()
             instrumented.append("sqlite3")
             logger.info("Instrumented: sqlite3")
@@ -306,6 +321,7 @@ def setup_database_instrumentation(
     if db_libraries is None or "pymongo" in db_libraries:
         try:
             from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
+
             PymongoInstrumentor().instrument()
             instrumented.append("pymongo")
             logger.info("Instrumented: pymongo")
@@ -319,7 +335,8 @@ def setup_database_instrumentation(
 
             req_hook, resp_hook = _db_gov.setup_redis_hooks()
             RedisInstrumentor().instrument(
-                request_hook=req_hook, response_hook=resp_hook,
+                request_hook=req_hook,
+                response_hook=resp_hook,
             )
             instrumented.append("redis")
             logger.info("Instrumented: redis")
@@ -327,7 +344,11 @@ def setup_database_instrumentation(
             logger.debug("redis instrumentation not available")
 
     # sqlalchemy (ORM)
-    if sqlalchemy_engine is not None and db_libraries is not None and "sqlalchemy" not in db_libraries:
+    if (
+        sqlalchemy_engine is not None
+        and db_libraries is not None
+        and "sqlalchemy" not in db_libraries
+    ):
         logger.warning(
             "sqlalchemy_engine was provided but 'sqlalchemy' is not in db_libraries; "
             "engine will not be instrumented"
