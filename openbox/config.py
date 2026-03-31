@@ -20,13 +20,16 @@ from typing import Set, Optional
 def _get_logger():
     """Lazy logger to avoid sandbox restrictions."""
     import logging
+
     return logging.getLogger(__name__)
 
 
 def _build_auth_headers(api_key: str) -> dict:
     """Build auth headers reusing hook_governance's centralized builder."""
     from .hook_governance import build_auth_headers
+
     return build_auth_headers(api_key)
+
 
 # API key format pattern (obx_live_... or obx_test_...)
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_[a-zA-Z0-9_]+$")
@@ -39,7 +42,6 @@ from .errors import (  # noqa: F401
     OpenBoxNetworkError,
     OpenBoxInsecureURLError,
 )
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GovernanceConfig - Configuration for interceptors
@@ -98,7 +100,9 @@ class GovernanceConfig:
 
     # Activity types to skip governance for
     # By default, skip the governance event activity to avoid infinite loops
-    skip_activity_types: Set[str] = field(default_factory=lambda: {"send_governance_event"})
+    skip_activity_types: Set[str] = field(
+        default_factory=lambda: {"send_governance_event"}
+    )
 
     # Approval polling configuration
     # Enable approval polling for require-approval verdicts
@@ -181,7 +185,9 @@ def _validate_api_key_with_server(api_url: str, api_key: str, timeout: float) ->
             raise OpenBoxAuthError(
                 "Invalid API key. Check your API key at dashboard.openbox.ai"
             )
-        raise OpenBoxNetworkError(f"Cannot reach OpenBox Core at {api_url}: HTTP {e.code}")
+        raise OpenBoxNetworkError(
+            f"Cannot reach OpenBox Core at {api_url}: HTTP {e.code}"
+        )
 
     except URLError as e:
         raise OpenBoxNetworkError(f"Cannot reach OpenBox Core at {api_url}: {e.reason}")

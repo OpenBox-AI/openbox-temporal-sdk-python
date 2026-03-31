@@ -31,9 +31,14 @@ logger = logging.getLogger(__name__)
 
 
 def _build_traced_span_data(
-    span, func_name: str, module: str, stage: str,
-    error: Optional[str] = None, duration_ms: Optional[float] = None,
-    args: Any = None, result: Any = None,
+    span,
+    func_name: str,
+    module: str,
+    stage: str,
+    error: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+    args: Any = None,
+    result: Any = None,
 ) -> dict:
     """Build span data dict for a @traced function call.
 
@@ -42,7 +47,7 @@ def _build_traced_span_data(
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-    raw_attrs = getattr(span, 'attributes', None)
+    raw_attrs = getattr(span, "attributes", None)
     attrs = dict(raw_attrs) if raw_attrs and isinstance(raw_attrs, dict) else {}
 
     now_ns = _time.time_ns()
@@ -54,7 +59,7 @@ def _build_traced_span_data(
         "span_id": span_id_hex,
         "trace_id": trace_id_hex,
         "parent_span_id": parent_span_id,
-        "name": getattr(span, 'name', None) or func_name,
+        "name": getattr(span, "name", None) or func_name,
         "kind": "INTERNAL",
         "stage": stage,
         "start_time": start_time,
@@ -72,6 +77,7 @@ def _build_traced_span_data(
         "result": result,
         "error": error,
     }
+
 
 # Get tracer for internal function tracing
 _tracer: Optional[trace.Tracer] = None
@@ -152,6 +158,7 @@ def traced(
         is_async = _is_async_function(func)
 
         if is_async:
+
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
                 tracer = _get_tracer()
@@ -166,11 +173,26 @@ def traced(
 
                     # Governance: started stage
                     if _hook_gov.is_configured():
-                        _args_data = _safe_serialize({"args": args, "kwargs": kwargs}, max_arg_length) if capture_args else None
-                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started", args=_args_data)
-                        await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=started_sd)
+                        _args_data = (
+                            _safe_serialize(
+                                {"args": args, "kwargs": kwargs}, max_arg_length
+                            )
+                            if capture_args
+                            else None
+                        )
+                        started_sd = _build_traced_span_data(
+                            span,
+                            func.__name__,
+                            func.__module__,
+                            "started",
+                            args=_args_data,
+                        )
+                        await _hook_gov.evaluate_async(
+                            span, identifier=func.__name__, span_data=started_sd
+                        )
 
                     import time as _time
+
                     _start = _time.perf_counter()
                     try:
                         result = await func(*args, **kwargs)
@@ -179,14 +201,28 @@ def traced(
                         # Capture result
                         if capture_result:
                             span.set_attribute(
-                                "function.result", _safe_serialize(result, max_arg_length)
+                                "function.result",
+                                _safe_serialize(result, max_arg_length),
                             )
 
                         # Governance: completed stage
                         if _hook_gov.is_configured():
-                            _result_data = _safe_serialize(result, max_arg_length) if capture_result else None
-                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms, result=_result_data)
-                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=completed_sd)
+                            _result_data = (
+                                _safe_serialize(result, max_arg_length)
+                                if capture_result
+                                else None
+                            )
+                            completed_sd = _build_traced_span_data(
+                                span,
+                                func.__name__,
+                                func.__module__,
+                                "completed",
+                                duration_ms=_dur_ms,
+                                result=_result_data,
+                            )
+                            await _hook_gov.evaluate_async(
+                                span, identifier=func.__name__, span_data=completed_sd
+                            )
 
                         return result
 
@@ -199,15 +235,22 @@ def traced(
                         # Governance: completed stage with error
                         if _hook_gov.is_configured():
                             error_sd = _build_traced_span_data(
-                                span, func.__name__, func.__module__, "completed", error=str(e)
+                                span,
+                                func.__name__,
+                                func.__module__,
+                                "completed",
+                                error=str(e),
                             )
-                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=error_sd)
+                            await _hook_gov.evaluate_async(
+                                span, identifier=func.__name__, span_data=error_sd
+                            )
 
                         raise
 
             return async_wrapper  # type: ignore
 
         else:
+
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
                 tracer = _get_tracer()
@@ -222,11 +265,26 @@ def traced(
 
                     # Governance: started stage
                     if _hook_gov.is_configured():
-                        _args_data = _safe_serialize({"args": args, "kwargs": kwargs}, max_arg_length) if capture_args else None
-                        started_sd = _build_traced_span_data(span, func.__name__, func.__module__, "started", args=_args_data)
-                        _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=started_sd)
+                        _args_data = (
+                            _safe_serialize(
+                                {"args": args, "kwargs": kwargs}, max_arg_length
+                            )
+                            if capture_args
+                            else None
+                        )
+                        started_sd = _build_traced_span_data(
+                            span,
+                            func.__name__,
+                            func.__module__,
+                            "started",
+                            args=_args_data,
+                        )
+                        _hook_gov.evaluate_sync(
+                            span, identifier=func.__name__, span_data=started_sd
+                        )
 
                     import time as _time
+
                     _start = _time.perf_counter()
                     try:
                         result = func(*args, **kwargs)
@@ -235,14 +293,28 @@ def traced(
                         # Capture result
                         if capture_result:
                             span.set_attribute(
-                                "function.result", _safe_serialize(result, max_arg_length)
+                                "function.result",
+                                _safe_serialize(result, max_arg_length),
                             )
 
                         # Governance: completed stage
                         if _hook_gov.is_configured():
-                            _result_data = _safe_serialize(result, max_arg_length) if capture_result else None
-                            completed_sd = _build_traced_span_data(span, func.__name__, func.__module__, "completed", duration_ms=_dur_ms, result=_result_data)
-                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=completed_sd)
+                            _result_data = (
+                                _safe_serialize(result, max_arg_length)
+                                if capture_result
+                                else None
+                            )
+                            completed_sd = _build_traced_span_data(
+                                span,
+                                func.__name__,
+                                func.__module__,
+                                "completed",
+                                duration_ms=_dur_ms,
+                                result=_result_data,
+                            )
+                            _hook_gov.evaluate_sync(
+                                span, identifier=func.__name__, span_data=completed_sd
+                            )
 
                         return result
 
@@ -255,9 +327,15 @@ def traced(
                         # Governance: completed stage with error
                         if _hook_gov.is_configured():
                             error_sd = _build_traced_span_data(
-                                span, func.__name__, func.__module__, "completed", error=str(e)
+                                span,
+                                func.__name__,
+                                func.__module__,
+                                "completed",
+                                error=str(e),
                             )
-                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=error_sd)
+                            _hook_gov.evaluate_sync(
+                                span, identifier=func.__name__, span_data=error_sd
+                            )
 
                         raise
 
@@ -272,6 +350,7 @@ def traced(
 def _is_async_function(func: Callable) -> bool:
     """Check if function is async."""
     import asyncio
+
     return asyncio.iscoroutinefunction(func)
 
 
@@ -285,7 +364,9 @@ def _set_args_attributes(
 
     if kwargs:
         for key, value in kwargs.items():
-            span.set_attribute(f"function.kwarg.{key}", _safe_serialize(value, max_length))
+            span.set_attribute(
+                f"function.kwarg.{key}", _safe_serialize(value, max_length)
+            )
 
 
 # Convenience function to create a span context manager

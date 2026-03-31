@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 # Base
 # ═══════════════════════════════════════════════════════════════════
 
+
 class OpenBoxError(Exception):
     """Base class for all OpenBox SDK errors."""
 
@@ -38,6 +39,7 @@ class OpenBoxError(Exception):
 # ═══════════════════════════════════════════════════════════════════
 # Configuration errors (backward-compat: OpenBoxConfigError stays)
 # ═══════════════════════════════════════════════════════════════════
+
 
 class OpenBoxConfigError(OpenBoxError):
     """Raised when OpenBox configuration fails."""
@@ -59,6 +61,7 @@ class OpenBoxInsecureURLError(OpenBoxConfigError):
 # Governance verdict errors
 # ═══════════════════════════════════════════════════════════════════
 
+
 class GovernanceBlockedError(OpenBoxError):
     """Raised by OTel hooks when governance blocks an operation.
 
@@ -72,6 +75,7 @@ class GovernanceBlockedError(OpenBoxError):
         # Lazy import to avoid circular dependency with types.py
         if isinstance(verdict, str):
             from .types import Verdict
+
             self.verdict = Verdict.from_string(verdict)
         else:
             self.verdict = verdict
@@ -98,6 +102,7 @@ class GovernanceAPIError(OpenBoxError):
 # Guardrails errors
 # ═══════════════════════════════════════════════════════════════════
 
+
 class GuardrailsValidationError(OpenBoxError):
     """Raised when guardrails validation_passed is False.
 
@@ -107,13 +112,16 @@ class GuardrailsValidationError(OpenBoxError):
 
     def __init__(self, reasons: list[str] | None = None):
         self.reasons = reasons or []
-        reason_str = "; ".join(self.reasons) if self.reasons else "Guardrails validation failed"
+        reason_str = (
+            "; ".join(self.reasons) if self.reasons else "Guardrails validation failed"
+        )
         super().__init__(reason_str)
 
 
 # ═══════════════════════════════════════════════════════════════════
 # HITL approval errors
 # ═══════════════════════════════════════════════════════════════════
+
 
 class ApprovalExpiredError(OpenBoxError):
     """Raised when HITL approval window expires (server-side deadline)."""
@@ -128,13 +136,18 @@ class ApprovalTimeoutError(OpenBoxError):
 
     def __init__(self, max_wait_ms: int | None = None):
         self.max_wait_ms = max_wait_ms
-        msg = f"Approval polling timed out after {max_wait_ms}ms" if max_wait_ms else "Approval polling timed out"
+        msg = (
+            f"Approval polling timed out after {max_wait_ms}ms"
+            if max_wait_ms
+            else "Approval polling timed out"
+        )
         super().__init__(msg)
 
 
 # ═══════════════════════════════════════════════════════════════════
 # Utility: exception chain walker
 # ═══════════════════════════════════════════════════════════════════
+
 
 def extract_governance_error(exc: BaseException) -> GovernanceBlockedError | None:
     """Walk exception chain to find a wrapped GovernanceBlockedError.
@@ -156,7 +169,9 @@ def extract_governance_error(exc: BaseException) -> GovernanceBlockedError | Non
         if isinstance(current, GovernanceBlockedError):
             return current
         # Walk both explicit (__cause__) and implicit (__context__) chains
-        next_exc = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        next_exc = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
         # Also check Temporal's .cause property (ActivityError.cause → ApplicationError)
         if next_exc is None:
             next_exc = getattr(current, "cause", None)

@@ -9,7 +9,7 @@ from enum import Enum
 
 def rfc3339_now() -> str:
     """Return current UTC time in RFC3339 format (e.g. '2026-03-08T12:00:00.000Z')."""
-    return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 # Re-export from errors.py for backward compatibility
@@ -56,7 +56,13 @@ class Verdict(str, Enum):
     @property
     def priority(self) -> int:
         """Priority for aggregation: HALT=5, BLOCK=4, REQUIRE_APPROVAL=3, CONSTRAIN=2, ALLOW=1"""
-        return {Verdict.ALLOW: 1, Verdict.CONSTRAIN: 2, Verdict.REQUIRE_APPROVAL: 3, Verdict.BLOCK: 4, Verdict.HALT: 5}[self]
+        return {
+            Verdict.ALLOW: 1,
+            Verdict.CONSTRAIN: 2,
+            Verdict.REQUIRE_APPROVAL: 3,
+            Verdict.BLOCK: 4,
+            Verdict.HALT: 5,
+        }[self]
 
     @classmethod
     def highest_priority(cls, verdicts: List["Verdict"]) -> "Verdict":
@@ -81,7 +87,9 @@ class WorkflowSpanBuffer:
     workflow_type: str
     task_queue: str
     parent_workflow_id: Optional[str] = None
-    spans: List[dict] = field(default_factory=list)  # kept for backward compat, always empty
+    spans: List[dict] = field(
+        default_factory=list
+    )  # kept for backward compat, always empty
     status: Optional[str] = None  # "completed", "failed", "cancelled", "terminated"
     error: Optional[Dict[str, Any]] = None
 
@@ -106,7 +114,9 @@ class GuardrailsCheckResult:
     input_type: str  # "activity_input" or "activity_output"
     raw_logs: Optional[Dict[str, Any]] = None  # Raw logs from guardrails evaluation
     validation_passed: bool = True  # If False, workflow should be stopped
-    reasons: List[Dict[str, str]] = field(default_factory=list)  # [{type, field, reason}, ...]
+    reasons: List[Dict[str, str]] = field(
+        default_factory=list
+    )  # [{type, field, reason}, ...]
 
     def get_reason_strings(self) -> List[str]:
         """Extract just the 'reason' field from each reason object."""
@@ -158,7 +168,9 @@ class GovernanceVerdictResponse:
             )
 
         # Parse verdict (v1.1) or action (v1.0)
-        verdict = Verdict.from_string(data.get("verdict") or data.get("action", "continue"))
+        verdict = Verdict.from_string(
+            data.get("verdict") or data.get("action", "continue")
+        )
 
         return cls(
             verdict=verdict,

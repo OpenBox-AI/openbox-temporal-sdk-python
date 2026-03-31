@@ -18,6 +18,7 @@ import logging
 from typing import Dict, Optional
 
 from . import hook_governance as _hook_gov
+
 # Late import: otel_setup imports us, so we get a partially-loaded module ref.
 # That's fine — we only access _otel._span_processor and _otel._ignored_url_prefixes
 # at function call time, when both modules are fully loaded.
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # can use it after _original_send() returns (when the HTTP span has ended and
 # trace.get_current_span() would return the parent activity span).
 _httpx_http_span: contextvars.ContextVar = contextvars.ContextVar(
-    '_httpx_http_span', default=None
+    "_httpx_http_span", default=None
 )
 
 # Timing for HTTP hooks: span_id → perf_counter start time
@@ -90,7 +91,9 @@ def _build_http_span_data(
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-    attrs = dict(span.attributes) if hasattr(span, 'attributes') and span.attributes else {}
+    attrs = (
+        dict(span.attributes) if hasattr(span, "attributes") and span.attributes else {}
+    )
 
     now_ns = _time.time_ns()
     duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
@@ -105,7 +108,9 @@ def _build_http_span_data(
         "span_id": span_id_hex,
         "trace_id": trace_id_hex,
         "parent_span_id": parent_span_id,
-        "name": span.name if hasattr(span, 'name') and span.name else f"HTTP {http_method}",
+        "name": (
+            span.name if hasattr(span, "name") and span.name else f"HTTP {http_method}"
+        ),
         "kind": "CLIENT",
         "stage": stage,
         "start_time": start_time,
@@ -155,16 +160,23 @@ def _requests_request_hook(span, request) -> None:
     # Hook-level governance evaluation
     if _hook_gov.is_configured():
         import time as _time
-        url = str(request.url) if hasattr(request, 'url') else None
+
+        url = str(request.url) if hasattr(request, "url") else None
         if url and not _should_ignore_url(url):
             # Record start time for duration calculation in response hook
-            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+            if hasattr(span, "context") and hasattr(span.context, "span_id"):
                 if len(_http_hook_timings) >= _HTTP_HOOK_TIMINGS_MAX:
                     _http_hook_timings.clear()
                 _http_hook_timings[span.context.span_id] = _time.perf_counter()
-            headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
+            headers = (
+                dict(request.headers)
+                if hasattr(request, "headers") and request.headers
+                else None
+            )
             method = request.method or "UNKNOWN"
-            span_data = _build_http_span_data(span, method, url, "started", request_body=body, request_headers=headers)
+            span_data = _build_http_span_data(
+                span, method, url, "started", request_body=body, request_headers=headers
+            )
             _hook_gov.evaluate_sync(
                 span,
                 identifier=url,
@@ -186,7 +198,11 @@ def _requests_response_hook(span, request, response) -> None:
     resp_body = None
     resp_headers = None
     try:
-        resp_headers = dict(response.headers) if hasattr(response, 'headers') and response.headers else None
+        resp_headers = (
+            dict(response.headers)
+            if hasattr(response, "headers") and response.headers
+            else None
+        )
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
             resp_body = response.text
@@ -196,15 +212,20 @@ def _requests_response_hook(span, request, response) -> None:
     # Hook-level governance evaluation (response stage)
     if _hook_gov.is_configured():
         import time as _time
-        url = str(request.url) if hasattr(request, 'url') else None
+
+        url = str(request.url) if hasattr(request, "url") else None
         if url and not _should_ignore_url(url):
             # Compute duration from started hook timing
             _dur_ms = None
-            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+            if hasattr(span, "context") and hasattr(span.context, "span_id"):
                 _start = _http_hook_timings.pop(span.context.span_id, None)
                 if _start:
                     _dur_ms = (_time.perf_counter() - _start) * 1000
-            req_headers = dict(request.headers) if hasattr(request, 'headers') and request.headers else None
+            req_headers = (
+                dict(request.headers)
+                if hasattr(request, "headers") and request.headers
+                else None
+            )
             req_body = None
             try:
                 if request.body:
@@ -215,10 +236,15 @@ def _requests_response_hook(span, request, response) -> None:
                 pass
             method = request.method or "UNKNOWN"
             span_data = _build_http_span_data(
-                span, method, url, "completed",
-                request_body=req_body, request_headers=req_headers,
-                response_body=resp_body, response_headers=resp_headers,
-                http_status_code=getattr(response, 'status_code', None),
+                span,
+                method,
+                url,
+                "completed",
+                request_body=req_body,
+                request_headers=req_headers,
+                response_body=resp_body,
+                response_headers=resp_headers,
+                http_status_code=getattr(response, "status_code", None),
                 duration_ms=_dur_ms,
             )
             _hook_gov.evaluate_sync(
@@ -244,7 +270,7 @@ def _httpx_request_hook(span, request) -> None:
         return
 
     # Check if URL should be ignored
-    url = str(request.url) if hasattr(request, 'url') else None
+    url = str(request.url) if hasattr(request, "url") else None
     if url and _should_ignore_url(url):
         return
 
@@ -252,27 +278,27 @@ def _httpx_request_hook(span, request) -> None:
     request_headers = None
     try:
         # Capture request headers from RequestInfo namedtuple
-        if hasattr(request, 'headers') and request.headers:
+        if hasattr(request, "headers") and request.headers:
             request_headers = dict(request.headers)
 
         # Try to get request body - RequestInfo has a 'stream' attribute
         # httpx ByteStream stores body in _stream (not body or _body)
-        if hasattr(request, 'stream'):
+        if hasattr(request, "stream"):
             stream = request.stream
-            if hasattr(stream, '_stream') and isinstance(stream._stream, bytes):
+            if hasattr(stream, "_stream") and isinstance(stream._stream, bytes):
                 body = stream._stream
-            elif hasattr(stream, 'body'):
+            elif hasattr(stream, "body"):
                 body = stream.body
-            elif hasattr(stream, '_body'):
+            elif hasattr(stream, "_body"):
                 body = stream._body
             elif isinstance(stream, bytes):
                 body = stream
 
         # Fallback: Direct content attribute (for httpx.Request objects)
-        if not body and hasattr(request, '_content') and request._content:
+        if not body and hasattr(request, "_content") and request._content:
             body = request._content
 
-        if not body and hasattr(request, 'content'):
+        if not body and hasattr(request, "content"):
             try:
                 content = request.content
                 if content:
@@ -294,9 +320,16 @@ def _httpx_request_hook(span, request) -> None:
 
     # Hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+        method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
         req_body = body if isinstance(body, str) else None
-        span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
+        span_data = _build_http_span_data(
+            span,
+            method,
+            url,
+            "started",
+            request_body=req_body,
+            request_headers=request_headers,
+        )
         _hook_gov.evaluate_sync(
             span,
             identifier=url,
@@ -320,7 +353,7 @@ def _httpx_response_hook(span, request, response) -> None:
         return
 
     # Check if URL should be ignored
-    url = str(request.url) if hasattr(request, 'url') else None
+    url = str(request.url) if hasattr(request, "url") else None
     if url and _should_ignore_url(url):
         return
 
@@ -328,7 +361,7 @@ def _httpx_response_hook(span, request, response) -> None:
     resp_headers = None
     try:
         # Capture response headers first (always available even for streaming)
-        if hasattr(response, 'headers') and response.headers:
+        if hasattr(response, "headers") and response.headers:
             resp_headers = dict(response.headers)
 
         content_type = response.headers.get("content-type", "")
@@ -336,10 +369,10 @@ def _httpx_response_hook(span, request, response) -> None:
             body = None
 
             # Check if response has already been read (has _content)
-            if hasattr(response, '_content') and response._content:
+            if hasattr(response, "_content") and response._content:
                 body = response._content
             # Try .content property
-            elif hasattr(response, 'content'):
+            elif hasattr(response, "content"):
                 try:
                     body = response.content
                 except Exception:
@@ -362,7 +395,7 @@ async def _httpx_async_request_hook(span, request) -> None:
         return
 
     # Check if URL should be ignored
-    url = str(request.url) if hasattr(request, 'url') else None
+    url = str(request.url) if hasattr(request, "url") else None
     if url and _should_ignore_url(url):
         return
 
@@ -370,23 +403,23 @@ async def _httpx_async_request_hook(span, request) -> None:
     request_headers = None
     try:
         # Capture request headers
-        if hasattr(request, 'headers') and request.headers:
+        if hasattr(request, "headers") and request.headers:
             request_headers = dict(request.headers)
 
         # Try to get request body
-        if hasattr(request, 'stream'):
+        if hasattr(request, "stream"):
             stream = request.stream
-            if hasattr(stream, 'body'):
+            if hasattr(stream, "body"):
                 body = stream.body
-            elif hasattr(stream, '_body'):
+            elif hasattr(stream, "_body"):
                 body = stream._body
             elif isinstance(stream, bytes):
                 body = stream
 
-        if not body and hasattr(request, '_content') and request._content:
+        if not body and hasattr(request, "_content") and request._content:
             body = request._content
 
-        if not body and hasattr(request, 'content'):
+        if not body and hasattr(request, "content"):
             try:
                 content = request.content
                 if content:
@@ -408,9 +441,16 @@ async def _httpx_async_request_hook(span, request) -> None:
 
     # Async hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+        method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
         req_body = body if isinstance(body, str) else None
-        span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=request_headers)
+        span_data = _build_http_span_data(
+            span,
+            method,
+            url,
+            "started",
+            request_body=req_body,
+            request_headers=request_headers,
+        )
         await _hook_gov.evaluate_async(
             span,
             identifier=url,
@@ -424,7 +464,7 @@ async def _httpx_async_response_hook(span, request, response) -> None:
         return
 
     # Check if URL should be ignored
-    url = str(request.url) if hasattr(request, 'url') else None
+    url = str(request.url) if hasattr(request, "url") else None
     if url and _should_ignore_url(url):
         return
 
@@ -432,7 +472,7 @@ async def _httpx_async_response_hook(span, request, response) -> None:
     resp_headers = None
     try:
         # Capture response headers
-        if hasattr(response, 'headers') and response.headers:
+        if hasattr(response, "headers") and response.headers:
             resp_headers = dict(response.headers)
 
         content_type = response.headers.get("content-type", "")
@@ -440,16 +480,16 @@ async def _httpx_async_response_hook(span, request, response) -> None:
             body = None
 
             # Check if response has already been read
-            if hasattr(response, '_content') and response._content:
+            if hasattr(response, "_content") and response._content:
                 body = response._content
                 if isinstance(body, bytes):
                     body = body.decode("utf-8", errors="ignore")
             # For async, try to read the response - THIS WILL CONSUME IT
             # but httpx caches it in _content after first read
-            elif hasattr(response, 'aread'):
+            elif hasattr(response, "aread"):
                 try:
                     await response.aread()
-                    if hasattr(response, '_content') and response._content:
+                    if hasattr(response, "_content") and response._content:
                         body = response._content
                         if isinstance(body, bytes):
                             body = body.decode("utf-8", errors="ignore")
@@ -461,11 +501,11 @@ async def _httpx_async_response_hook(span, request, response) -> None:
 
         # Also try to get request body from the stream
         request_body = None
-        if hasattr(request, 'stream'):
+        if hasattr(request, "stream"):
             stream = request.stream
-            if hasattr(stream, 'body'):
+            if hasattr(stream, "body"):
                 request_body = stream.body
-            elif hasattr(stream, '_body'):
+            elif hasattr(stream, "_body"):
                 request_body = stream._body
 
         if request_body:
@@ -493,15 +533,15 @@ def _capture_httpx_request_data(request) -> tuple:
     request_body = None
     request_headers = None
     try:
-        if hasattr(request, '_content') and request._content:
+        if hasattr(request, "_content") and request._content:
             request_body = request._content
             if isinstance(request_body, bytes):
                 request_body = request_body.decode("utf-8", errors="ignore")
-        elif hasattr(request, 'content') and request.content:
+        elif hasattr(request, "content") and request.content:
             request_body = request.content
             if isinstance(request_body, bytes):
                 request_body = request_body.decode("utf-8", errors="ignore")
-        if hasattr(request, 'headers') and request.headers:
+        if hasattr(request, "headers") and request.headers:
             request_headers = dict(request.headers)
     except Exception as e:
         logger.debug(f"Failed to capture request body/headers: {e}")
@@ -518,7 +558,7 @@ def _capture_httpx_response_data(response) -> tuple:
     response_headers = None
     content_type = response.headers.get("content-type", "")
     try:
-        if hasattr(response, 'headers') and response.headers:
+        if hasattr(response, "headers") and response.headers:
             response_headers = dict(response.headers)
         if _is_text_content_type(content_type):
             response_body = response.text
@@ -536,21 +576,37 @@ def _get_httpx_http_span():
     _httpx_http_span.set(None)
     if http_span is None:
         from opentelemetry import trace
+
         http_span = trace.get_current_span()
     return http_span
 
 
-def _prepare_completed_governance(http_span, request, url, request_body, request_headers,
-                                  response_body, response_headers, status_code, duration_ms=None):
+def _prepare_completed_governance(
+    http_span,
+    request,
+    url,
+    request_body,
+    request_headers,
+    response_body,
+    response_headers,
+    status_code,
+    duration_ms=None,
+):
     """Build 'completed' governance args. Returns tuple or None if not applicable."""
     if not (_hook_gov.is_configured() and url and http_span):
         return None
-    method = str(request.method) if hasattr(request, 'method') else "UNKNOWN"
+    method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
     span_data = _build_http_span_data(
-        http_span, method, url, "completed",
-        request_body=request_body, request_headers=request_headers,
-        response_body=response_body, response_headers=response_headers,
-        http_status_code=status_code, duration_ms=duration_ms,
+        http_span,
+        method,
+        url,
+        "completed",
+        request_body=request_body,
+        request_headers=request_headers,
+        response_body=response_body,
+        response_headers=response_headers,
+        http_status_code=status_code,
+        duration_ms=duration_ms,
     )
     return http_span, url, span_data
 
@@ -569,7 +625,8 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
 
         def _patched_send(self, request, *args, **kwargs):
             import time as _time
-            url = str(request.url) if hasattr(request, 'url') else None
+
+            url = str(request.url) if hasattr(request, "url") else None
             if url and _should_ignore_url(url):
                 return _original_send(self, request, *args, **kwargs)
 
@@ -581,17 +638,26 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
             response_body, response_headers = _capture_httpx_response_data(response)
 
             gov_args = _prepare_completed_governance(
-                http_span, request, url, request_body, request_headers,
-                response_body, response_headers, getattr(response, 'status_code', None),
+                http_span,
+                request,
+                url,
+                request_body,
+                request_headers,
+                response_body,
+                response_headers,
+                getattr(response, "status_code", None),
                 duration_ms=_dur_ms,
             )
             if gov_args:
-                _hook_gov.evaluate_sync(gov_args[0], identifier=gov_args[1], span_data=gov_args[2])
+                _hook_gov.evaluate_sync(
+                    gov_args[0], identifier=gov_args[1], span_data=gov_args[2]
+                )
             return response
 
         async def _patched_async_send(self, request, *args, **kwargs):
             import time as _time
-            url = str(request.url) if hasattr(request, 'url') else None
+
+            url = str(request.url) if hasattr(request, "url") else None
             if url and _should_ignore_url(url):
                 return await _original_async_send(self, request, *args, **kwargs)
 
@@ -603,12 +669,20 @@ def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
             response_body, response_headers = _capture_httpx_response_data(response)
 
             gov_args = _prepare_completed_governance(
-                http_span, request, url, request_body, request_headers,
-                response_body, response_headers, getattr(response, 'status_code', None),
+                http_span,
+                request,
+                url,
+                request_body,
+                request_headers,
+                response_body,
+                response_headers,
+                getattr(response, "status_code", None),
                 duration_ms=_dur_ms,
             )
             if gov_args:
-                await _hook_gov.evaluate_async(gov_args[0], identifier=gov_args[1], span_data=gov_args[2])
+                await _hook_gov.evaluate_async(
+                    gov_args[0], identifier=gov_args[1], span_data=gov_args[2]
+                )
             return response
 
         httpx.Client.send = _patched_send
@@ -647,10 +721,12 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
     # Hook-level governance evaluation
     if _hook_gov.is_configured():
         # Reconstruct URL from pool and request_info
-        scheme = getattr(pool, 'scheme', 'http')
-        host = getattr(pool, 'host', 'unknown')
-        port = getattr(pool, 'port', None)
-        url_path = getattr(request_info, 'url', getattr(request_info, 'request_url', '/'))
+        scheme = getattr(pool, "scheme", "http")
+        host = getattr(pool, "host", "unknown")
+        port = getattr(pool, "port", None)
+        url_path = getattr(
+            request_info, "url", getattr(request_info, "request_url", "/")
+        )
         if port and port not in (80, 443):
             url = f"{scheme}://{host}:{port}{url_path}"
         else:
@@ -658,14 +734,26 @@ def _urllib3_request_hook(span, pool, request_info) -> None:
 
         if not _should_ignore_url(url):
             import time as _time
-            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+
+            if hasattr(span, "context") and hasattr(span.context, "span_id"):
                 if len(_http_hook_timings) >= _HTTP_HOOK_TIMINGS_MAX:
                     _http_hook_timings.clear()
                 _http_hook_timings[span.context.span_id] = _time.perf_counter()
-            method = getattr(request_info, 'method', 'UNKNOWN')
-            headers = dict(request_info.headers) if hasattr(request_info, 'headers') and request_info.headers else None
+            method = getattr(request_info, "method", "UNKNOWN")
+            headers = (
+                dict(request_info.headers)
+                if hasattr(request_info, "headers") and request_info.headers
+                else None
+            )
             req_body = body if isinstance(body, str) else None
-            span_data = _build_http_span_data(span, method, url, "started", request_body=req_body, request_headers=headers)
+            span_data = _build_http_span_data(
+                span,
+                method,
+                url,
+                "started",
+                request_body=req_body,
+                request_headers=headers,
+            )
             _hook_gov.evaluate_sync(
                 span,
                 identifier=url,
@@ -687,7 +775,11 @@ def _urllib3_response_hook(span, pool, response) -> None:
     resp_body = None
     resp_headers = None
     try:
-        resp_headers = dict(response.headers) if hasattr(response, 'headers') and response.headers else None
+        resp_headers = (
+            dict(response.headers)
+            if hasattr(response, "headers") and response.headers
+            else None
+        )
         content_type = response.headers.get("content-type", "")
         if _is_text_content_type(content_type):
             body = response.data
@@ -701,9 +793,9 @@ def _urllib3_response_hook(span, pool, response) -> None:
     # Hook-level governance evaluation (response stage)
     if _hook_gov.is_configured():
         # Reconstruct URL from pool
-        scheme = getattr(pool, 'scheme', 'http')
-        host = getattr(pool, 'host', 'unknown')
-        port = getattr(pool, 'port', None)
+        scheme = getattr(pool, "scheme", "http")
+        host = getattr(pool, "host", "unknown")
+        port = getattr(pool, "port", None)
         if port and port not in (80, 443):
             url = f"{scheme}://{host}:{port}/"
         else:
@@ -711,16 +803,22 @@ def _urllib3_response_hook(span, pool, response) -> None:
 
         if not _should_ignore_url(url):
             import time as _time
+
             _dur_ms = None
-            if hasattr(span, 'context') and hasattr(span.context, 'span_id'):
+            if hasattr(span, "context") and hasattr(span.context, "span_id"):
                 _start = _http_hook_timings.pop(span.context.span_id, None)
                 if _start:
                     _dur_ms = (_time.perf_counter() - _start) * 1000
-            status_code = getattr(response, 'status', None)
+            status_code = getattr(response, "status", None)
             span_data = _build_http_span_data(
-                span, "UNKNOWN", url, "completed",
-                response_body=resp_body, response_headers=resp_headers,
-                http_status_code=status_code, duration_ms=_dur_ms,
+                span,
+                "UNKNOWN",
+                url,
+                "completed",
+                response_body=resp_body,
+                response_headers=resp_headers,
+                http_status_code=status_code,
+                duration_ms=_dur_ms,
             )
             _hook_gov.evaluate_sync(
                 span,

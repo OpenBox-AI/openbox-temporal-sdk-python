@@ -28,7 +28,6 @@ from openbox.tracing import (
 )
 from openbox.types import GovernanceBlockedError, WorkflowSpanBuffer
 
-
 # =============================================================================
 # Tests for _safe_serialize()
 # =============================================================================
@@ -116,10 +115,12 @@ class TestSafeSerialize:
 
     def test_unserializable_object_returns_marker(self):
         """Test that unserializable objects return '<unserializable>'."""
+
         # Create an object that will fail json.dumps with default=str
         class BadRepr:
             def __str__(self):
                 raise ValueError("Cannot stringify")
+
             def __repr__(self):
                 raise ValueError("Cannot repr")
 
@@ -128,6 +129,7 @@ class TestSafeSerialize:
 
     def test_custom_object_uses_str(self):
         """Test that custom objects without JSON support use str()."""
+
         class CustomObj:
             def __str__(self):
                 return "CustomObj(value=42)"
@@ -137,6 +139,7 @@ class TestSafeSerialize:
 
     def test_dict_with_non_serializable_values(self):
         """Test dict with non-serializable values uses default=str."""
+
         class Custom:
             def __str__(self):
                 return "custom_value"
@@ -156,6 +159,7 @@ class TestIsAsyncFunction:
 
     def test_identifies_sync_function(self):
         """Test that sync functions are identified as non-async."""
+
         def sync_func():
             return 42
 
@@ -163,6 +167,7 @@ class TestIsAsyncFunction:
 
     def test_identifies_async_function(self):
         """Test that async functions are identified correctly."""
+
         async def async_func():
             return 42
 
@@ -175,6 +180,7 @@ class TestIsAsyncFunction:
 
     def test_identifies_method_as_sync(self):
         """Test that regular methods are identified as sync."""
+
         class MyClass:
             def method(self):
                 return "result"
@@ -184,6 +190,7 @@ class TestIsAsyncFunction:
 
     def test_identifies_async_method(self):
         """Test that async methods are identified correctly."""
+
         class MyClass:
             async def async_method(self):
                 return "result"
@@ -193,6 +200,7 @@ class TestIsAsyncFunction:
 
     def test_identifies_coroutine_function(self):
         """Test that coroutine functions are identified as async."""
+
         async def coro():
             await asyncio.sleep(0)
             return "done"
@@ -305,6 +313,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             def my_func(x):
                 return x * 2
@@ -320,6 +329,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             async def my_async_func(x):
                 return x * 2
@@ -335,6 +345,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(name="custom-span-name")
             def my_func():
                 return "result"
@@ -350,6 +361,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_args=True)
             def my_func(a, b, keyword=None):
                 return a + b
@@ -365,6 +377,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_args=False)
             def my_func(a, b):
                 return a + b
@@ -382,6 +395,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_result=True)
             def my_func():
                 return {"status": "success", "data": [1, 2, 3]}
@@ -397,6 +411,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_result=False)
             def my_func():
                 return "secret result"
@@ -413,6 +428,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_exception=True)
             def failing_func():
                 raise ValueError("Something went wrong")
@@ -429,6 +445,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_exception=False)
             def failing_func():
                 raise RuntimeError("Error occurred")
@@ -446,6 +463,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             def failing_func():
                 raise KeyError("missing key")
@@ -458,6 +476,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_exception=True)
             async def async_failing_func():
                 raise TypeError("async type error")
@@ -474,6 +493,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             def bare_decorated():
                 return "bare"
@@ -488,6 +508,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced()
             def called_decorated():
                 return "called"
@@ -502,6 +523,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             def documented_func(x):
                 """This is a documented function."""
@@ -515,6 +537,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced
             def namespaced_func():
                 return "result"
@@ -523,8 +546,7 @@ class TestTracedDecorator:
 
         # Find the code.namespace call
         namespace_calls = [
-            c for c in span.set_attribute.call_args_list
-            if c[0][0] == "code.namespace"
+            c for c in span.set_attribute.call_args_list if c[0][0] == "code.namespace"
         ]
         assert len(namespace_calls) == 1
         # The namespace should contain the module name (may include package path)
@@ -535,6 +557,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(
                 name="async-operation",
                 capture_args=True,
@@ -557,6 +580,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_result=True)
             def returns_none():
                 return None
@@ -571,6 +595,7 @@ class TestTracedDecorator:
         tracer, span = mock_tracer
 
         with patch("openbox.tracing._get_tracer", return_value=tracer):
+
             @traced(capture_args=True, capture_result=True, max_arg_length=50)
             def long_args_func(data):
                 return data
@@ -580,8 +605,7 @@ class TestTracedDecorator:
 
         # Check that arg was truncated
         arg_calls = [
-            c for c in span.set_attribute.call_args_list
-            if c[0][0] == "function.arg.0"
+            c for c in span.set_attribute.call_args_list if c[0][0] == "function.arg.0"
         ]
         assert len(arg_calls) == 1
         assert arg_calls[0][0][1].endswith("...[truncated]")
@@ -615,8 +639,7 @@ class TestCreateSpan:
 
         with patch("openbox.tracing._get_tracer", return_value=mock_tracer):
             span = create_span(
-                "operation",
-                attributes={"user_id": "12345", "action": "create"}
+                "operation", attributes={"user_id": "12345", "action": "create"}
             )
 
         mock_span.set_attribute.assert_any_call("user_id", "12345")
@@ -642,22 +665,19 @@ class TestCreateSpan:
 
         with patch("openbox.tracing._get_tracer", return_value=mock_tracer):
             span = create_span(
-                "complex-span",
-                attributes={"data": {"nested": [1, 2, 3]}, "count": 42}
+                "complex-span", attributes={"data": {"nested": [1, 2, 3]}, "count": 42}
             )
 
         # Check that dict was JSON serialized
         data_calls = [
-            c for c in mock_span.set_attribute.call_args_list
-            if c[0][0] == "data"
+            c for c in mock_span.set_attribute.call_args_list if c[0][0] == "data"
         ]
         assert len(data_calls) == 1
         assert data_calls[0][0][1] == '{"nested": [1, 2, 3]}'
 
         # Check that int was string serialized
         count_calls = [
-            c for c in mock_span.set_attribute.call_args_list
-            if c[0][0] == "count"
+            c for c in mock_span.set_attribute.call_args_list if c[0][0] == "count"
         ]
         assert len(count_calls) == 1
         assert count_calls[0][0][1] == "42"
@@ -703,6 +723,7 @@ class TestGetTracer:
         """Test that _get_tracer returns an OpenTelemetry tracer."""
         # Reset the global tracer
         import openbox.tracing
+
         openbox.tracing._tracer = None
 
         with patch("openbox.tracing.trace.get_tracer") as mock_get_tracer:
@@ -717,6 +738,7 @@ class TestGetTracer:
     def test_get_tracer_caches_tracer(self):
         """Test that _get_tracer caches the tracer instance."""
         import openbox.tracing
+
         openbox.tracing._tracer = None
 
         with patch("openbox.tracing.trace.get_tracer") as mock_get_tracer:
@@ -744,12 +766,14 @@ class TestTracedIntegration:
     def reset_tracer(self):
         """Reset the global tracer before each test."""
         import openbox.tracing
+
         openbox.tracing._tracer = None
         yield
         openbox.tracing._tracer = None
 
     def test_traced_function_returns_correct_value(self):
         """Test that traced functions return correct values."""
+
         @traced
         def add(a, b):
             return a + b
@@ -760,6 +784,7 @@ class TestTracedIntegration:
 
     async def test_traced_async_function_returns_correct_value(self):
         """Test that traced async functions return correct values."""
+
         @traced
         async def async_multiply(a, b):
             await asyncio.sleep(0)  # Simulate async operation
@@ -783,6 +808,7 @@ class TestTracedIntegration:
 
     def test_multiple_traced_functions(self):
         """Test multiple traced functions can work together."""
+
         @traced(name="step-1")
         def step_one(x):
             return x + 1
@@ -799,6 +825,7 @@ class TestTracedIntegration:
 
     async def test_nested_async_traced_functions(self):
         """Test nested async traced functions."""
+
         @traced
         async def inner():
             return "inner"
@@ -812,6 +839,7 @@ class TestTracedIntegration:
 
     def test_traced_generator_function(self):
         """Test that traced works with functions that return generators."""
+
         @traced
         def get_range(n):
             return range(n)
@@ -821,6 +849,7 @@ class TestTracedIntegration:
 
     def test_traced_class_method(self):
         """Test that traced works with class methods."""
+
         class Calculator:
             @traced(name="calculator-add")
             def add(self, a, b):
@@ -836,6 +865,7 @@ class TestTracedIntegration:
 
     async def test_traced_async_class_method(self):
         """Test that traced works with async class methods."""
+
         class AsyncProcessor:
             @traced
             async def process(self, data):
@@ -855,6 +885,7 @@ class TestTracedIntegration:
         mock_tracer.start_as_current_span.return_value = mock_span
 
         with patch("openbox.tracing._get_tracer", return_value=mock_tracer):
+
             @traced(capture_args=False, capture_result=False, capture_exception=False)
             def minimal_func(a, b):
                 return a + b
@@ -893,14 +924,19 @@ def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
         "activity_id": "act-traced-1",
     }
     buffer = WorkflowSpanBuffer(
-        workflow_id="wf-traced-1", run_id="run-1",
-        workflow_type="TracedWorkflow", task_queue="traced-queue",
+        workflow_id="wf-traced-1",
+        run_id="run-1",
+        workflow_type="TracedWorkflow",
+        task_queue="traced-queue",
     )
     processor.get_buffer.return_value = buffer
 
     hook_gov.configure(
-        "http://localhost:9090", "test-key", processor,
-        api_timeout=5.0, on_api_error=on_api_error,
+        "http://localhost:9090",
+        "test-key",
+        processor,
+        api_timeout=5.0,
+        on_api_error=on_api_error,
     )
     return processor
 
@@ -1205,6 +1241,7 @@ class TestTracedGovernanceNotConfigured:
 
     def test_existing_traced_behavior_unchanged(self):
         """Existing @traced behavior works identically without governance."""
+
         @traced
         def add(a, b):
             return a + b

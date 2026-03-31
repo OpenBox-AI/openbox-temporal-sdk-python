@@ -44,10 +44,13 @@ def install_context_propagating_executor(max_workers: int = 32) -> None:
     executor to run_in_executor are unaffected.
     """
     import asyncio
+
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         logger.debug("[OpenBox] No running event loop — skipping executor patch")
         return
     loop.set_default_executor(ContextPropagatingExecutor(max_workers=max_workers))
-    logger.info("[OpenBox] Installed context-propagating executor for OTel trace propagation")
+    logger.info(
+        "[OpenBox] Installed context-propagating executor for OTel trace propagation"
+    )

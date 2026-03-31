@@ -42,20 +42,31 @@ def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
         current_value = getattr(obj, field.name)
 
         # If current field is a dataclass and new value is a dict, recurse
-        if is_dataclass(current_value) and not isinstance(current_value, type) and isinstance(new_value, dict):
+        if (
+            is_dataclass(current_value)
+            and not isinstance(current_value, type)
+            and isinstance(new_value, dict)
+        ):
             _deep_update_dataclass(current_value, new_value, _logger)
         # If current field is a list of dataclasses and new value is a list of dicts
         elif isinstance(current_value, list) and isinstance(new_value, list):
             for i, (curr_item, new_item) in enumerate(zip(current_value, new_value)):
-                if is_dataclass(curr_item) and not isinstance(curr_item, type) and isinstance(new_item, dict):
+                if (
+                    is_dataclass(curr_item)
+                    and not isinstance(curr_item, type)
+                    and isinstance(new_item, dict)
+                ):
                     _deep_update_dataclass(curr_item, new_item, _logger)
                 elif i < len(current_value):
                     current_value[i] = new_item
         else:
             # Simple value - just update
             if _logger:
-                _logger.info(f"_deep_update: Setting {type(obj).__name__}.{field.name} = {new_value}")
+                _logger.info(
+                    f"_deep_update: Setting {type(obj).__name__}.{field.name} = {new_value}"
+                )
             setattr(obj, field.name, new_value)
+
 
 from temporalio import activity
 from temporalio.worker import (
@@ -67,7 +78,13 @@ from opentelemetry import trace
 
 from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
-from .types import WorkflowEventType, WorkflowSpanBuffer, GovernanceVerdictResponse, Verdict, GovernanceBlockedError
+from .types import (
+    WorkflowEventType,
+    WorkflowSpanBuffer,
+    GovernanceVerdictResponse,
+    Verdict,
+    GovernanceBlockedError,
+)
 from .hook_governance import build_auth_headers
 from .activities import _terminate_workflow_for_halt
 from .verdict_handler import enforce_verdict
@@ -84,10 +101,11 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, bytes):
         # Try to decode bytes as UTF-8, fallback to base64
         try:
-            return value.decode('utf-8')
+            return value.decode("utf-8")
         except Exception:
             import base64
-            return base64.b64encode(value).decode('ascii')
+
+            return base64.b64encode(value).decode("ascii")
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, (list, tuple)):
@@ -95,15 +113,17 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _serialize_value(v) for k, v in value.items()}
     # Handle Temporal Payload objects
-    if hasattr(value, 'data') and hasattr(value, 'metadata'):
+    if hasattr(value, "data") and hasattr(value, "metadata"):
         # This is likely a Temporal Payload - try to decode it
         try:
             payload_data = value.data
             if isinstance(payload_data, bytes):
-                return json.loads(payload_data.decode('utf-8'))
+                return json.loads(payload_data.decode("utf-8"))
             return str(payload_data)
         except Exception:
-            return f"<Payload: {len(value.data) if hasattr(value, 'data') else '?'} bytes>"
+            return (
+                f"<Payload: {len(value.data) if hasattr(value, 'data') else '?'} bytes>"
+            )
     # Try to convert to string for other types
     try:
         return json.loads(json.dumps(value, default=str))
@@ -184,7 +204,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # If buffer exists but run_id doesn't match, it's from a previous workflow run - clear it
         if buffer and buffer.run_id != info.workflow_run_id:
-            activity.logger.info(f"Clearing stale buffer for workflow {info.workflow_id} (old run_id={buffer.run_id}, new run_id={info.workflow_run_id})")
+            activity.logger.info(
+                f"Clearing stale buffer for workflow {info.workflow_id} (old run_id={buffer.run_id}, new run_id={info.workflow_run_id})"
+            )
             self._span_processor.unregister_workflow(info.workflow_id)
             buffer = None
 
@@ -194,20 +216,31 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # Clear stale verdict from previous workflow run
         if pending_verdict and pending_verdict.get("run_id") != info.workflow_run_id:
-            activity.logger.info(f"Clearing stale verdict for workflow {info.workflow_id} (old run_id={pending_verdict.get('run_id')}, new run_id={info.workflow_run_id})")
+            activity.logger.info(
+                f"Clearing stale verdict for workflow {info.workflow_id} (old run_id={pending_verdict.get('run_id')}, new run_id={info.workflow_run_id})"
+            )
             self._span_processor.clear_verdict(info.workflow_id)
             pending_verdict = None
 
-        activity.logger.info(f"Checking verdict for workflow {info.workflow_id}: buffer={buffer is not None}, buffer.verdict={buffer.verdict if buffer else None}, pending_verdict={pending_verdict}")
+        activity.logger.info(
+            f"Checking verdict for workflow {info.workflow_id}: buffer={buffer is not None}, buffer.verdict={buffer.verdict if buffer else None}, pending_verdict={pending_verdict}"
+        )
 
-        if pending_verdict and pending_verdict.get("verdict") and Verdict.from_string(pending_verdict.get("verdict")).should_stop():
+        if (
+            pending_verdict
+            and pending_verdict.get("verdict")
+            and Verdict.from_string(pending_verdict.get("verdict")).should_stop()
+        ):
             pending_v = Verdict.from_string(pending_verdict.get("verdict"))
             reason = pending_verdict.get("reason") or "Workflow blocked by governance"
-            activity.logger.info(f"Activity blocked by prior governance verdict (from signal): {reason}")
+            activity.logger.info(
+                f"Activity blocked by prior governance verdict (from signal): {reason}"
+            )
             if pending_v == Verdict.HALT:
                 await _terminate_workflow_for_halt(info.workflow_id, reason)
             else:
                 from temporalio.exceptions import ApplicationError
+
                 raise ApplicationError(
                     f"Governance blocked: {reason}",
                     type="GovernanceBlock",
@@ -216,11 +249,14 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         if buffer and buffer.verdict and buffer.verdict.should_stop():
             reason = buffer.verdict_reason or "Workflow blocked by governance"
-            activity.logger.info(f"Activity blocked by prior governance verdict (from buffer): {reason}")
+            activity.logger.info(
+                f"Activity blocked by prior governance verdict (from buffer): {reason}"
+            )
             if buffer.verdict == Verdict.HALT:
                 await _terminate_workflow_for_halt(info.workflow_id, reason)
             else:
                 from temporalio.exceptions import ApplicationError
+
                 raise ApplicationError(
                     f"Governance blocked: {reason}",
                     type="GovernanceBlock",
@@ -229,7 +265,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # ═══ Check for pending approval on retry ═══
         # If there's a pending approval, poll OpenBox Core for status
-        from .hitl import handle_approval_response, should_skip_hitl, raise_approval_pending
+        from .hitl import (
+            handle_approval_response,
+            should_skip_hitl,
+            raise_approval_pending,
+        )
+
         approval_granted = False
         if not should_skip_hitl(
             info.activity_type,
@@ -238,14 +279,18 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             buffer = self._span_processor.get_buffer(info.workflow_id)
             if buffer and buffer.pending_approval:
-                activity.logger.info(f"Polling approval status for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
+                activity.logger.info(
+                    f"Polling approval status for workflow_id={info.workflow_id}, activity_id={info.activity_id}"
+                )
 
                 # Poll OpenBox Core for approval status, delegate response handling
                 approval_response = await self._client.poll_approval(
                     info.workflow_id, info.workflow_run_id, info.activity_id
                 )
 
-                activity.logger.info(f"Processing approval response: expired={approval_response.get('expired') if approval_response else None}, verdict={approval_response.get('verdict') if approval_response else None}")
+                activity.logger.info(
+                    f"Processing approval response: expired={approval_response.get('expired') if approval_response else None}, verdict={approval_response.get('verdict') if approval_response else None}"
+                )
 
                 # Raises ApplicationError for expired/rejected/pending; returns True for ALLOW
                 approved = handle_approval_response(
@@ -256,7 +301,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     info.activity_id,
                 )
                 if approved:
-                    activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}, activity_id={info.activity_id}")
+                    activity.logger.info(
+                        f"Approval granted for workflow_id={info.workflow_id}, activity_id={info.activity_id}"
+                    )
                     buffer.pending_approval = False
                     approval_granted = True
 
@@ -286,7 +333,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             if args_list:
                 activity_input = _serialize_value(args_list)
             # Debug: log what we're capturing
-            activity.logger.info(f"Activity {info.activity_type} input: {len(args_list)} args, types: {[type(a).__name__ for a in args_list]}")
+            activity.logger.info(
+                f"Activity {info.activity_type} input: {len(args_list)} args, types: {[type(a).__name__ for a in args_list]}"
+            )
         except Exception as e:
             activity.logger.warning(f"Failed to serialize activity input: {e}")
             try:
@@ -327,13 +376,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if governance_verdict:
             try:
                 verdict_result = enforce_verdict(governance_verdict, "activity_start")
-                if (
-                    verdict_result.requires_hitl
-                    and not should_skip_hitl(
-                        info.activity_type,
-                        hitl_enabled=self._config.hitl_enabled,
-                        skip_types=self._config.skip_hitl_activity_types,
-                    )
+                if verdict_result.requires_hitl and not should_skip_hitl(
+                    info.activity_type,
+                    hitl_enabled=self._config.hitl_enabled,
+                    skip_types=self._config.skip_hitl_activity_types,
                 ):
                     buffer = self._span_processor.get_buffer(info.workflow_id)
                     if buffer:
@@ -348,6 +394,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 await _terminate_workflow_for_halt(info.workflow_id, str(e))
             except GovernanceBlockedError as e:
                 from temporalio.exceptions import ApplicationError
+
                 raise ApplicationError(
                     f"Governance blocked: {e.reason}",
                     type="GovernanceBlock",
@@ -355,6 +402,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 )
             except GuardrailsValidationError as e:
                 from temporalio.exceptions import ApplicationError
+
                 activity.logger.info(f"Guardrails validation failed: {e}")
                 raise ApplicationError(
                     f"Guardrails validation failed: {e}",
@@ -392,24 +440,38 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
             if isinstance(redacted, list):
                 original_args = list(input.args) if input.args else []
-                activity.logger.info(f"Original args count: {len(original_args)}, redacted count: {len(redacted)}")
+                activity.logger.info(
+                    f"Original args count: {len(original_args)}, redacted count: {len(redacted)}"
+                )
 
                 for i, redacted_item in enumerate(redacted):
-                    activity.logger.info(f"Processing arg {i}: redacted_item type={type(redacted_item).__name__}")
+                    activity.logger.info(
+                        f"Processing arg {i}: redacted_item type={type(redacted_item).__name__}"
+                    )
                     if i < len(original_args) and isinstance(redacted_item, dict):
                         original_arg = original_args[i]
-                        activity.logger.info(f"Original arg {i} type: {type(original_arg).__name__}, is_dataclass: {is_dataclass(original_arg)}")
+                        activity.logger.info(
+                            f"Original arg {i} type: {type(original_arg).__name__}, is_dataclass: {is_dataclass(original_arg)}"
+                        )
                         # If original is a dataclass, update its fields in place (preserves types)
-                        if is_dataclass(original_arg) and not isinstance(original_arg, type):
-                            _deep_update_dataclass(original_arg, redacted_item, activity.logger)
-                            activity.logger.info(f"Updated {type(original_arg).__name__} fields with redacted values")
+                        if is_dataclass(original_arg) and not isinstance(
+                            original_arg, type
+                        ):
+                            _deep_update_dataclass(
+                                original_arg, redacted_item, activity.logger
+                            )
+                            activity.logger.info(
+                                f"Updated {type(original_arg).__name__} fields with redacted values"
+                            )
                             # Verify the update
-                            if hasattr(original_arg, 'prompt'):
+                            if hasattr(original_arg, "prompt"):
                                 activity.logger.debug(f"After update, prompt redacted")
                         else:
                             # Non-dataclass: replace directly
                             original_args[i] = redacted_item
-                            activity.logger.info(f"Replaced arg {i} directly (non-dataclass)")
+                            activity.logger.info(
+                                f"Replaced arg {i} directly (non-dataclass)"
+                            )
 
                 # Update activity_input for the completed event (shows redacted values)
                 activity_input = _serialize_value(original_args)
@@ -422,8 +484,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         # Debug: Log the actual input that will be passed to activity
         if input.args:
             first_arg = input.args[0]
-            if hasattr(first_arg, 'prompt'):
-                activity.logger.debug(f"BEFORE ACTIVITY EXECUTION - prompt field present")
+            if hasattr(first_arg, "prompt"):
+                activity.logger.debug(
+                    f"BEFORE ACTIVITY EXECUTION - prompt field present"
+                )
 
         status = "completed"
         error = None
@@ -450,17 +514,19 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_output = _serialize_value(result)
             except GovernanceBlockedError as e:
                 status = "failed"
-                error = {"type": "GovernanceBlockedError", "message": str(e), "verdict": e.verdict, "url": e.url}
+                error = {
+                    "type": "GovernanceBlockedError",
+                    "message": str(e),
+                    "verdict": e.verdict,
+                    "url": e.url,
+                }
                 from temporalio.exceptions import ApplicationError
 
                 # REQUIRE_APPROVAL → retryable, reuse HITL polling flow
-                if (
-                    e.verdict.requires_approval()
-                    and not should_skip_hitl(
-                        info.activity_type,
-                        hitl_enabled=self._config.hitl_enabled,
-                        skip_types=self._config.skip_hitl_activity_types,
-                    )
+                if e.verdict.requires_approval() and not should_skip_hitl(
+                    info.activity_type,
+                    hitl_enabled=self._config.hitl_enabled,
+                    skip_types=self._config.skip_hitl_activity_types,
                 ):
                     buffer = self._span_processor.get_buffer(info.workflow_id)
                     if buffer:
@@ -474,7 +540,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # Hook-level BLOCK/HALT → raise non-retryable error to stop activity.
                 # Preserve verdict in error type for the activity interceptor to
                 # differentiate later (e.g. terminate workflow for HALT).
-                error_type = "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
+                error_type = (
+                    "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
+                )
                 raise ApplicationError(
                     f"Hook governance {e.verdict.value}: {e.reason}",
                     type=error_type,
@@ -488,15 +556,28 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 end_time = time.time()
 
                 # Check abort flag before clearing (determines if we skip ActivityCompleted)
-                was_aborted = self._span_processor.get_activity_abort(info.workflow_id, info.activity_id) is not None
+                was_aborted = (
+                    self._span_processor.get_activity_abort(
+                        info.workflow_id, info.activity_id
+                    )
+                    is not None
+                )
                 # Check if hook requested HALT → call terminate() here in async context
-                halt_reason = self._span_processor.get_halt_requested(info.workflow_id, info.activity_id)
+                halt_reason = self._span_processor.get_halt_requested(
+                    info.workflow_id, info.activity_id
+                )
                 if halt_reason:
-                    self._span_processor.clear_halt_requested(info.workflow_id, info.activity_id)
+                    self._span_processor.clear_halt_requested(
+                        info.workflow_id, info.activity_id
+                    )
                     await _terminate_workflow_for_halt(info.workflow_id, halt_reason)
                 # Clear abort flag and buffered activity context
-                self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
-                self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
+                self._span_processor.clear_activity_abort(
+                    info.workflow_id, info.activity_id
+                )
+                self._span_processor.clear_activity_context(
+                    info.workflow_id, info.activity_id
+                )
 
                 # OTel spans not collected — hook-level governance evaluates each
                 # operation individually, so bundling spans is redundant.
@@ -526,14 +607,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # ═══ Enforce ActivityCompleted governance verdict ═══
                 if completed_verdict:
                     try:
-                        completed_result = enforce_verdict(completed_verdict, "activity_end")
-                        if (
-                            completed_result.requires_hitl
-                            and not should_skip_hitl(
-                                info.activity_type,
-                                hitl_enabled=self._config.hitl_enabled,
-                                skip_types=self._config.skip_hitl_activity_types,
-                            )
+                        completed_result = enforce_verdict(
+                            completed_verdict, "activity_end"
+                        )
+                        if completed_result.requires_hitl and not should_skip_hitl(
+                            info.activity_type,
+                            hitl_enabled=self._config.hitl_enabled,
+                            skip_types=self._config.skip_hitl_activity_types,
                         ):
                             buffer = self._span_processor.get_buffer(info.workflow_id)
                             if buffer:
@@ -548,6 +628,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         await _terminate_workflow_for_halt(info.workflow_id, str(e))
                     except GovernanceBlockedError as e:
                         from temporalio.exceptions import ApplicationError
+
                         raise ApplicationError(
                             f"Governance blocked: {e.reason}",
                             type="GovernanceBlock",
@@ -555,7 +636,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                         )
                     except GuardrailsValidationError as e:
                         from temporalio.exceptions import ApplicationError
-                        activity.logger.info(f"Guardrails output validation failed: {e}")
+
+                        activity.logger.info(
+                            f"Guardrails output validation failed: {e}"
+                        )
                         raise ApplicationError(
                             f"Guardrails validation failed: {e}",
                             type="GuardrailsValidationFailed",
@@ -566,24 +650,37 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if (
                     completed_verdict
                     and completed_verdict.guardrails_result
-                    and completed_verdict.guardrails_result.input_type == "activity_output"
+                    and completed_verdict.guardrails_result.input_type
+                    == "activity_output"
                 ):
                     redacted_output = completed_verdict.guardrails_result.redacted_input
-                    activity.logger.info(f"Applying guardrails redaction to activity output")
+                    activity.logger.info(
+                        f"Applying guardrails redaction to activity output"
+                    )
 
                     if redacted_output is not None:
                         # If result is a dataclass, update fields in place
-                        if is_dataclass(result) and not isinstance(result, type) and isinstance(redacted_output, dict):
+                        if (
+                            is_dataclass(result)
+                            and not isinstance(result, type)
+                            and isinstance(redacted_output, dict)
+                        ):
                             _deep_update_dataclass(result, redacted_output)
-                            activity.logger.info(f"Updated {type(result).__name__} output fields with redacted values")
+                            activity.logger.info(
+                                f"Updated {type(result).__name__} output fields with redacted values"
+                            )
                         else:
                             # Replace result directly (dict, primitive, etc.)
                             result = redacted_output
-                            activity.logger.info(f"Replaced activity output with redacted value")
+                            activity.logger.info(
+                                f"Replaced activity output with redacted value"
+                            )
 
         return result
 
-    async def _send_activity_event(self, info, event_type: str, **extra) -> Optional[GovernanceVerdictResponse]:
+    async def _send_activity_event(
+        self, info, event_type: str, **extra
+    ) -> Optional[GovernanceVerdictResponse]:
         """Send activity event via GovernanceClient.
 
         Builds Temporal-specific payload (using activity.info() fields) and
@@ -623,4 +720,3 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             payload = json.loads(json.dumps(payload, default=str))
 
         return await self._client.evaluate_event(payload)
-

@@ -25,10 +25,10 @@ from openbox.activities import (
     send_governance_event,
 )
 
-
 # =============================================================================
 # Tests for _rfc3339_now()
 # =============================================================================
+
 
 class TestRfc3339Now:
     """Tests for the _rfc3339_now() function."""
@@ -41,21 +41,23 @@ class TestRfc3339Now:
     def test_ends_with_z(self):
         """Test that the timestamp ends with 'Z' (UTC indicator)."""
         result = _rfc3339_now()
-        assert result.endswith('Z')
+        assert result.endswith("Z")
 
     def test_format_matches_rfc3339(self):
         """Test that the format matches YYYY-MM-DDTHH:MM:SS.sssZ."""
         result = _rfc3339_now()
         # RFC3339 pattern: 2024-01-15T10:30:45.123Z
-        pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
-        assert re.match(pattern, result), f"Timestamp '{result}' does not match RFC3339 format"
+        pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+        assert re.match(
+            pattern, result
+        ), f"Timestamp '{result}' does not match RFC3339 format"
 
     def test_timestamp_is_valid_datetime(self):
         """Test that the timestamp can be parsed back to a valid datetime."""
         result = _rfc3339_now()
         # Remove trailing Z and parse
         dt_str = result[:-1]  # Remove 'Z'
-        dt = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%f')
+        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%f")
         assert isinstance(dt, datetime)
 
     def test_timestamp_is_recent(self):
@@ -66,12 +68,13 @@ class TestRfc3339Now:
 
         # Parse the result
         dt_str = result[:-1]  # Remove 'Z'
-        dt = datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S.%f')
+        dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%f")
         dt = dt.replace(tzinfo=timezone.utc)
 
         # The function truncates to milliseconds, so we need to account for that.
         # Truncate 'before' to milliseconds as well for fair comparison.
         from datetime import timedelta
+
         # Allow 1 second tolerance since truncation can cause dt to be slightly before 'before'
         tolerance = timedelta(seconds=1)
         assert (before - tolerance) <= dt <= (after + tolerance)
@@ -80,7 +83,7 @@ class TestRfc3339Now:
         """Test that the timestamp has exactly 3 decimal places (milliseconds)."""
         result = _rfc3339_now()
         # Extract the fractional seconds part
-        match = re.search(r'\.(\d+)Z$', result)
+        match = re.search(r"\.(\d+)Z$", result)
         assert match is not None
         fractional = match.group(1)
         assert len(fractional) == 3, f"Expected 3 decimal places, got {len(fractional)}"
@@ -89,6 +92,7 @@ class TestRfc3339Now:
 # =============================================================================
 # Tests for GovernanceAPIError
 # =============================================================================
+
 
 class TestGovernanceAPIError:
     """Tests for the GovernanceAPIError exception class."""
@@ -126,6 +130,7 @@ class TestGovernanceAPIError:
 # =============================================================================
 # Tests for raise_governance_block()
 # =============================================================================
+
 
 class TestRaiseGovernanceBlock:
     """Tests for the raise_governance_block() function."""
@@ -176,6 +181,7 @@ class TestRaiseGovernanceBlock:
 # Tests for _terminate_workflow_for_halt()
 # =============================================================================
 
+
 class TestTerminateWorkflowForHalt:
     """Tests for the _terminate_workflow_for_halt() function."""
 
@@ -183,6 +189,7 @@ class TestTerminateWorkflowForHalt:
     async def test_calls_client_terminate_when_client_available(self):
         """HALT with client calls terminate() then raises ApplicationError to stop activity."""
         from openbox.activities import set_temporal_client
+
         mock_handle = MagicMock()
         mock_handle.terminate = AsyncMock()
         mock_client = MagicMock()
@@ -194,7 +201,9 @@ class TestTerminateWorkflowForHalt:
                 await _terminate_workflow_for_halt("wf-123", "policy violation")
             # Verify terminate was called before the raise
             mock_client.get_workflow_handle.assert_called_once_with("wf-123")
-            mock_handle.terminate.assert_called_once_with("Governance HALT: policy violation")
+            mock_handle.terminate.assert_called_once_with(
+                "Governance HALT: policy violation"
+            )
             assert exc_info.value.type == "GovernanceHalt"
         finally:
             set_temporal_client(None)
@@ -203,6 +212,7 @@ class TestTerminateWorkflowForHalt:
     async def test_fallback_to_application_error_without_client(self):
         """HALT without client should raise ApplicationError as fallback."""
         from openbox.activities import set_temporal_client
+
         set_temporal_client(None)
         with pytest.raises(ApplicationError) as exc_info:
             await _terminate_workflow_for_halt("wf-123", "policy violation")
@@ -213,6 +223,7 @@ class TestTerminateWorkflowForHalt:
 # =============================================================================
 # Tests for send_governance_event() activity
 # =============================================================================
+
 
 class TestSendGovernanceEvent:
     """Tests for the send_governance_event() activity function."""
@@ -320,10 +331,12 @@ class TestSendGovernanceEvent:
             # Verify timestamp was added
             assert "timestamp" in sent_payload
             # Verify timestamp format
-            pattern = r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+            pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
             assert re.match(pattern, sent_payload["timestamp"])
 
-    async def test_preserves_original_payload_fields(self, base_input, mock_response_allow):
+    async def test_preserves_original_payload_fields(
+        self, base_input, mock_response_allow
+    ):
         """Test that original payload fields are preserved."""
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -363,6 +376,7 @@ class TestSendGovernanceEvent:
         """Test that v1.0 action='stop' (maps to HALT) calls terminate.
         Falls back to ApplicationError when no client is set."""
         from openbox.activities import set_temporal_client
+
         set_temporal_client(None)  # No client → fallback to ApplicationError
 
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
@@ -441,7 +455,9 @@ class TestSendGovernanceEvent:
             assert "500" in result["error"]
             assert "Internal Server Error" in result["error"]
 
-    async def test_http_error_with_fail_closed_raises_governance_api_error(self, base_input):
+    async def test_http_error_with_fail_closed_raises_governance_api_error(
+        self, base_input
+    ):
         """Test that HTTP error with fail_closed raises GovernanceAPIError."""
         base_input["on_api_error"] = "fail_closed"
 
@@ -497,7 +513,9 @@ class TestSendGovernanceEvent:
             assert "error" in result
             assert "Connection refused" in result["error"]
 
-    async def test_network_error_with_fail_closed_raises_governance_api_error(self, base_input):
+    async def test_network_error_with_fail_closed_raises_governance_api_error(
+        self, base_input
+    ):
         """Test that network error with fail_closed raises GovernanceAPIError."""
         base_input["on_api_error"] = "fail_closed"
 
@@ -541,7 +559,9 @@ class TestSendGovernanceEvent:
     # API URL and headers tests
     # -------------------------------------------------------------------------
 
-    async def test_correct_api_endpoint_is_called(self, base_input, mock_response_allow):
+    async def test_correct_api_endpoint_is_called(
+        self, base_input, mock_response_allow
+    ):
         """Test that the correct API endpoint is called."""
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -567,6 +587,7 @@ class TestSendGovernanceEvent:
             headers = call_args.kwargs["headers"]
             assert headers["Authorization"] == "Bearer test-api-key"
             from openbox import __version__
+
             assert headers["User-Agent"] == f"OpenBox-SDK/{__version__}"
             assert headers["X-OpenBox-SDK-Version"] == __version__
 
@@ -574,7 +595,9 @@ class TestSendGovernanceEvent:
     # Verdict types tests
     # -------------------------------------------------------------------------
 
-    async def test_block_verdict_raises_governance_block(self, base_input, mock_response_block):
+    async def test_block_verdict_raises_governance_block(
+        self, base_input, mock_response_block
+    ):
         """Test that 'block' verdict raises GovernanceBlock (activity fails, workflow continues)."""
         with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
@@ -589,6 +612,7 @@ class TestSendGovernanceEvent:
     async def test_halt_verdict_terminates_workflow(self, base_input):
         """Test that 'halt' verdict calls client.terminate() to kill workflow."""
         from openbox.activities import set_temporal_client
+
         mock_handle = MagicMock()
         mock_handle.terminate = AsyncMock()
         mock_temporal_client = MagicMock()
@@ -615,7 +639,9 @@ class TestSendGovernanceEvent:
                     await send_governance_event(base_input)
 
                 # Verify terminate was called and ApplicationError raised to stop activity
-                mock_temporal_client.get_workflow_handle.assert_called_once_with("test-workflow-123")
+                mock_temporal_client.get_workflow_handle.assert_called_once_with(
+                    "test-workflow-123"
+                )
                 mock_handle.terminate.assert_called_once()
                 assert "Emergency halt" in mock_handle.terminate.call_args[0][0]
                 assert exc_info.value.type == "GovernanceHalt"

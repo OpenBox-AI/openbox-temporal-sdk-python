@@ -40,10 +40,10 @@ def _build_file_span_data(
     import time as _time
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
-    raw_attrs = getattr(span, 'attributes', None)
+    raw_attrs = getattr(span, "attributes", None)
     attrs = dict(raw_attrs) if raw_attrs else {}
 
-    span_name = getattr(span, 'name', None) or f"file.{operation}"
+    span_name = getattr(span, "name", None) or f"file.{operation}"
     now_ns = _time.time_ns()
     duration_ns = int(duration_ms * 1_000_000) if duration_ms else None
     end_time = now_ns if stage == "completed" else None
@@ -102,7 +102,7 @@ def setup_file_io_instrumentation() -> bool:
     from opentelemetry import trace
 
     # Check if already instrumented
-    if hasattr(builtins, '_openbox_original_open'):
+    if hasattr(builtins, "_openbox_original_open"):
         logger.debug("File I/O already instrumented")
         return True
 
@@ -111,7 +111,16 @@ def setup_file_io_instrumentation() -> bool:
     _tracer = trace.get_tracer("openbox.file_io")
 
     # Paths to skip (noisy system files)
-    _skip_patterns = ('/dev/', '/proc/', '/sys/', '__pycache__', '.pyc', '.pyo', '.so', '.dylib')
+    _skip_patterns = (
+        "/dev/",
+        "/proc/",
+        "/sys/",
+        "__pycache__",
+        ".pyc",
+        ".pyo",
+        ".so",
+        ".dylib",
+    )
 
     class TracedFile:
         """Wrapper around file object to trace read/write operations.
@@ -142,10 +151,15 @@ def setup_file_io_instrumentation() -> bool:
             if not _hook_gov.is_configured():
                 return
             from .types import GovernanceBlockedError
+
             active_span = span or self._parent_span
             try:
                 span_data = _build_file_span_data(
-                    active_span, self._file_path, self._mode, operation, stage,
+                    active_span,
+                    self._file_path,
+                    self._mode,
+                    operation,
+                    stage,
                     **extra,
                 )
                 _hook_gov.evaluate_sync(
@@ -170,7 +184,9 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("read")
                 span.set_attribute("file.bytes", bytes_count)
 
-                self._evaluate_governance("read", "completed", span=span, data=data, bytes_read=bytes_count)
+                self._evaluate_governance(
+                    "read", "completed", span=span, data=data, bytes_read=bytes_count
+                )
                 return data
 
         def readline(self):
@@ -185,7 +201,13 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("readline")
                 span.set_attribute("file.bytes", bytes_count)
 
-                self._evaluate_governance("readline", "completed", span=span, data=data, bytes_read=bytes_count)
+                self._evaluate_governance(
+                    "readline",
+                    "completed",
+                    span=span,
+                    data=data,
+                    bytes_read=bytes_count,
+                )
                 return data
 
         def readlines(self):
@@ -202,8 +224,11 @@ def setup_file_io_instrumentation() -> bool:
                 span.set_attribute("file.lines", len(data) if data else 0)
 
                 self._evaluate_governance(
-                    "readlines", "completed", span=span,
-                    data=data, bytes_read=bytes_count,
+                    "readlines",
+                    "completed",
+                    span=span,
+                    data=data,
+                    bytes_read=bytes_count,
                     lines_count=len(data) if data else 0,
                 )
                 return data
@@ -220,7 +245,13 @@ def setup_file_io_instrumentation() -> bool:
                 self._operations.append("write")
                 result = self._file.write(data)
 
-                self._evaluate_governance("write", "completed", span=span, data=data, bytes_written=bytes_count)
+                self._evaluate_governance(
+                    "write",
+                    "completed",
+                    span=span,
+                    data=data,
+                    bytes_written=bytes_count,
+                )
                 return result
 
         def writelines(self, lines):
@@ -237,8 +268,11 @@ def setup_file_io_instrumentation() -> bool:
                 result = self._file.writelines(lines)
 
                 self._evaluate_governance(
-                    "writelines", "completed", span=span,
-                    data=lines, bytes_written=bytes_count,
+                    "writelines",
+                    "completed",
+                    span=span,
+                    data=lines,
+                    bytes_written=bytes_count,
                     lines_count=len(lines) if lines else 0,
                 )
                 return result
@@ -247,10 +281,13 @@ def setup_file_io_instrumentation() -> bool:
             # Governance "completed" — reports what happened during file lifecycle
             # Use try/finally to ensure file handle and span are always cleaned up
             from .types import GovernanceBlockedError
+
             gov_error = None
             try:
                 self._evaluate_governance(
-                    "close", "completed", span=self._parent_span,
+                    "close",
+                    "completed",
+                    span=self._parent_span,
                     bytes_read=self._bytes_read,
                     bytes_written=self._bytes_written,
                     operations=self._operations,
@@ -259,8 +296,12 @@ def setup_file_io_instrumentation() -> bool:
                 gov_error = e
             finally:
                 if self._parent_span:
-                    self._parent_span.set_attribute("file.total_bytes_read", self._bytes_read)
-                    self._parent_span.set_attribute("file.total_bytes_written", self._bytes_written)
+                    self._parent_span.set_attribute(
+                        "file.total_bytes_read", self._bytes_read
+                    )
+                    self._parent_span.set_attribute(
+                        "file.total_bytes_written", self._bytes_written
+                    )
                     self._parent_span.end()
                 self._file.close()
             if gov_error:
@@ -287,7 +328,7 @@ def setup_file_io_instrumentation() -> bool:
         def __getattr__(self, name):
             return getattr(self._file, name)
 
-    def traced_open(file, mode='r', *args, **kwargs):
+    def traced_open(file, mode="r", *args, **kwargs):
         file_str = str(file)
 
         # Skip system/noisy paths
@@ -301,9 +342,14 @@ def setup_file_io_instrumentation() -> bool:
         # Governance "started" — can block file access before it happens
         if _hook_gov.is_configured():
             from .types import GovernanceBlockedError
+
             try:
                 open_span_data = _build_file_span_data(
-                    span, file_str, mode, "open", "started",
+                    span,
+                    file_str,
+                    mode,
+                    "open",
+                    "started",
                 )
                 _hook_gov.evaluate_sync(
                     span,
@@ -333,7 +379,8 @@ def setup_file_io_instrumentation() -> bool:
     # Also patch io.open — Python 3.12+ pathlib calls io.open() directly,
     # bypassing builtins.open. Without this, Path.write_text() etc. are invisible.
     import io
-    if not hasattr(io, '_openbox_original_open'):
+
+    if not hasattr(io, "_openbox_original_open"):
         io._openbox_original_open = io.open
         io.open = traced_open
 
@@ -344,11 +391,13 @@ def setup_file_io_instrumentation() -> bool:
 def uninstrument_file_io() -> None:
     """Restore original open() functions."""
     import builtins
-    if hasattr(builtins, '_openbox_original_open'):
+
+    if hasattr(builtins, "_openbox_original_open"):
         builtins.open = builtins._openbox_original_open
-        delattr(builtins, '_openbox_original_open')
+        delattr(builtins, "_openbox_original_open")
     import io
-    if hasattr(io, '_openbox_original_open'):
+
+    if hasattr(io, "_openbox_original_open"):
         io.open = io._openbox_original_open
-        delattr(io, '_openbox_original_open')
+        delattr(io, "_openbox_original_open")
     logger.info("Uninstrumented: file I/O")

@@ -32,6 +32,7 @@ def test_psycopg2_request_hook_is_silently_discarded():
         mock_conn.cursor.return_value = mock_cursor
 
         import psycopg2
+
         with patch.object(psycopg2, "connect", return_value=mock_conn) as patched:
             # psycopg2.connect is wrapped by OTel — call the wrapper
             conn = psycopg2.connect(dbname="test")
@@ -39,15 +40,21 @@ def test_psycopg2_request_hook_is_silently_discarded():
             cur.execute("SELECT 1")
 
             # If hooks worked, request_hook would have been called
-            print(f"request_hook called: {request_hook.called} (times: {request_hook.call_count})")
-            print(f"response_hook called: {response_hook.called} (times: {response_hook.call_count})")
+            print(
+                f"request_hook called: {request_hook.called} (times: {request_hook.call_count})"
+            )
+            print(
+                f"response_hook called: {response_hook.called} (times: {response_hook.call_count})"
+            )
 
             # This assertion proves the hooks are silently discarded
             assert not request_hook.called, (
                 "UNEXPECTED: request_hook WAS called! "
                 "The OTel version supports hooks — update our approach."
             )
-            print("CONFIRMED: request_hook is silently discarded by Psycopg2Instrumentor")
+            print(
+                "CONFIRMED: request_hook is silently discarded by Psycopg2Instrumentor"
+            )
 
     finally:
         Psycopg2Instrumentor().uninstrument()

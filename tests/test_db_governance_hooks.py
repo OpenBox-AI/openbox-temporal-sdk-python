@@ -15,10 +15,10 @@ import openbox.db_governance_hooks as db_gov
 import openbox.hook_governance as hook_gov
 from openbox.types import GovernanceBlockedError, Verdict, WorkflowSpanBuffer
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Fixtures
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 @pytest.fixture(autouse=True)
 def cleanup_db_hooks():
@@ -38,14 +38,19 @@ def _setup_governance(on_api_error: str = "fail_open") -> MagicMock:
         "activity_id": "act-db-1",
     }
     buffer = WorkflowSpanBuffer(
-        workflow_id="wf-db-1", run_id="run-1",
-        workflow_type="DbWorkflow", task_queue="db-queue",
+        workflow_id="wf-db-1",
+        run_id="run-1",
+        workflow_type="DbWorkflow",
+        task_queue="db-queue",
     )
     processor.get_buffer.return_value = buffer
 
     hook_gov.configure(
-        "http://localhost:9090", "test-key", processor,
-        api_timeout=5.0, on_api_error=on_api_error,
+        "http://localhost:9090",
+        "test-key",
+        processor,
+        api_timeout=5.0,
+        on_api_error=on_api_error,
     )
     db_gov.configure(processor)
     return processor
@@ -76,13 +81,18 @@ def _mock_httpx_client(verdict="allow", reason=None, side_effect=None):
 # CursorTracer patch tests (psycopg2, mysql, asyncpg, pymysql)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestCursorTracerPatch:
     """Tests for CursorTracer monkey-patch governance hooks."""
 
-    def _make_cursor_tracer(self, db_system="postgresql", database="testdb",
-                            host="pg-host", port=5432):
+    def _make_cursor_tracer(
+        self, db_system="postgresql", database="testdb", host="pg-host", port=5432
+    ):
         """Create a mock CursorTracer with db_api_integration."""
-        from opentelemetry.instrumentation.dbapi import CursorTracer, DatabaseApiIntegration
+        from opentelemetry.instrumentation.dbapi import (
+            CursorTracer,
+            DatabaseApiIntegration,
+        )
 
         integration = MagicMock(spec=DatabaseApiIntegration)
         integration.database_system = db_system
@@ -98,6 +108,7 @@ class TestCursorTracerPatch:
 
         # Create a real tracer for span creation
         from opentelemetry import trace
+
         integration._tracer = trace.get_tracer("test-tracer")
 
         return CursorTracer(integration)
@@ -147,9 +158,7 @@ class TestCursorTracerPatch:
         cursor = self._make_mock_cursor()
 
         with _mock_httpx_client() as mock:
-            tracer.traced_execution(
-                cursor, cursor.execute, "SELECT * FROM users", None
-            )
+            tracer.traced_execution(cursor, cursor.execute, "SELECT * FROM users", None)
 
             assert mock.post.call_count == 2
             started_payload = mock.post.call_args_list[0].kwargs["json"]
@@ -202,8 +211,9 @@ class TestCursorTracerPatch:
                 tracer.traced_execution(cursor, cursor.execute, query, None)
                 payload = mock.post.call_args_list[0].kwargs["json"]
                 span = payload["spans"][0]
-                assert span["db_operation"] == expected_op, \
-                    f"Expected {expected_op} for query: {query}"
+                assert (
+                    span["db_operation"] == expected_op
+                ), f"Expected {expected_op} for query: {query}"
 
     def test_traced_execution_mysql_system(self):
         """Patched traced_execution should work for mysql db_system."""
@@ -216,9 +226,7 @@ class TestCursorTracerPatch:
         cursor = self._make_mock_cursor()
 
         with _mock_httpx_client() as mock:
-            tracer.traced_execution(
-                cursor, cursor.execute, "SELECT 1", None
-            )
+            tracer.traced_execution(cursor, cursor.execute, "SELECT 1", None)
 
             payload = mock.post.call_args_list[0].kwargs["json"]
             started = payload["spans"][0]
@@ -235,9 +243,7 @@ class TestCursorTracerPatch:
         cursor = self._make_mock_cursor()
 
         with _mock_httpx_client() as mock_client:
-            tracer.traced_execution(
-                cursor, cursor.execute, "SELECT * FROM users", None
-            )
+            tracer.traced_execution(cursor, cursor.execute, "SELECT * FROM users", None)
 
         # API should be called 2 times: started + completed
         assert mock_client.post.call_count == 2
@@ -281,9 +287,7 @@ class TestCursorTracerPatch:
 
         with _mock_httpx_client() as mock:
             with pytest.raises(RuntimeError, match="connection lost"):
-                tracer.traced_execution(
-                    cursor, failing_execute, "SELECT 1", None
-                )
+                tracer.traced_execution(cursor, failing_execute, "SELECT 1", None)
 
             assert mock.post.call_count == 2
             completed_payload = mock.post.call_args_list[1].kwargs["json"]
@@ -296,6 +300,7 @@ class TestCursorTracerPatch:
 # Redis tests (native OTel hooks — call hook functions directly)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestRedisHooks:
     """Tests for redis governance hooks (request_hook / response_hook)."""
 
@@ -303,7 +308,9 @@ class TestRedisHooks:
         """Create a mock Redis instance with connection_pool.connection_kwargs."""
         instance = MagicMock()
         instance.connection_pool.connection_kwargs = {
-            "host": "redis-host", "port": 6379, "db": 2,
+            "host": "redis-host",
+            "port": 6379,
+            "db": 2,
         }
         return instance
 
@@ -367,11 +374,13 @@ class TestRedisHooks:
 # SQLAlchemy tests (SQLite in-memory — real DB)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestSQLAlchemyHooks:
     """Tests for SQLAlchemy governance hooks via before/after_cursor_execute events."""
 
     def _make_engine(self):
         from sqlalchemy import create_engine
+
         return create_engine("sqlite:///:memory:")
 
     def test_select_sends_started_and_completed(self):
@@ -382,9 +391,7 @@ class TestSQLAlchemyHooks:
 
         with _mock_httpx_client() as mock:
             with engine.connect() as conn:
-                conn.execute(
-                    __import__("sqlalchemy").text("SELECT 1")
-                )
+                conn.execute(__import__("sqlalchemy").text("SELECT 1"))
 
             assert mock.post.call_count == 2
             started_payload = mock.post.call_args_list[0].kwargs["json"]
@@ -418,15 +425,12 @@ class TestSQLAlchemyHooks:
 
         with _mock_httpx_client() as mock:
             with engine.connect() as conn:
-                conn.execute(
-                    __import__("sqlalchemy").text("CREATE TABLE t (id INT)")
-                )
-                conn.execute(
-                    __import__("sqlalchemy").text("INSERT INTO t VALUES (1)")
-                )
+                conn.execute(__import__("sqlalchemy").text("CREATE TABLE t (id INT)"))
+                conn.execute(__import__("sqlalchemy").text("INSERT INTO t VALUES (1)"))
 
             insert_calls = [
-                c for c in mock.post.call_args_list
+                c
+                for c in mock.post.call_args_list
                 if c.kwargs["json"]["spans"][0]["db_operation"] == "INSERT"
             ]
             assert len(insert_calls) >= 1
@@ -436,6 +440,7 @@ class TestSQLAlchemyHooks:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Shared helper tests
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestClassifySql:
     """Tests for _classify_sql helper."""
@@ -469,6 +474,7 @@ class TestClassifySql:
 # Cross-cutting governance policy tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestGovernanceDisabled:
     """Tests for governance no-op when not configured or no activity context."""
 
@@ -480,7 +486,11 @@ class TestGovernanceDisabled:
 
         req_hook, resp_hook = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with patch("openbox.hook_governance._get_sync_client") as mock_get:
@@ -497,7 +507,11 @@ class TestGovernanceDisabled:
 
         req_hook, resp_hook = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with patch("openbox.hook_governance._get_sync_client") as mock_get:
@@ -513,7 +527,11 @@ class TestGovernanceFailPolicy:
         _setup_governance(on_api_error="fail_open")
         req_hook, _ = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with _mock_httpx_client(side_effect=ConnectionError("API unavailable")):
@@ -525,7 +543,11 @@ class TestGovernanceFailPolicy:
         _setup_governance(on_api_error="fail_closed")
         req_hook, _ = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with _mock_httpx_client(side_effect=ConnectionError("API unavailable")):
@@ -537,6 +559,7 @@ class TestGovernanceFailPolicy:
 # hook_trigger schema validation
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestHookTriggerSchema:
     """Verify hook_trigger contains all required fields."""
 
@@ -545,7 +568,11 @@ class TestHookTriggerSchema:
         _setup_governance()
         req_hook, _ = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with _mock_httpx_client() as mock:
@@ -554,8 +581,16 @@ class TestHookTriggerSchema:
             payload = mock.post.call_args_list[0].kwargs["json"]
             assert payload["hook_trigger"] is True
             span_data = payload["spans"][0]
-            required = {"hook_type", "stage", "db_system", "db_name", "db_operation",
-                        "db_statement", "server_address", "server_port"}
+            required = {
+                "hook_type",
+                "stage",
+                "db_system",
+                "db_name",
+                "db_operation",
+                "db_statement",
+                "server_address",
+                "server_port",
+            }
             assert required.issubset(span_data.keys())
             assert span_data["hook_type"] == "db_query"
             assert span_data["stage"] == "started"
@@ -565,7 +600,11 @@ class TestHookTriggerSchema:
         _setup_governance()
         req_hook, resp_hook = db_gov.setup_redis_hooks()
         instance = MagicMock()
-        instance.connection_pool.connection_kwargs = {"host": "h", "port": 6379, "db": 0}
+        instance.connection_pool.connection_kwargs = {
+            "host": "h",
+            "port": 6379,
+            "db": 0,
+        }
         span = MagicMock()
 
         with _mock_httpx_client() as mock:
@@ -584,13 +623,20 @@ class TestHookTriggerSchema:
 # pymongo CommandListener tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 class TestPymongoCommandListener:
     """Tests for pymongo governance via CommandListener."""
 
     _next_request_id = 1
 
-    def _make_started_event(self, cmd_name="find", db_name="testdb",
-                            command=None, connection_id=None, request_id=None):
+    def _make_started_event(
+        self,
+        cmd_name="find",
+        db_name="testdb",
+        command=None,
+        connection_id=None,
+        request_id=None,
+    ):
         """Create a mock pymongo CommandStartedEvent."""
         event = MagicMock()
         event.command_name = cmd_name
@@ -603,9 +649,14 @@ class TestPymongoCommandListener:
         event.request_id = request_id
         return event
 
-    def _make_succeeded_event(self, cmd_name="find", db_name="testdb",
-                              duration_micros=1500, connection_id=None,
-                              request_id=None):
+    def _make_succeeded_event(
+        self,
+        cmd_name="find",
+        db_name="testdb",
+        duration_micros=1500,
+        connection_id=None,
+        request_id=None,
+    ):
         """Create a mock pymongo CommandSucceededEvent."""
         event = MagicMock()
         event.command_name = cmd_name
@@ -618,9 +669,15 @@ class TestPymongoCommandListener:
         event.request_id = request_id
         return event
 
-    def _make_failed_event(self, cmd_name="find", db_name="testdb",
-                           duration_micros=500, failure="connection reset",
-                           connection_id=None, request_id=None):
+    def _make_failed_event(
+        self,
+        cmd_name="find",
+        db_name="testdb",
+        duration_micros=500,
+        failure="connection reset",
+        connection_id=None,
+        request_id=None,
+    ):
         """Create a mock pymongo CommandFailedEvent."""
         event = MagicMock()
         event.command_name = cmd_name
@@ -646,8 +703,9 @@ class TestPymongoCommandListener:
         listener = db_gov._pymongo_listener
 
         with _mock_httpx_client() as mock:
-            listener.started(self._make_started_event(
-                cmd_name="insert", db_name="mydb"))
+            listener.started(
+                self._make_started_event(cmd_name="insert", db_name="mydb")
+            )
 
             assert mock.post.call_count == 1
             payload = mock.post.call_args_list[0].kwargs["json"]
@@ -672,21 +730,32 @@ class TestPymongoCommandListener:
 
         with _mock_httpx_client() as mock:
             # Fire started first to store command string
-            listener.started(self._make_started_event(
-                cmd_name="find", command={"find": "users", "filter": {"age": 30}},
-                request_id=req_id))
-            listener.succeeded(self._make_succeeded_event(
-                cmd_name="find", duration_micros=3000, request_id=req_id))
+            listener.started(
+                self._make_started_event(
+                    cmd_name="find",
+                    command={"find": "users", "filter": {"age": 30}},
+                    request_id=req_id,
+                )
+            )
+            listener.succeeded(
+                self._make_succeeded_event(
+                    cmd_name="find", duration_micros=3000, request_id=req_id
+                )
+            )
 
             assert mock.post.call_count == 2
             started_payload = mock.post.call_args_list[0].kwargs["json"]
             completed_payload = mock.post.call_args_list[1].kwargs["json"]
             # db_statement should be consistent between started and completed
-            assert started_payload["spans"][0]["db_statement"] == \
-                completed_payload["spans"][0]["db_statement"]
+            assert (
+                started_payload["spans"][0]["db_statement"]
+                == completed_payload["spans"][0]["db_statement"]
+            )
             assert completed_payload["spans"][0]["stage"] == "completed"
             assert completed_payload["spans"][0]["db_system"] == "mongodb"
-            assert completed_payload["spans"][0]["duration_ns"] == 3_000_000  # 3ms in nanoseconds
+            assert (
+                completed_payload["spans"][0]["duration_ns"] == 3_000_000
+            )  # 3ms in nanoseconds
             assert completed_payload["spans"][0]["error"] is None
 
     def test_failed_sends_completed_with_error_and_consistent_statement(self):
@@ -700,18 +769,24 @@ class TestPymongoCommandListener:
         req_id = 99
 
         with _mock_httpx_client() as mock:
-            listener.started(self._make_started_event(
-                cmd_name="update", command={"update": "users"},
-                request_id=req_id))
-            listener.failed(self._make_failed_event(
-                cmd_name="update", failure="connection timeout",
-                request_id=req_id))
+            listener.started(
+                self._make_started_event(
+                    cmd_name="update", command={"update": "users"}, request_id=req_id
+                )
+            )
+            listener.failed(
+                self._make_failed_event(
+                    cmd_name="update", failure="connection timeout", request_id=req_id
+                )
+            )
 
             assert mock.post.call_count == 2
             started_payload = mock.post.call_args_list[0].kwargs["json"]
             completed_payload = mock.post.call_args_list[1].kwargs["json"]
-            assert started_payload["spans"][0]["db_statement"] == \
-                completed_payload["spans"][0]["db_statement"]
+            assert (
+                started_payload["spans"][0]["db_statement"]
+                == completed_payload["spans"][0]["db_statement"]
+            )
             assert completed_payload["spans"][0]["stage"] == "completed"
             assert completed_payload["spans"][0]["error"] == "connection timeout"
 
@@ -746,10 +821,12 @@ class TestPymongoCommandListener:
         req_id = 200
 
         with _mock_httpx_client() as mock:
-            listener.started(self._make_started_event(
-                cmd_name="endSessions", request_id=req_id))
-            listener.succeeded(self._make_succeeded_event(
-                cmd_name="endSessions", request_id=req_id))
+            listener.started(
+                self._make_started_event(cmd_name="endSessions", request_id=req_id)
+            )
+            listener.succeeded(
+                self._make_succeeded_event(cmd_name="endSessions", request_id=req_id)
+            )
             # Both should fire — wrapt doesn't cover endSessions
             assert mock.post.call_count == 2
 
@@ -776,6 +853,7 @@ class TestPymongoCommandListener:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cleanup tests
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 class TestUninstrument:
     """Tests for uninstrument_all cleanup."""
