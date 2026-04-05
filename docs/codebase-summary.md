@@ -22,6 +22,7 @@ openbox-temporal-sdk-python/
 │   ├── types.py               # Type definitions (workflow-safe)
 │   ├── config.py              # Configuration and initialization
 │   ├── worker.py              # Worker factory function
+│   ├── plugin.py              # OpenBoxPlugin(SimplePlugin) for Temporal AI Partner Ecosystem
 │   ├── errors.py              # Unified exception hierarchy
 │   ├── client.py              # GovernanceClient (centralized HTTP client)
 │   ├── hitl.py                # HITL approval handling

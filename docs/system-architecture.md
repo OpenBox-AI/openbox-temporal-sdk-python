@@ -89,6 +89,39 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
 
 ---
 
+## Plugin Integration
+
+### OpenBoxPlugin (SimplePlugin)
+
+**File:** `openbox/plugin.py`
+
+`OpenBoxPlugin` extends Temporal's `SimplePlugin` base class, providing a drop-in integration for the AI Partner Ecosystem. It composes all existing SDK components (interceptors, OTel setup, governance activities) without modifying them.
+
+```
+Worker(client, task_queue, workflows, activities,
+       plugins=[OpenBoxPlugin(openbox_url=..., openbox_api_key=...)])
+
+OpenBoxPlugin.__init__():
+  → validate_api_key()                        # config.py
+  → WorkflowSpanProcessor()                   # span_processor.py
+  → setup_opentelemetry_for_governance()       # otel_setup.py
+  → GovernanceInterceptor()                    # workflow_interceptor.py
+  → ActivityGovernanceInterceptor()            # activity_interceptor.py
+  → SimplePlugin.__init__(interceptors, activities, workflow_runner)
+
+OpenBoxPlugin.configure_worker(config):
+  → set_temporal_client(config["client"])       # activities.py
+  → super().configure_worker(config)            # appends interceptors, activities
+```
+
+**Key design choices:**
+- Composition-only — no changes to existing modules
+- Sandbox passthrough for `opentelemetry` via `workflow_runner` callback
+- `configure_worker()` captures Temporal client ref for HALT terminate calls
+- Plugin name: `"openbox.OpenBoxPlugin"` per Temporal's naming standard
+
+---
+
 ## Component Architecture
 
 ### 1. Interceptor Layer
