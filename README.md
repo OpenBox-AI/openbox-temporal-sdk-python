@@ -20,13 +20,62 @@ pip install openbox-temporal-sdk-python
 ```
 
 **Requirements:**
-- Python 3.9+
-- Temporal SDK 1.8+
+- Python 3.11+
+- Temporal SDK 1.24+ (1.8+ for factory-only usage)
 - OpenTelemetry API/SDK 1.38.0+
 
 ---
 
-## Quick Start
+## Plugin Integration (Recommended)
+
+Use `OpenBoxPlugin` for drop-in integration with Temporal Workers:
+
+```python
+import os
+from temporalio.worker import Worker
+from openbox.plugin import OpenBoxPlugin
+
+worker = Worker(
+    client,
+    task_queue="my-task-queue",
+    workflows=[MyWorkflow],
+    activities=[my_activity],
+    plugins=[
+        OpenBoxPlugin(
+            openbox_url=os.getenv("OPENBOX_URL"),
+            openbox_api_key=os.getenv("OPENBOX_API_KEY"),
+        )
+    ],
+)
+
+await worker.run()
+```
+
+The plugin automatically configures governance interceptors, OTel instrumentation,
+sandbox passthrough, and the `send_governance_event` activity.
+
+### Composing with Other Plugins
+
+```python
+from temporalio.contrib.opentelemetry import OpenTelemetryPlugin
+
+worker = Worker(
+    client,
+    task_queue="my-task-queue",
+    workflows=[MyWorkflow],
+    activities=[my_activity],
+    plugins=[
+        OpenTelemetryPlugin(),
+        OpenBoxPlugin(openbox_url=..., openbox_api_key=...),
+    ],
+)
+```
+
+> **Requires** `temporalio >= 1.24.0`. For older versions, use `create_openbox_worker()` below.
+
+---
+
+## Quick Start (Factory)
 
 Use the `create_openbox_worker()` factory for simple integration:
 
@@ -439,13 +488,13 @@ worker = Worker(
 
 ## Testing
 
-The SDK includes comprehensive test coverage with 13 test files:
+The SDK includes comprehensive test coverage with 15 test files:
 
 ```bash
 pytest tests/
 ```
 
-Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_db_governance_hooks.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
+Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_db_governance_hooks.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_plugin.py`, `test_plugin_integration.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
 
 ---
 
@@ -462,4 +511,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** 1.1.0 | **Last Updated:** 2026-03-09
+**Version:** 1.2.0 | **Last Updated:** 2026-04-05
