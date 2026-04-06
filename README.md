@@ -21,7 +21,7 @@ pip install openbox-temporal-sdk-python
 
 **Requirements:**
 - Python 3.11+
-- Temporal SDK 1.24+ (1.8+ for factory-only usage)
+- Temporal SDK 1.23+ (1.8+ for factory-only usage)
 - OpenTelemetry API/SDK 1.38.0+
 
 ---
@@ -71,7 +71,7 @@ worker = Worker(
 )
 ```
 
-> **Requires** `temporalio >= 1.24.0`. For older versions, use `create_openbox_worker()` below.
+> **Requires** `temporalio >= 1.23.0`. For older versions, use `create_openbox_worker()` below.
 
 ---
 
