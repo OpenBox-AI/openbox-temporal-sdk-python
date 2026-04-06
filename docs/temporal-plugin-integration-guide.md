@@ -2,7 +2,7 @@
 
 **For:** Temporal AI Partner Ecosystem
 **Version:** 1.2.0
-**Requires:** `temporalio >= 1.24.0`
+**Requires:** `temporalio >= 1.23.0`
 
 ---
 

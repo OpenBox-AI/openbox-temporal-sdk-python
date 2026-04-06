@@ -21,7 +21,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "temporalio>=1.24.0,<2",
+    "temporalio>=1.23.0,<2",
     "httpx>=0.28.0,<1",
     # OpenTelemetry core
     "opentelemetry-api>=1.38.0,<1.40.0",
