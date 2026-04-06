@@ -34,6 +34,7 @@ _api_url: str = ""
 _api_key: str = ""
 _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
+_max_body_size: Optional[int] = None
 _span_processor: Optional["WorkflowSpanProcessor"] = None
 _cached_auth_headers: Optional[dict] = None
 
@@ -49,6 +50,7 @@ def configure(
     *,
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
+    max_body_size: Optional[int] = None,
 ) -> None:
     """Set governance config. Called once by setup_opentelemetry_for_governance().
 
@@ -58,12 +60,14 @@ def configure(
         span_processor: WorkflowSpanProcessor for activity context lookup
         api_timeout: Timeout for governance API calls (seconds)
         on_api_error: Error policy — "fail_open" or "fail_closed"
+        max_body_size: Max chars for HTTP body capture (None = no limit)
     """
-    global _api_url, _api_key, _api_timeout, _on_api_error, _span_processor, _sync_client, _async_client, _cached_auth_headers
+    global _api_url, _api_key, _api_timeout, _on_api_error, _max_body_size, _span_processor, _sync_client, _async_client, _cached_auth_headers
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
     _on_api_error = on_api_error
+    _max_body_size = max_body_size
     _span_processor = span_processor
     # Cache auth headers (immutable after configure)
     _cached_auth_headers = build_auth_headers(api_key)
@@ -97,6 +101,11 @@ def is_configured() -> bool:
 def get_span_processor() -> "WorkflowSpanProcessor | None":
     """Return the configured span processor (or None)."""
     return _span_processor
+
+
+def get_max_body_size() -> Optional[int]:
+    """Return max body size for HTTP capture (None = no limit)."""
+    return _max_body_size
 
 
 def extract_span_context(span) -> tuple:

@@ -84,6 +84,7 @@ def setup_opentelemetry_for_governance(
     sqlalchemy_engine: Optional[Any] = None,
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
+    max_body_size: Optional[int] = None,
 ) -> None:
     """
     Setup OpenTelemetry instrumentors with body capture hooks.
@@ -121,6 +122,7 @@ def setup_opentelemetry_for_governance(
         span_processor,
         api_timeout=api_timeout,
         on_api_error=on_api_error,
+        max_body_size=max_body_size,
     )
     _db_gov.configure(span_processor)
 

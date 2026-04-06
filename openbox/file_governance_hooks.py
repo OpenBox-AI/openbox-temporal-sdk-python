@@ -27,7 +27,6 @@ def _build_file_span_data(
     stage: str,
     error: Optional[str] = None,
     duration_ms: Optional[float] = None,
-    data: Optional[str] = None,
     bytes_read: Optional[int] = None,
     bytes_written: Optional[int] = None,
     lines_count: Optional[int] = None,
@@ -72,8 +71,6 @@ def _build_file_span_data(
     }
 
     # Only include optional fields if they have values
-    if data is not None:
-        result["data"] = data
     if bytes_read is not None:
         result["bytes_read"] = bytes_read
     if bytes_written is not None:
@@ -185,7 +182,7 @@ def setup_file_io_instrumentation() -> bool:
                 span.set_attribute("file.bytes", bytes_count)
 
                 self._evaluate_governance(
-                    "read", "completed", span=span, data=data, bytes_read=bytes_count
+                    "read", "completed", span=span, bytes_read=bytes_count
                 )
                 return data
 
@@ -205,7 +202,6 @@ def setup_file_io_instrumentation() -> bool:
                     "readline",
                     "completed",
                     span=span,
-                    data=data,
                     bytes_read=bytes_count,
                 )
                 return data
@@ -227,7 +223,6 @@ def setup_file_io_instrumentation() -> bool:
                     "readlines",
                     "completed",
                     span=span,
-                    data=data,
                     bytes_read=bytes_count,
                     lines_count=len(data) if data else 0,
                 )
@@ -249,7 +244,6 @@ def setup_file_io_instrumentation() -> bool:
                     "write",
                     "completed",
                     span=span,
-                    data=data,
                     bytes_written=bytes_count,
                 )
                 return result
@@ -271,7 +265,6 @@ def setup_file_io_instrumentation() -> bool:
                     "writelines",
                     "completed",
                     span=span,
-                    data=lines,
                     bytes_written=bytes_count,
                     lines_count=len(lines) if lines else 0,
                 )
