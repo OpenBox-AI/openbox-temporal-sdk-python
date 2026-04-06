@@ -371,8 +371,8 @@ class TestFileReadGovernance:
         finally:
             os.unlink(tmp_path)
 
-    def test_read_completed_contains_data(self):
-        """read() completed trigger should include data and bytes_read."""
+    def test_read_completed_contains_bytes_not_data(self):
+        """read() completed trigger should include bytes_read but not file data."""
         tmp_path = _make_temp_file(b"payload content")
         _setup_governance()
 
@@ -389,7 +389,7 @@ class TestFileReadGovernance:
                 ]
                 assert len(read_completed) == 1
                 trigger = read_completed[0].kwargs["json"]["spans"][0]
-                assert trigger["data"] == "payload content"
+                assert "data" not in trigger
                 assert trigger["bytes_read"] == len("payload content")
         finally:
             os.unlink(tmp_path)
@@ -474,7 +474,7 @@ class TestFileWriteGovernance:
                 ]
                 assert len(write_completed) == 1
                 trigger = write_completed[0].kwargs["json"]["spans"][0]
-                assert trigger["data"] == "output data"
+                assert "data" not in trigger
                 assert trigger["bytes_written"] == len("output data")
         finally:
             os.unlink(tmp_path)
@@ -505,7 +505,7 @@ class TestFileReadlineGovernance:
                 assert (
                     readline_calls[1].kwargs["json"]["spans"][0]["stage"] == "completed"
                 )
-                assert readline_calls[1].kwargs["json"]["spans"][0]["data"] == "line1\n"
+                assert "data" not in readline_calls[1].kwargs["json"]["spans"][0]
         finally:
             os.unlink(tmp_path)
 
@@ -535,7 +535,7 @@ class TestFileReadlinesGovernance:
                 completed = readlines_calls[1].kwargs["json"]["spans"][0]
                 assert completed["stage"] == "completed"
                 assert completed["lines_count"] == 3
-                assert completed["data"] == ["a\n", "b\n", "c\n"]
+                assert "data" not in completed
         finally:
             os.unlink(tmp_path)
 
@@ -564,7 +564,7 @@ class TestFileWritelinesGovernance:
                 completed = wl_calls[1].kwargs["json"]["spans"][0]
                 assert completed["stage"] == "completed"
                 assert completed["lines_count"] == 2
-                assert completed["data"] == ["x\n", "y\n"]
+                assert "data" not in completed
                 assert completed["bytes_written"] == 4
         finally:
             os.unlink(tmp_path)
@@ -633,14 +633,14 @@ class TestFileGovernanceCompletedData:
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
                 assert (
-                    read_completed[0].kwargs["json"]["spans"][0]["data"]
-                    == "verification"
+                    "data"
+                    not in read_completed[0].kwargs["json"]["spans"][0]
                 )
         finally:
             os.unlink(tmp_path)
 
-    def test_write_completed_has_data_field(self):
-        """write completed should have 'data' with the content written."""
+    def test_write_completed_has_no_data_field(self):
+        """write completed should NOT include file content data."""
         tmp_path = _make_temp_file()
         _setup_governance()
 
@@ -656,8 +656,8 @@ class TestFileGovernanceCompletedData:
                     and c.kwargs["json"]["spans"][0]["stage"] == "completed"
                 ]
                 assert (
-                    write_completed[0].kwargs["json"]["spans"][0]["data"]
-                    == "output_data"
+                    "data"
+                    not in write_completed[0].kwargs["json"]["spans"][0]
                 )
         finally:
             os.unlink(tmp_path)
