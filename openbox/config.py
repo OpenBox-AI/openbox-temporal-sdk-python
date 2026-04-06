@@ -89,8 +89,8 @@ class GovernanceConfig:
     # Timeout for governance API calls (seconds)
     api_timeout: float = 30.0
 
-    # Maximum body size to capture (None = no limit)
-    max_body_size: Optional[int] = None
+    # Maximum body size to capture in chars (default: 64KB)
+    max_body_size: int = 65536
 
     # Send WorkflowStarted event (can disable for performance)
     send_start_event: bool = True
