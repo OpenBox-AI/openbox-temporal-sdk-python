@@ -188,6 +188,7 @@ def create_openbox_worker(
         sqlalchemy_engine=sqlalchemy_engine,
         api_timeout=governance_timeout,
         on_api_error=governance_policy,
+        max_body_size=65536,
     )
 
     # 4. Create governance config

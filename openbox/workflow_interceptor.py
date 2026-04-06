@@ -231,11 +231,12 @@ class GovernanceInterceptor(Interceptor):
                     if cause:
                         error["cause"] = {
                             "type": type(cause).__name__,
-                            "message": str(cause),
+                            "message": str(cause)[:500],
                         }
-                        # Check for ApplicationError details (e.g., GovernanceStop)
-                        if hasattr(cause, "type") and cause.type:
-                            error["cause"]["error_type"] = cause.type
+                        # ApplicationError.type is a simple string like "GovernanceHalt"
+                        cause_type = getattr(cause, "type", None)
+                        if isinstance(cause_type, str) and len(cause_type) < 200:
+                            error["cause"]["error_type"] = cause_type
                         if hasattr(cause, "non_retryable"):
                             error["cause"]["non_retryable"] = cause.non_retryable
 
@@ -246,10 +247,11 @@ class GovernanceInterceptor(Interceptor):
                         if deeper_cause:
                             error["root_cause"] = {
                                 "type": type(deeper_cause).__name__,
-                                "message": str(deeper_cause),
+                                "message": str(deeper_cause)[:500],
                             }
-                            if hasattr(deeper_cause, "type") and deeper_cause.type:
-                                error["root_cause"]["error_type"] = deeper_cause.type
+                            dc_type = getattr(deeper_cause, "type", None)
+                            if isinstance(dc_type, str) and len(dc_type) < 200:
+                                error["root_cause"]["error_type"] = dc_type
 
                     # WorkflowFailed event
                     if workflow.patched("openbox-v2-failed"):
