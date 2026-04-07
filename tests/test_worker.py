@@ -139,6 +139,7 @@ class TestCreateOpenboxWorkerWithConfig:
             api_key="obx_test_key123",
             api_timeout=30.0,
             on_api_error="fail_open",
+            max_body_size=65536,
         )
 
     @patch("openbox.worker.Worker")

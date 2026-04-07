@@ -72,6 +72,13 @@ def _is_text_content_type(content_type: Optional[str]) -> bool:
     return any(content_type.startswith(t) for t in _TEXT_CONTENT_TYPES)
 
 
+def _truncate_body(body: Optional[str], max_size: Optional[int]) -> Optional[str]:
+    """Truncate body to max_size chars if set."""
+    if body and max_size and len(body) > max_size:
+        return body[:max_size] + f"...[truncated, {len(body)} total chars]"
+    return body
+
+
 def _build_http_span_data(
     span,
     http_method: str,
@@ -89,6 +96,11 @@ def _build_http_span_data(
     attributes: OTel-original only. All custom data at root level.
     """
     import time as _time
+
+    # Enforce max_body_size from hook_governance config
+    max_size = _hook_gov.get_max_body_size()
+    request_body = _truncate_body(request_body, max_size)
+    response_body = _truncate_body(response_body, max_size)
 
     span_id_hex, trace_id_hex, parent_span_id = _hook_gov.extract_span_context(span)
     attrs = (

@@ -75,9 +75,9 @@ class TestGovernanceConfigDefaults:
         assert config.enforce_task_queues is None
 
     def test_default_max_body_size(self):
-        """Test default max_body_size is None (no limit)."""
+        """Test default max_body_size is 64KB."""
         config = GovernanceConfig()
-        assert config.max_body_size is None
+        assert config.max_body_size == 65536
 
     def test_default_skip_activity_types_includes_governance_event(self):
         """Test default skip_activity_types includes 'send_governance_event'."""
