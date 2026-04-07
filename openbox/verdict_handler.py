@@ -42,6 +42,11 @@ class VerdictEnforcementResult:
         self.blocked = blocked
 
 
+def _default_guardrails_reason(input_type: str) -> str:
+    label = "output " if input_type == "activity_output" else ""
+    return f"Guardrails {label}validation failed"
+
+
 def enforce_verdict(
     response: GovernanceVerdictResponse,
     context: VerdictContext,
@@ -80,11 +85,9 @@ def enforce_verdict(
     #    guardrails failure is never silently swallowed by an approval flow
     if response.guardrails_result and not response.guardrails_result.validation_passed:
         reasons = response.guardrails_result.get_reason_strings()
-        if not reasons:
-            gr_type = response.guardrails_result.input_type
-            label = "output " if gr_type == "activity_output" else ""
-            reasons = [f"Guardrails {label}validation failed"]
-        raise GuardrailsValidationError(reasons)
+        raise GuardrailsValidationError(
+            reasons or [_default_guardrails_reason(response.guardrails_result.input_type)]
+        )
 
     # 4. REQUIRE_APPROVAL — caller sets pending_approval flag and raises retryable error
     if verdict.requires_approval():
