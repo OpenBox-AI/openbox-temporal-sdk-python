@@ -32,7 +32,7 @@ def _build_auth_headers(api_key: str) -> dict:
 
 
 # API key format pattern (obx_live_... or obx_test_...)
-API_KEY_PATTERN = re.compile(r"^obx_(live|test)_[a-zA-Z0-9_]+$")
+API_KEY_PATTERN = re.compile(r"^obx_(live|test)_\w+$")
 
 
 # Re-export from errors.py for backward compatibility
