@@ -232,6 +232,54 @@ def setup_opentelemetry_for_governance(
     )
 
 
+def _instrument_sqlalchemy(
+    db_libraries: Optional[Set[str]],
+    sqlalchemy_engine: Optional[Any],
+    instrumented: List[str],
+) -> None:
+    """Handle sqlalchemy instrumentation with optional engine validation."""
+    if (
+        sqlalchemy_engine is not None
+        and db_libraries is not None
+        and "sqlalchemy" not in db_libraries
+    ):
+        logger.warning(
+            "sqlalchemy_engine provided but 'sqlalchemy' not in db_libraries; skipping"
+        )
+        return
+
+    if db_libraries is not None and "sqlalchemy" not in db_libraries:
+        return
+
+    try:
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+
+        if sqlalchemy_engine is not None:
+            _validate_sqlalchemy_engine(sqlalchemy_engine)
+            _db_gov.setup_sqlalchemy_hooks(sqlalchemy_engine)
+            SQLAlchemyInstrumentor().instrument(engine=sqlalchemy_engine)
+            logger.info("Instrumented: sqlalchemy (existing engine)")
+        else:
+            SQLAlchemyInstrumentor().instrument()
+            logger.info("Instrumented: sqlalchemy (future engines)")
+        instrumented.append("sqlalchemy")
+    except ImportError:
+        logger.debug("sqlalchemy instrumentation not available")
+
+
+def _validate_sqlalchemy_engine(engine: Any) -> None:
+    """Validate that engine is a real SQLAlchemy Engine instance."""
+    try:
+        from sqlalchemy.engine import Engine as _SAEngine
+    except ImportError:
+        raise TypeError("sqlalchemy_engine provided but sqlalchemy is not installed")
+    if not isinstance(engine, _SAEngine):
+        raise TypeError(
+            f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "
+            f"got {type(engine).__name__}"
+        )
+
+
 def setup_database_instrumentation(
     db_libraries: Optional[Set[str]] = None,
     sqlalchemy_engine: Optional[Any] = None,
@@ -263,126 +311,43 @@ def setup_database_instrumentation(
     """
     instrumented = []
 
-    # ── pymongo CommandListener first (must register before MongoClient creation) ──
+    # pymongo CommandListener must register before MongoClient creation
     if db_libraries is None or "pymongo" in db_libraries:
         _db_gov.setup_pymongo_hooks()
 
-    # ── OTel dbapi instrumentors (governance via CursorTracer patch below) ──
-    if db_libraries is None or "psycopg2" in db_libraries:
+    # Standard OTel instrumentors (governance via CursorTracer patch below)
+    _INSTRUMENTORS = [
+        ("psycopg2", "opentelemetry.instrumentation.psycopg2", "Psycopg2Instrumentor"),
+        ("asyncpg", "opentelemetry.instrumentation.asyncpg", "AsyncPGInstrumentor"),
+        ("mysql", "opentelemetry.instrumentation.mysql", "MySQLInstrumentor"),
+        ("pymysql", "opentelemetry.instrumentation.pymysql", "PyMySQLInstrumentor"),
+        ("sqlite3", "opentelemetry.instrumentation.sqlite3", "SQLite3Instrumentor"),
+        ("pymongo", "opentelemetry.instrumentation.pymongo", "PymongoInstrumentor"),
+    ]
+    for lib_name, module_path, class_name in _INSTRUMENTORS:
+        if db_libraries is not None and lib_name not in db_libraries:
+            continue
         try:
-            from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
+            mod = __import__(module_path, fromlist=[class_name])
+            getattr(mod, class_name)().instrument()
+            instrumented.append(lib_name)
+            logger.info(f"Instrumented: {lib_name}")
+        except (ImportError, Exception):
+            logger.debug(f"{lib_name} OTel instrumentation not available")
 
-            Psycopg2Instrumentor().instrument()
-            instrumented.append("psycopg2")
-            logger.info("Instrumented: psycopg2")
-        except ImportError:
-            logger.debug("psycopg2 OTel instrumentation not available")
-
-    if db_libraries is None or "asyncpg" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
-
-            AsyncPGInstrumentor().instrument()
-            instrumented.append("asyncpg")
-            logger.info("Instrumented: asyncpg")
-        except ImportError:
-            logger.debug("asyncpg OTel instrumentation not available")
-
-    if db_libraries is None or "mysql" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.mysql import MySQLInstrumentor
-
-            MySQLInstrumentor().instrument()
-            instrumented.append("mysql")
-            logger.info("Instrumented: mysql")
-        except ImportError:
-            logger.debug("mysql OTel instrumentation not available")
-
-    if db_libraries is None or "pymysql" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
-
-            PyMySQLInstrumentor().instrument()
-            instrumented.append("pymysql")
-            logger.info("Instrumented: pymysql")
-        except ImportError:
-            logger.debug("pymysql OTel instrumentation not available")
-
-    if db_libraries is None or "sqlite3" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
-
-            SQLite3Instrumentor().instrument()
-            instrumented.append("sqlite3")
-            logger.info("Instrumented: sqlite3")
-        except ImportError:
-            logger.debug("sqlite3 OTel instrumentation not available")
-
-    # pymongo OTel (CommandListener already registered above)
-    if db_libraries is None or "pymongo" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
-
-            PymongoInstrumentor().instrument()
-            instrumented.append("pymongo")
-            logger.info("Instrumented: pymongo")
-        except ImportError:
-            logger.debug("pymongo OTel instrumentation not available")
-
-    # redis — pass governance hooks to OTel instrumentor (native support)
+    # redis — pass governance hooks to OTel instrumentor (native hook support)
     if db_libraries is None or "redis" in db_libraries:
         try:
             from opentelemetry.instrumentation.redis import RedisInstrumentor
-
             req_hook, resp_hook = _db_gov.setup_redis_hooks()
-            RedisInstrumentor().instrument(
-                request_hook=req_hook,
-                response_hook=resp_hook,
-            )
+            RedisInstrumentor().instrument(request_hook=req_hook, response_hook=resp_hook)
             instrumented.append("redis")
             logger.info("Instrumented: redis")
-        except ImportError:
+        except Exception:
             logger.debug("redis instrumentation not available")
 
-    # sqlalchemy (ORM)
-    if (
-        sqlalchemy_engine is not None
-        and db_libraries is not None
-        and "sqlalchemy" not in db_libraries
-    ):
-        logger.warning(
-            "sqlalchemy_engine was provided but 'sqlalchemy' is not in db_libraries; "
-            "engine will not be instrumented"
-        )
-    if db_libraries is None or "sqlalchemy" in db_libraries:
-        try:
-            from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-
-            if sqlalchemy_engine is not None:
-                # Validate engine type before passing to instrumentor
-                try:
-                    from sqlalchemy.engine import Engine as _SAEngine
-                except ImportError:
-                    raise TypeError(
-                        "sqlalchemy_engine was provided but sqlalchemy is not installed"
-                    )
-                if not isinstance(sqlalchemy_engine, _SAEngine):
-                    raise TypeError(
-                        f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "
-                        f"got {type(sqlalchemy_engine).__name__}"
-                    )
-                # Governance hooks on engine events
-                _db_gov.setup_sqlalchemy_hooks(sqlalchemy_engine)
-                # Instrument the existing engine directly (registers event listeners)
-                SQLAlchemyInstrumentor().instrument(engine=sqlalchemy_engine)
-                logger.info("Instrumented: sqlalchemy (existing engine)")
-            else:
-                # Patch create_engine() for future engines only
-                SQLAlchemyInstrumentor().instrument()
-                logger.info("Instrumented: sqlalchemy (future engines)")
-            instrumented.append("sqlalchemy")
-        except ImportError:
-            logger.debug("sqlalchemy instrumentation not available")
+    # sqlalchemy — special handling for existing engines
+    _instrument_sqlalchemy(db_libraries, sqlalchemy_engine, instrumented)
 
     # ── Governance hooks for dbapi libs (must be AFTER instrumentors) ──
     # OTel dbapi instrumentors silently discard request_hook/response_hook kwargs.
