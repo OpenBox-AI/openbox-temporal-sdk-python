@@ -845,7 +845,7 @@ def _urllib3_response_hook(span, pool, response) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _urllib_request_hook(span, request) -> None:
+def _urllib_request_hook(_span, request) -> None:
     """Hook called before urllib sends a request."""
     if _otel._span_processor is None:
         return
