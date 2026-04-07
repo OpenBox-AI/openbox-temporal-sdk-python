@@ -31,6 +31,57 @@ from temporalio.worker import (
 from .types import Verdict
 
 
+def _safe_error_type(exc) -> Optional[str]:
+    """Extract error type string from an exception, sanitized for JSON."""
+    t = getattr(exc, "type", None)
+    if isinstance(t, str) and len(t) < 200:
+        return t
+    return None
+
+
+def _extract_cause_info(exc) -> Optional[dict]:
+    """Extract cause info dict from an exception's cause chain."""
+    cause = getattr(exc, "cause", None) or getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if not cause:
+        return None
+
+    info = {"type": type(cause).__name__, "message": str(cause)[:500]}
+    cause_type = _safe_error_type(cause)
+    if cause_type:
+        info["error_type"] = cause_type
+    if hasattr(cause, "non_retryable"):
+        info["non_retryable"] = cause.non_retryable
+    return info
+
+
+def _extract_root_cause_info(exc) -> Optional[dict]:
+    """Extract root cause info from an exception's deeper cause chain."""
+    cause = getattr(exc, "cause", None) or getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if not cause:
+        return None
+    deeper = getattr(cause, "cause", None) or getattr(cause, "__cause__", None)
+    if not deeper:
+        return None
+
+    info = {"type": type(deeper).__name__, "message": str(deeper)[:500]}
+    dc_type = _safe_error_type(deeper)
+    if dc_type:
+        info["error_type"] = dc_type
+    return info
+
+
+def _build_error_dict(exc: Exception) -> dict:
+    """Build error dict with cause chain for WorkflowFailed payload."""
+    error = {"type": type(exc).__name__, "message": str(exc)}
+    cause_info = _extract_cause_info(exc)
+    if cause_info:
+        error["cause"] = cause_info
+    root_info = _extract_root_cause_info(exc)
+    if root_info:
+        error["root_cause"] = root_info
+    return error
+
+
 def _serialize_value(value: Any) -> Any:
     """Convert a value to JSON-serializable format for workflow result.
 
@@ -219,41 +270,8 @@ class GovernanceInterceptor(Interceptor):
 
                     return result
                 except Exception as e:
-                    # Extract error details, including nested cause for ActivityError
-                    error = {
-                        "type": type(e).__name__,
-                        "message": str(e),
-                    }
+                    error = _build_error_dict(e)
 
-                    # Get cause using Temporal's .cause property or Python's __cause__/__context__
-                    cause = getattr(e, "cause", None) or e.__cause__ or e.__context__
-
-                    if cause:
-                        error["cause"] = {
-                            "type": type(cause).__name__,
-                            "message": str(cause)[:500],
-                        }
-                        # ApplicationError.type is a simple string like "GovernanceHalt"
-                        cause_type = getattr(cause, "type", None)
-                        if isinstance(cause_type, str) and len(cause_type) < 200:
-                            error["cause"]["error_type"] = cause_type
-                        if hasattr(cause, "non_retryable"):
-                            error["cause"]["non_retryable"] = cause.non_retryable
-
-                        # Go deeper if there's another cause
-                        deeper_cause = getattr(cause, "cause", None) or getattr(
-                            cause, "__cause__", None
-                        )
-                        if deeper_cause:
-                            error["root_cause"] = {
-                                "type": type(deeper_cause).__name__,
-                                "message": str(deeper_cause)[:500],
-                            }
-                            dc_type = getattr(deeper_cause, "type", None)
-                            if isinstance(dc_type, str) and len(dc_type) < 200:
-                                error["root_cause"]["error_type"] = dc_type
-
-                    # WorkflowFailed event
                     if workflow.patched("openbox-v2-failed"):
                         await _send_governance_event(
                             api_url,
