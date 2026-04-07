@@ -429,7 +429,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             and governance_verdict.guardrails_result.input_type == "activity_input"
         ):
             redacted = governance_verdict.guardrails_result.redacted_input
-            activity.logger.info(f"Applying guardrails redaction to activity input")
+            activity.logger.info("Applying guardrails redaction to activity input")
             activity.logger.debug(f"Redacted input type: {type(redacted).__name__}")
 
             # Normalize redacted_input to a list (matching original args structure)
@@ -465,7 +465,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             )
                             # Verify the update
                             if hasattr(original_arg, "prompt"):
-                                activity.logger.debug(f"After update, prompt redacted")
+                                activity.logger.debug("After update, prompt redacted")
                         else:
                             # Non-dataclass: replace directly
                             original_args[i] = redacted_item
@@ -475,7 +475,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
                 # Update activity_input for the completed event (shows redacted values)
                 activity_input = _serialize_value(original_args)
-                activity.logger.info(f"Updated activity_input for completed event")
+                activity.logger.info("Updated activity_input for completed event")
             else:
                 activity.logger.warning(
                     f"Unexpected redacted_input type: {type(redacted).__name__}, expected list or dict"
@@ -486,7 +486,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             first_arg = input.args[0]
             if hasattr(first_arg, "prompt"):
                 activity.logger.debug(
-                    f"BEFORE ACTIVITY EXECUTION - prompt field present"
+                    "BEFORE ACTIVITY EXECUTION - prompt field present"
                 )
 
         status = "completed"
@@ -587,7 +587,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 completed_verdict = None
                 if was_aborted:
                     activity.logger.info(
-                        f"Skipping ActivityCompleted event — activity aborted by hook governance"
+                        "Skipping ActivityCompleted event — activity aborted by hook governance"
                     )
                 else:
                     completed_verdict = await self._send_activity_event(
@@ -655,7 +655,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 ):
                     redacted_output = completed_verdict.guardrails_result.redacted_input
                     activity.logger.info(
-                        f"Applying guardrails redaction to activity output"
+                        "Applying guardrails redaction to activity output"
                     )
 
                     if redacted_output is not None:
@@ -673,7 +673,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                             # Replace result directly (dict, primitive, etc.)
                             result = redacted_output
                             activity.logger.info(
-                                f"Replaced activity output with redacted value"
+                                "Replaced activity output with redacted value"
                             )
 
         return result
