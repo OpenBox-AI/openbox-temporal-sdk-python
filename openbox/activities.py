@@ -97,35 +97,66 @@ def raise_governance_block(
     )
 
 
+def _build_verdict_result(verdict: Verdict, reason, policy_id, risk_score) -> dict:
+    """Build a success result dict from a governance verdict."""
+    return {
+        "success": True,
+        "verdict": verdict.value,
+        "action": verdict.value,  # backward compat
+        "reason": reason,
+        "policy_id": policy_id,
+        "risk_score": risk_score,
+    }
+
+
+async def _handle_stop_verdict(
+    verdict: Verdict, reason, policy_id, risk_score, event_type, event_payload
+) -> Optional[dict]:
+    """Handle BLOCK/HALT verdicts. Returns result for signals, raises for others."""
+    logger.info(
+        f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})"
+    )
+
+    # SignalReceived: return result instead of raising
+    if event_type == "SignalReceived":
+        return _build_verdict_result(verdict, reason, policy_id, risk_score)
+
+    # HALT: terminate workflow + raise
+    if verdict == Verdict.HALT:
+        workflow_id = event_payload.get("workflow_id", "")
+        await _terminate_workflow_for_halt(workflow_id, reason or "No reason provided")
+
+    # BLOCK: fail this activity only
+    raise_governance_block(
+        reason=reason or "No reason provided",
+        policy_id=policy_id,
+        risk_score=risk_score,
+    )
+
+
+def _handle_api_error(event_type: str, error_msg: str, on_api_error: str) -> dict:
+    """Handle non-200 responses or exceptions based on error policy."""
+    logger.warning(f"Governance API error for {event_type}: {error_msg}")
+    if on_api_error == "fail_closed":
+        raise GovernanceAPIError(error_msg)
+    return {"success": False, "error": error_msg}
+
+
 @activity.defn(name="send_governance_event")
 async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Activity that sends governance events to OpenBox Core.
 
-    This activity is called from WorkflowInboundInterceptor via workflow.execute_activity()
-    to maintain workflow determinism. HTTP calls cannot be made directly in workflow context.
-
-    Args (in input dict):
-        api_url: OpenBox Core API URL
-        api_key: API key for authentication
-        payload: Event payload (without timestamp)
-        timeout: Request timeout in seconds
-        on_api_error: "fail_open" (default) or "fail_closed"
-
-    When on_api_error == "fail_closed" and API fails, raises GovernanceAPIError.
-    This is caught by the workflow interceptor and re-raised as GovernanceHaltError.
-
-    Logging is safe here because activities run outside the workflow sandbox.
+    Called from WorkflowInboundInterceptor via workflow.execute_activity()
+    to maintain workflow determinism.
     """
-    # Extract input fields
     api_url = input.get("api_url", "")
     api_key = input.get("api_key", "")
     event_payload = input.get("payload", {})
     timeout = input.get("timeout", 30.0)
     on_api_error = input.get("on_api_error", "fail_open")
 
-    # Add timestamp here in activity context (non-deterministic code allowed)
-    # Use RFC3339 format: 2024-01-15T10:30:45.123Z
+    # Add timestamp in activity context (non-deterministic code allowed)
     payload = {**event_payload, "timestamp": _rfc3339_now()}
     event_type = event_payload.get("event_type", "unknown")
 
@@ -137,66 +168,32 @@ async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any
                 headers=build_auth_headers(api_key),
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                # Parse verdict (v1.1) or action (v1.0)
-                verdict = Verdict.from_string(
-                    data.get("verdict") or data.get("action", "continue")
+            if response.status_code != 200:
+                return _handle_api_error(
+                    event_type,
+                    f"HTTP {response.status_code}: {response.text}",
+                    on_api_error,
                 )
-                reason = data.get("reason")
-                policy_id = data.get("policy_id")
-                risk_score = data.get("risk_score", 0.0)
 
-                # Check if governance wants to stop (BLOCK or HALT)
-                if verdict.should_stop():
-                    logger.info(
-                        f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})"
-                    )
+            data = response.json()
+            verdict = Verdict.from_string(
+                data.get("verdict") or data.get("action", "continue")
+            )
+            reason = data.get("reason")
+            policy_id = data.get("policy_id")
+            risk_score = data.get("risk_score", 0.0)
 
-                    # For SignalReceived events, return result instead of raising/terminating
-                    # The workflow interceptor will store verdict for activity interceptor to check
-                    if event_type == "SignalReceived":
-                        return {
-                            "success": True,
-                            "verdict": verdict.value,
-                            "action": verdict.value,  # backward compat
-                            "reason": reason,
-                            "policy_id": policy_id,
-                            "risk_score": risk_score,
-                        }
+            if verdict.should_stop():
+                result = await _handle_stop_verdict(
+                    verdict, reason, policy_id, risk_score, event_type, event_payload
+                )
+                if result:
+                    return result
 
-                    # HALT → terminate workflow + raise to stop activity
-                    if verdict == Verdict.HALT:
-                        workflow_id = event_payload.get("workflow_id", "")
-                        # Always raises ApplicationError(type="GovernanceHalt")
-                        await _terminate_workflow_for_halt(
-                            workflow_id, reason or "No reason provided"
-                        )
-                    else:
-                        # BLOCK → fail this activity only, workflow can continue
-                        raise_governance_block(
-                            reason=reason or "No reason provided",
-                            policy_id=policy_id,
-                            risk_score=risk_score,
-                        )
-
-                return {
-                    "success": True,
-                    "verdict": verdict.value,
-                    "action": verdict.value,  # backward compat
-                    "reason": reason,
-                    "policy_id": policy_id,
-                    "risk_score": risk_score,
-                }
-            else:
-                error_msg = f"HTTP {response.status_code}: {response.text}"
-                logger.warning(f"Governance API error for {event_type}: {error_msg}")
-                if on_api_error == "fail_closed":
-                    raise GovernanceAPIError(error_msg)
-                return {"success": False, "error": error_msg}
+            return _build_verdict_result(verdict, reason, policy_id, risk_score)
 
     except (GovernanceAPIError, ApplicationError):
-        raise  # Re-raise to workflow (ApplicationError is non-retryable)
+        raise
     except Exception as e:
         logger.warning(f"Failed to send {event_type} event: {e}")
         if on_api_error == "fail_closed":
