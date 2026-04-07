@@ -114,6 +114,49 @@ def _safe_serialize(value: Any, max_length: int = 2000) -> str:
 F = TypeVar("F", bound=Callable[..., Any])
 
 
+def _setup_span(span, func, capture_args, args, kwargs, max_arg_length):
+    """Set span metadata and capture arguments."""
+    span.set_attribute("code.function", func.__name__)
+    span.set_attribute("code.namespace", func.__module__)
+    if capture_args:
+        _set_args_attributes(span, args, kwargs, max_arg_length)
+
+
+def _build_started_data(span, func, capture_args, args, kwargs, max_arg_length):
+    """Build started governance span data."""
+    args_data = (
+        _safe_serialize({"args": args, "kwargs": kwargs}, max_arg_length)
+        if capture_args else None
+    )
+    return _build_traced_span_data(
+        span, func.__name__, func.__module__, "started", args=args_data,
+    )
+
+
+def _build_completed_data(span, func, duration_ms, capture_result, result, max_arg_length):
+    """Build completed governance span data."""
+    result_data = _safe_serialize(result, max_arg_length) if capture_result else None
+    return _build_traced_span_data(
+        span, func.__name__, func.__module__, "completed",
+        duration_ms=duration_ms, result=result_data,
+    )
+
+
+def _build_error_data(span, func, error):
+    """Build error governance span data."""
+    return _build_traced_span_data(
+        span, func.__name__, func.__module__, "completed", error=str(error),
+    )
+
+
+def _capture_error_attrs(span, e, capture_exception):
+    """Set error attributes on span."""
+    if capture_exception:
+        span.set_attribute("error", True)
+        span.set_attribute("error.type", type(e).__name__)
+        span.set_attribute("error.message", str(e))
+
+
 def traced(
     _func: Optional[F] = None,
     *,
@@ -123,128 +166,42 @@ def traced(
     capture_exception: bool = True,
     max_arg_length: int = 2000,
 ) -> Union[F, Callable[[F], F]]:
-    """
-    Decorator to trace function calls as OpenTelemetry spans.
+    """Decorator to trace function calls as OpenTelemetry spans.
 
-    The spans will be captured by WorkflowSpanProcessor and included
-    in ActivityCompleted governance events.
-
-    Args:
-        name: Custom span name. Defaults to function name.
-        capture_args: Capture function arguments as span attributes.
-        capture_result: Capture return value as span attribute.
-        capture_exception: Capture exception details on error.
-        max_arg_length: Maximum length for serialized arguments.
-
-    Examples:
-        # Basic usage
-        @traced
-        def process_data(input_data):
-            return transform(input_data)
-
-        # With options
-        @traced(name="data-processing", capture_result=False)
-        def process_sensitive_data(data):
-            return handle(data)
-
-        # Async functions
-        @traced
-        async def fetch_data(url):
-            return await http_get(url)
+    Spans are captured by WorkflowSpanProcessor and included in governance events.
     """
 
     def decorator(func: F) -> F:
         span_name = name or func.__name__
-        is_async = _is_async_function(func)
 
-        if is_async:
+        if _is_async_function(func):
 
             @wraps(func)
             async def async_wrapper(*args, **kwargs):
+                import time as _time
                 tracer = _get_tracer()
                 with tracer.start_as_current_span(span_name) as span:
-                    # Set function metadata
-                    span.set_attribute("code.function", func.__name__)
-                    span.set_attribute("code.namespace", func.__module__)
+                    _setup_span(span, func, capture_args, args, kwargs, max_arg_length)
 
-                    # Capture arguments
-                    if capture_args:
-                        _set_args_attributes(span, args, kwargs, max_arg_length)
-
-                    # Governance: started stage
                     if _hook_gov.is_configured():
-                        _args_data = (
-                            _safe_serialize(
-                                {"args": args, "kwargs": kwargs}, max_arg_length
-                            )
-                            if capture_args
-                            else None
-                        )
-                        started_sd = _build_traced_span_data(
-                            span,
-                            func.__name__,
-                            func.__module__,
-                            "started",
-                            args=_args_data,
-                        )
-                        await _hook_gov.evaluate_async(
-                            span, identifier=func.__name__, span_data=started_sd
-                        )
-
-                    import time as _time
+                        sd = _build_started_data(span, func, capture_args, args, kwargs, max_arg_length)
+                        await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=sd)
 
                     _start = _time.perf_counter()
                     try:
                         result = await func(*args, **kwargs)
                         _dur_ms = (_time.perf_counter() - _start) * 1000
-
-                        # Capture result
                         if capture_result:
-                            span.set_attribute(
-                                "function.result",
-                                _safe_serialize(result, max_arg_length),
-                            )
-
-                        # Governance: completed stage
+                            span.set_attribute("function.result", _safe_serialize(result, max_arg_length))
                         if _hook_gov.is_configured():
-                            _result_data = (
-                                _safe_serialize(result, max_arg_length)
-                                if capture_result
-                                else None
-                            )
-                            completed_sd = _build_traced_span_data(
-                                span,
-                                func.__name__,
-                                func.__module__,
-                                "completed",
-                                duration_ms=_dur_ms,
-                                result=_result_data,
-                            )
-                            await _hook_gov.evaluate_async(
-                                span, identifier=func.__name__, span_data=completed_sd
-                            )
-
+                            sd = _build_completed_data(span, func, _dur_ms, capture_result, result, max_arg_length)
+                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=sd)
                         return result
-
                     except Exception as e:
-                        if capture_exception:
-                            span.set_attribute("error", True)
-                            span.set_attribute("error.type", type(e).__name__)
-                            span.set_attribute("error.message", str(e))
-
-                        # Governance: completed stage with error
+                        _capture_error_attrs(span, e, capture_exception)
                         if _hook_gov.is_configured():
-                            error_sd = _build_traced_span_data(
-                                span,
-                                func.__name__,
-                                func.__module__,
-                                "completed",
-                                error=str(e),
-                            )
-                            await _hook_gov.evaluate_async(
-                                span, identifier=func.__name__, span_data=error_sd
-                            )
-
+                            sd = _build_error_data(span, func, e)
+                            await _hook_gov.evaluate_async(span, identifier=func.__name__, span_data=sd)
                         raise
 
             return async_wrapper  # type: ignore
@@ -253,95 +210,34 @@ def traced(
 
             @wraps(func)
             def sync_wrapper(*args, **kwargs):
+                import time as _time
                 tracer = _get_tracer()
                 with tracer.start_as_current_span(span_name) as span:
-                    # Set function metadata
-                    span.set_attribute("code.function", func.__name__)
-                    span.set_attribute("code.namespace", func.__module__)
+                    _setup_span(span, func, capture_args, args, kwargs, max_arg_length)
 
-                    # Capture arguments
-                    if capture_args:
-                        _set_args_attributes(span, args, kwargs, max_arg_length)
-
-                    # Governance: started stage
                     if _hook_gov.is_configured():
-                        _args_data = (
-                            _safe_serialize(
-                                {"args": args, "kwargs": kwargs}, max_arg_length
-                            )
-                            if capture_args
-                            else None
-                        )
-                        started_sd = _build_traced_span_data(
-                            span,
-                            func.__name__,
-                            func.__module__,
-                            "started",
-                            args=_args_data,
-                        )
-                        _hook_gov.evaluate_sync(
-                            span, identifier=func.__name__, span_data=started_sd
-                        )
-
-                    import time as _time
+                        sd = _build_started_data(span, func, capture_args, args, kwargs, max_arg_length)
+                        _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=sd)
 
                     _start = _time.perf_counter()
                     try:
                         result = func(*args, **kwargs)
                         _dur_ms = (_time.perf_counter() - _start) * 1000
-
-                        # Capture result
                         if capture_result:
-                            span.set_attribute(
-                                "function.result",
-                                _safe_serialize(result, max_arg_length),
-                            )
-
-                        # Governance: completed stage
+                            span.set_attribute("function.result", _safe_serialize(result, max_arg_length))
                         if _hook_gov.is_configured():
-                            _result_data = (
-                                _safe_serialize(result, max_arg_length)
-                                if capture_result
-                                else None
-                            )
-                            completed_sd = _build_traced_span_data(
-                                span,
-                                func.__name__,
-                                func.__module__,
-                                "completed",
-                                duration_ms=_dur_ms,
-                                result=_result_data,
-                            )
-                            _hook_gov.evaluate_sync(
-                                span, identifier=func.__name__, span_data=completed_sd
-                            )
-
+                            sd = _build_completed_data(span, func, _dur_ms, capture_result, result, max_arg_length)
+                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=sd)
                         return result
-
                     except Exception as e:
-                        if capture_exception:
-                            span.set_attribute("error", True)
-                            span.set_attribute("error.type", type(e).__name__)
-                            span.set_attribute("error.message", str(e))
-
-                        # Governance: completed stage with error
+                        _capture_error_attrs(span, e, capture_exception)
                         if _hook_gov.is_configured():
-                            error_sd = _build_traced_span_data(
-                                span,
-                                func.__name__,
-                                func.__module__,
-                                "completed",
-                                error=str(e),
-                            )
-                            _hook_gov.evaluate_sync(
-                                span, identifier=func.__name__, span_data=error_sd
-                            )
-
+                            sd = _build_error_data(span, func, e)
+                            _hook_gov.evaluate_sync(span, identifier=func.__name__, span_data=sd)
                         raise
 
             return sync_wrapper  # type: ignore
 
-    # Handle both @traced and @traced() syntax
     if _func is not None:
         return decorator(_func)
     return decorator
