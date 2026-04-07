@@ -2,6 +2,38 @@
 
 All notable changes to OpenBox SDK for Temporal Workflows.
 
+## [1.1.1] - 2026-04-07
+
+### Added
+
+- **OpenBoxPlugin** — drop-in `SimplePlugin` integration for Temporal Workers. Single-line setup: `plugins=[OpenBoxPlugin(openbox_url=..., openbox_api_key=...)]`. Auto-registers interceptors, OTel instrumentation, sandbox passthrough, and `send_governance_event` activity
+- Plugin integration guide for Temporal AI Partner Ecosystem (`docs/temporal-plugin-integration-guide.md`)
+- HTTP body truncation tests (`tests/test_http_body_truncation.py`)
+- Plugin unit tests (`tests/test_plugin.py`) and integration/replay tests (`tests/test_plugin_integration.py`)
+
+### Fixed
+
+- **HTTP body truncation** — enforce `max_body_size` (default 64KB) on request/response bodies in governance spans
+- **File I/O spans** — remove raw file content from governance payloads; only `bytes_read`/`bytes_written` metadata sent
+- **error_type sanitization** — prevent serialized error objects from being sent as `error.cause.error_type` string in WorkflowFailed payloads
+- Remove useless f-strings, redundant `(ImportError, Exception)` clauses, merge nested if statements
+- Prefix unused `span` param in urllib hook
+
+### Changed
+
+- `temporalio>=1.23.0` (from 1.8.0) for SimplePlugin support
+- `GovernanceConfig.max_body_size` default changed from `None` (unlimited) to `65536` (64KB)
+- `\w` regex shorthand in API key pattern
+
+### Refactored
+
+- Reduce cognitive complexity across 7 modules: `activity_interceptor.py` (126→split), `workflow_interceptor.py` (40→split), `activities.py` (20→split), `db_governance_hooks.py` (34→split), `otel_setup.py` (51→split), `tracing.py` (85→split), `verdict_handler.py` (16→15)
+- Extract shared helpers: `_run_governed_query_sync/async`, `_build_error_dict`, `_extract_dbapi_context`, `_instrument_sqlalchemy`
+
+### Dependencies
+
+- Bump Pygments 2.19.2 → 2.20.0 (ReDoS fix, CVSS 1.9)
+
 ## [1.1.0] - 2026-03-09
 
 ### Added
