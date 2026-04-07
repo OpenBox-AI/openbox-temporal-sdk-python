@@ -208,7 +208,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         await self._check_pending_verdicts(info)
 
         # Check for pending approval on retry (HITL polling)
-        approval_granted = await self._check_pending_approval(info)
+        await self._check_pending_approval(info)
 
         # Clear stale state and register fresh buffer
         self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
