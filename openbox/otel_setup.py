@@ -412,56 +412,56 @@ def uninstrument_databases() -> None:
         from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
 
         Psycopg2Instrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 
         AsyncPGInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.mysql import MySQLInstrumentor
 
         MySQLInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.pymysql import PyMySQLInstrumentor
 
         PyMySQLInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.sqlite3 import SQLite3Instrumentor
 
         SQLite3Instrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
 
         PymongoInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.redis import RedisInstrumentor
 
         RedisInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
         SQLAlchemyInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     # Clean up DB governance hooks
@@ -479,28 +479,28 @@ def uninstrument_all() -> None:
         from opentelemetry.instrumentation.requests import RequestsInstrumentor
 
         RequestsInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 
         HTTPXClientInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.urllib3 import URLLib3Instrumentor
 
         URLLib3Instrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     try:
         from opentelemetry.instrumentation.urllib import URLLibInstrumentor
 
         URLLibInstrumentor().uninstrument()
-    except (ImportError, Exception):
+    except Exception:
         pass
 
     # Uninstrument database libraries
