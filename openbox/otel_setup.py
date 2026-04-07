@@ -217,9 +217,8 @@ def setup_opentelemetry_for_governance(
             instrumented.extend(db_instrumented)
 
     # 7. File I/O instrumentation (optional)
-    if instrument_file_io:
-        if setup_file_io_instrumentation():
-            instrumented.append("file_io")
+    if instrument_file_io and setup_file_io_instrumentation():
+        instrumented.append("file_io")
 
     # 8. Context propagation for async activities using run_in_executor
     # Without this, OTel trace context is lost in executor threads and
