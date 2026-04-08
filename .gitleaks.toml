@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "OpenBox sample API keys used in documentation and tests"
+regexes = [
+  '''obx_test_key_[A-Za-z0-9_-]+''',
+]
+
+[[allowlists]]
+description = "Generated documentation bundles"
+paths = [
+  '''^repomix-output\.xml$''',
+  '''^release-manifest\.json$''',
+]
