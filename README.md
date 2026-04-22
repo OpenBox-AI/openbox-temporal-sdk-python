@@ -52,7 +52,15 @@ await worker.run()
 ```
 
 The plugin automatically configures governance interceptors, OTel instrumentation,
-sandbox passthrough, and the `send_governance_event` activity.
+sandbox passthrough, W3C trace propagation through Temporal headers (via
+`temporalio.contrib.opentelemetry.TracingInterceptor`), and the
+`send_governance_event` activity.
+
+**Credentials never leave the plugin.** `openbox_api_key` is captured on the
+governance activity instance itself — it does **not** flow through activity
+inputs, so it is never written to workflow history. To opt out of trace
+propagation (e.g., if you already wire `OpenTelemetryPlugin`), pass
+`enable_trace_propagation=False`.
 
 ### Composing with Other Plugins
 
@@ -100,8 +108,10 @@ The factory automatically:
 1. Validates the API key
 2. Creates span processor
 3. Sets up OpenTelemetry instrumentation
-4. Creates governance interceptors
-5. Adds `send_governance_event` activity
+4. Creates governance interceptors (incl. W3C trace propagation)
+5. Builds the `GovernanceActivities` instance with credentials captured on
+   `self` and registers its `send_governance_event` method — the API key is
+   never passed through activity inputs / workflow history
 6. Returns fully configured Worker
 
 ---
@@ -146,6 +156,11 @@ worker = create_openbox_worker(
 
     # File I/O instrumentation
     instrument_file_io=False,  # disabled by default
+
+    # Header-based W3C trace propagation (client → workflow → activities).
+    # Default True. Set False if you already wire OpenTelemetryPlugin or a
+    # custom propagator.
+    enable_trace_propagation=True,
 
     # Standard Worker options (all supported)
     activity_executor=my_executor,
@@ -423,7 +438,7 @@ from openbox import (
 )
 from openbox.otel_setup import setup_opentelemetry_for_governance
 from openbox.activity_interceptor import ActivityGovernanceInterceptor
-from openbox.activities import send_governance_event
+from openbox.activities import build_governance_activities
 from openbox.hook_governance import FAIL_OPEN, FAIL_CLOSED  # error policy constants
 
 # 1. Initialize SDK
@@ -463,14 +478,26 @@ activity_interceptor = ActivityGovernanceInterceptor(
     config=config,
 )
 
-# 6. Create worker
+# 6. Build the governance activity instance (credentials captured on `self`
+# so they never flow through workflow history).
+governance_activities = build_governance_activities(
+    api_url="http://localhost:8086",
+    api_key="obx_test_key_1",
+)
+
+# 7. Create worker
 from temporalio.worker import Worker
+from temporalio.contrib.opentelemetry import TracingInterceptor
 worker = Worker(
     client=client,
     task_queue="my-task-queue",
     workflows=[MyWorkflow],
-    activities=[my_activity, send_governance_event],
-    interceptors=[workflow_interceptor, activity_interceptor],
+    activities=[my_activity, governance_activities.send_governance_event],
+    interceptors=[
+        workflow_interceptor,
+        activity_interceptor,
+        TracingInterceptor(),  # W3C header propagation for OTel spans
+    ],
 )
 ```
 
