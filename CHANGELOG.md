@@ -2,6 +2,30 @@
 
 All notable changes to OpenBox SDK for Temporal Workflows.
 
+## [1.1.2] - 2026-04-22
+
+### Security
+
+- **API key no longer flows through workflow history.** `send_governance_event` refactored into a `GovernanceActivities` class that holds credentials on `self`; activity inputs carry only `payload`, `timeout`, and `on_api_error`. Before this change, anyone with Describe permissions on the namespace could read the API key from the recorded activity input.
+
+### Added
+
+- W3C trace propagation through Temporal headers, on by default via `enable_trace_propagation=True` on `OpenBoxPlugin` and `create_openbox_worker()`. Uses `temporalio.contrib.opentelemetry.TracingInterceptor` so spans started by the caller stitch to workflow/activity spans on the worker side.
+- `ApplicationError` type constants in `errors.py` (`GOVERNANCE_HALT_ERROR_TYPE`, `GOVERNANCE_BLOCK_ERROR_TYPE`, `GOVERNANCE_API_ERROR_TYPE`, `GOVERNANCE_STOP_ERROR_TYPE`) — single source of truth for governance error routing.
+- `openbox.activities.GovernanceActivities` class + `build_governance_activities()` factory.
+
+### Fixed
+
+- **Workflow exception shadowing** — `WorkflowFailed` event send is now wrapped in `try/except`, so a `GovernanceHaltError` from `fail_closed + API down` no longer replaces the real workflow error.
+- **String-matching on exception types** — `workflow_interceptor` now inspects `ApplicationError.type` via the exception chain instead of `"GovernanceHalt" in str(e)`. Eliminates false positives when a user workflow happens to emit an error message containing a governance keyword.
+- **Race creating governance HTTP client** — `hook_governance._get_sync_client` / `_get_async_client` now use double-checked locking. Previously two concurrent activities could each create a client, with the losing instance getting garbage-collected while its connection pool leaked.
+- **Replayer plugin coverage** — `test_plugin_integration.py` now passes `plugins=[plugin]` to `Replayer`, so replay tests validate interceptor determinism, not just user workflow code.
+- Version-pin mismatch — comments in `openbox/__init__.py` said `temporalio >= 1.24.0` but pyproject/README pin `1.23.0`. Corrected to `1.23.0`.
+
+### Changed
+
+- `plugin.py` / `worker.py` now use `logging.getLogger(__name__)` for initialization status messages instead of `print()`.
+
 ## [1.1.1] - 2026-04-07
 
 ### Added
