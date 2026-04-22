@@ -243,10 +243,11 @@ class TestPluginReplaySafety:
             await handle.result()
             history = await handle.fetch_history()
 
-        # Replay — governance activity calls are recorded in history,
-        # so replay just validates determinism without executing them again.
+        # Replay with the plugin wired in — this validates that the plugin's
+        # interceptors themselves are replay-safe, not just the workflow code.
         replayer = Replayer(
             workflows=[SimpleWorkflow],
+            plugins=[plugin],
         )
         # This will raise if there's a non-determinism error
         await replayer.replay_workflow(history)
@@ -276,5 +277,5 @@ class TestPluginReplaySafety:
             await handle.result()
             history = await handle.fetch_history()
 
-        replayer = Replayer(workflows=[SignalWorkflow])
+        replayer = Replayer(workflows=[SignalWorkflow], plugins=[plugin])
         await replayer.replay_workflow(history)
