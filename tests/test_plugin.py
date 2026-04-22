@@ -23,6 +23,9 @@ def _make_plugin(**overrides):
     defaults = dict(
         openbox_url="http://localhost:8086",
         openbox_api_key="obx_test_key_123",
+        # Skip the real TracingInterceptor by default — many tests pass Mock
+        # clients that SimplePlugin's interceptor-dedup logic can't iterate.
+        enable_trace_propagation=False,
     )
     defaults.update(overrides)
 
