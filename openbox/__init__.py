@@ -68,7 +68,7 @@ from .span_processor import WorkflowSpanProcessor
 from .workflow_interceptor import GovernanceInterceptor
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Plugin (requires temporalio >= 1.24.0)
+# Plugin (requires temporalio >= 1.23.0)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 try:
@@ -76,7 +76,7 @@ try:
 
     from .plugin import OpenBoxPlugin
 except ImportError:
-    pass  # temporalio < 1.24.0, plugin not available
+    pass  # temporalio < 1.23.0, plugin not available
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Verdict Handler
@@ -139,7 +139,7 @@ from .client import GovernanceClient
 __all__ = [
     # Simple Worker Factory (recommended)
     "create_openbox_worker",
-    # Plugin (recommended for temporalio >= 1.24.0)
+    # Plugin (recommended for temporalio >= 1.23.0)
     "OpenBoxPlugin",
     # Configuration
     "initialize",

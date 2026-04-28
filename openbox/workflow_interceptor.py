@@ -20,6 +20,7 @@ from datetime import timedelta
 from typing import Any, Optional, Type
 
 from temporalio import workflow
+from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import (
     Interceptor,
     WorkflowInboundInterceptor,
@@ -28,7 +29,36 @@ from temporalio.worker import (
     HandleSignalInput,
 )
 
+from .errors import (
+    GOVERNANCE_API_ERROR_TYPE,
+    GOVERNANCE_BLOCK_ERROR_TYPE,
+    GOVERNANCE_HALT_ERROR_TYPE,
+    GOVERNANCE_STOP_ERROR_TYPE,
+)
 from .types import Verdict
+
+
+def _application_error_type(exc: BaseException) -> Optional[str]:
+    """Walk exception chain and return the ApplicationError.type if present.
+
+    Temporal wraps activity failures as ActivityError(cause=ApplicationError).
+    We walk cause/__cause__/__context__ to find the first ApplicationError and
+    return its `type` field. Matching on this field is stable across message
+    reformatting, locale changes, and nested wrapping.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ApplicationError):
+            return getattr(current, "type", None)
+        next_exc = (
+            getattr(current, "cause", None)
+            or getattr(current, "__cause__", None)
+            or getattr(current, "__context__", None)
+        )
+        current = next_exc
+    return None
 
 
 def _safe_error_type(exc) -> Optional[str]:
@@ -117,8 +147,6 @@ from .errors import GovernanceHaltError  # noqa: F401
 
 
 async def _send_governance_event(
-    api_url: str,
-    api_key: str,
     payload: dict,
     timeout: float,
     on_api_error: str = "fail_open",
@@ -130,17 +158,18 @@ async def _send_governance_event(
         on_api_error: "fail_open" (default) = continue on error
                       "fail_closed" = halt workflow if governance API fails
 
-    The on_api_error policy is passed to the activity, which handles logging
-    (safe outside sandbox) and raises GovernanceAPIError if fail_closed.
-    This interceptor catches that and re-raises as GovernanceHaltError.
+    Credentials (api_url, api_key) are held by the activity instance itself —
+    never passed through activity inputs, so they never land in workflow
+    history. The on_api_error policy is passed to the activity, which handles
+    logging (safe outside sandbox) and raises GovernanceAPIError if
+    fail_closed. This interceptor catches that and re-raises as
+    GovernanceHaltError.
     """
     try:
         result = await workflow.execute_activity(
             "send_governance_event",
             args=[
                 {
-                    "api_url": api_url,
-                    "api_key": api_key,
                     "payload": payload,
                     "timeout": timeout,
                     "on_api_error": on_api_error,
@@ -150,27 +179,26 @@ async def _send_governance_event(
         )
         return result
     except Exception as e:
-        error_str = str(e)
-        error_type = type(e).__name__
+        app_error_type = _application_error_type(e)
 
-        # GovernanceHalt: workflow should terminate (client.terminate() already called,
-        # but re-raise to ensure workflow code path stops)
-        if "GovernanceHalt" in error_str:
-            raise GovernanceHaltError(error_str)
+        # GovernanceHalt / legacy GovernanceStop: workflow should terminate
+        # (client.terminate() already called by the activity, but re-raise to
+        # ensure the workflow code path stops).
+        if app_error_type in (
+            GOVERNANCE_HALT_ERROR_TYPE,
+            GOVERNANCE_STOP_ERROR_TYPE,
+        ):
+            raise GovernanceHaltError(str(e))
 
-        # GovernanceBlock: activity blocked, workflow continues
-        if "GovernanceBlock" in error_str:
+        # GovernanceBlock: the current activity is blocked; the workflow continues.
+        if app_error_type == GOVERNANCE_BLOCK_ERROR_TYPE:
             return None
 
-        # Legacy GovernanceStop (backward compat) → treat as halt
-        if "GovernanceStop" in error_str:
-            raise GovernanceHaltError(error_str)
+        # Activity raised GovernanceAPIError (fail_closed + API unreachable).
+        if app_error_type == GOVERNANCE_API_ERROR_TYPE:
+            raise GovernanceHaltError(str(e))
 
-        # Activity raised GovernanceAPIError (fail_closed and API unreachable)
-        if "GovernanceAPIError" in error_type or "GovernanceAPIError" in error_str:
-            raise GovernanceHaltError(error_str)
-
-        # Other errors with fail_open: silently continue
+        # Other errors with fail_open: silently continue.
         return None
 
 
@@ -179,12 +207,15 @@ class GovernanceInterceptor(Interceptor):
 
     def __init__(
         self,
-        api_url: str,
-        api_key: str,
+        api_url: str = "",
+        api_key: str = "",
         span_processor=None,  # Shared with activity interceptor for HTTP spans
         config=None,  # Optional GovernanceConfig
     ):
-        self.api_url = api_url.rstrip("/")
+        # api_url / api_key are accepted for backward compatibility but no longer
+        # flow to the governance activity — credentials live on GovernanceActivities.
+        # Kept on self in case downstream callers introspect.
+        self.api_url = api_url.rstrip("/") if api_url else ""
         self.api_key = api_key
         self.span_processor = span_processor
         self.api_timeout = getattr(config, "api_timeout", 30.0) if config else 30.0
@@ -203,8 +234,6 @@ class GovernanceInterceptor(Interceptor):
         self, input: WorkflowInterceptorClassInput
     ) -> Optional[Type[WorkflowInboundInterceptor]]:
         # Capture via closure
-        api_url = self.api_url
-        api_key = self.api_key
         span_processor = self.span_processor
         timeout = self.api_timeout
         on_error = self.on_api_error
@@ -223,8 +252,6 @@ class GovernanceInterceptor(Interceptor):
                 # WorkflowStarted event
                 if send_start and workflow.patched("openbox-v2-start"):
                     await _send_governance_event(
-                        api_url,
-                        api_key,
                         {
                             "source": "workflow-telemetry",
                             "event_type": "WorkflowStarted",
@@ -254,8 +281,6 @@ class GovernanceInterceptor(Interceptor):
                             )
 
                         await _send_governance_event(
-                            api_url,
-                            api_key,
                             {
                                 "source": "workflow-telemetry",
                                 "event_type": "WorkflowCompleted",
@@ -273,20 +298,24 @@ class GovernanceInterceptor(Interceptor):
                     error = _build_error_dict(e)
 
                     if workflow.patched("openbox-v2-failed"):
-                        await _send_governance_event(
-                            api_url,
-                            api_key,
-                            {
-                                "source": "workflow-telemetry",
-                                "event_type": "WorkflowFailed",
-                                "workflow_id": info.workflow_id,
-                                "run_id": info.run_id,
-                                "workflow_type": info.workflow_type,
-                                "error": error,
-                            },
-                            timeout,
-                            on_error,
-                        )
+                        # Swallow failures from the failure-reporting activity itself
+                        # (fail_closed + governance API down would otherwise raise
+                        # GovernanceHaltError and shadow the real workflow exception).
+                        try:
+                            await _send_governance_event(
+                                {
+                                    "source": "workflow-telemetry",
+                                    "event_type": "WorkflowFailed",
+                                    "workflow_id": info.workflow_id,
+                                    "run_id": info.run_id,
+                                    "workflow_type": info.workflow_type,
+                                    "error": error,
+                                },
+                                timeout,
+                                on_error,
+                            )
+                        except Exception:
+                            pass
 
                     raise
 
@@ -300,8 +329,6 @@ class GovernanceInterceptor(Interceptor):
                 # SignalReceived event - check verdict and store if "stop"
                 if workflow.patched("openbox-v2-signal"):
                     result = await _send_governance_event(
-                        api_url,
-                        api_key,
                         {
                             "source": "workflow-telemetry",
                             "event_type": "SignalReceived",

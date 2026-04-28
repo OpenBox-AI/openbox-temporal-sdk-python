@@ -328,30 +328,48 @@ def create_openbox_worker(
 ### 11. Governance Event Activity (`activities.py`)
 
 **Purpose:** Execute HTTP calls to OpenBox Core from workflow context
-**Activity:** `send_governance_event`
+**Activity:** `send_governance_event` (method of `GovernanceActivities` class)
 
-**Function Signature:**
+**Class Signature:**
 ```python
-@activity.defn(name="send_governance_event")
-async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]
+class GovernanceActivities:
+    def __init__(self, api_url: str, api_key: str): ...
+
+    @activity.defn(name="send_governance_event")
+    async def send_governance_event(
+        self, input: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]: ...
+
+
+def build_governance_activities(api_url: str, api_key: str) -> GovernanceActivities
 ```
 
-**Input Fields:**
-- `api_url` - OpenBox Core URL
-- `api_key` - Bearer token
+The plugin / `create_openbox_worker()` factory build one instance and register
+its bound `send_governance_event` method with the Temporal Worker.
+Credentials live on `self` — they do **not** flow through activity inputs,
+so the API key is never written to workflow history.
+
+**Input Fields (activity input dict):**
 - `payload` - Event data (without timestamp)
 - `timeout` - Request timeout
 - `on_api_error` - "fail_open" or "fail_closed"
 
+> `api_url` / `api_key` are deliberately absent from the input dict to avoid
+> leaking credentials into workflow history. They are held on the activity
+> instance itself.
+
 **Behavior:**
 - Adds RFC3339 timestamp to payload
-- POSTs to `/api/v1/governance/evaluate`
+- POSTs to `{self._api_url}/api/v1/governance/evaluate`
 - Parses verdict from response
 - For SignalReceived: Returns verdict dict (workflow interceptor stores it)
 - For other events with BLOCK/HALT: Raises non-retryable `ApplicationError`
+  with `type="GovernanceBlock"` / `"GovernanceHalt"`
 - On API failure with fail_closed: Raises `GovernanceAPIError`
 
-**Lines of Code:** 163
+A module-level `send_governance_event(input)` helper remains for direct
+callers (tests, scripts) that already hold credentials; it instantiates
+`GovernanceActivities` internally and delegates.
 
 ---
 

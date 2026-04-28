@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import httpx
@@ -38,9 +39,14 @@ _max_body_size: Optional[int] = None
 _span_processor: Optional["WorkflowSpanProcessor"] = None
 _cached_auth_headers: Optional[dict] = None
 
-# Persistent HTTP clients (lazy-init, thread-safe for requests)
+# Persistent HTTP clients. httpx Client/AsyncClient themselves are thread-safe
+# for requests; the locks below only guard creation against concurrent activities
+# racing to initialize a fresh client (which would leak connection pools when
+# one of the losers gets garbage collected).
 _sync_client: Optional[httpx.Client] = None
 _async_client: Optional[httpx.AsyncClient] = None
+_sync_client_lock = threading.Lock()
+_async_client_lock = threading.Lock()
 
 
 def configure(
@@ -78,18 +84,22 @@ def configure(
 
 
 def _get_sync_client() -> httpx.Client:
-    """Get or create persistent sync HTTP client."""
+    """Get or create persistent sync HTTP client (double-checked locking)."""
     global _sync_client
     if _sync_client is None or _sync_client.is_closed:
-        _sync_client = httpx.Client(timeout=_api_timeout)
+        with _sync_client_lock:
+            if _sync_client is None or _sync_client.is_closed:
+                _sync_client = httpx.Client(timeout=_api_timeout)
     return _sync_client
 
 
 def _get_async_client() -> httpx.AsyncClient:
-    """Get or create persistent async HTTP client."""
+    """Get or create persistent async HTTP client (double-checked locking)."""
     global _async_client
     if _async_client is None or _async_client.is_closed:
-        _async_client = httpx.AsyncClient(timeout=_api_timeout)
+        with _async_client_lock:
+            if _async_client is None or _async_client.is_closed:
+                _async_client = httpx.AsyncClient(timeout=_api_timeout)
     return _async_client
 
 

@@ -21,10 +21,24 @@ Hierarchy:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Final, Union
 
 if TYPE_CHECKING:
     from .types import Verdict
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ApplicationError.type values raised by governance activities.
+# Use these constants — never string-match on error messages or
+# exception class names (brittle against locale / reformatting /
+# Temporal's ActivityError wrapping).
+# ═══════════════════════════════════════════════════════════════════
+
+GOVERNANCE_HALT_ERROR_TYPE: Final[str] = "GovernanceHalt"
+GOVERNANCE_BLOCK_ERROR_TYPE: Final[str] = "GovernanceBlock"
+GOVERNANCE_API_ERROR_TYPE: Final[str] = "GovernanceAPIError"
+# Legacy alias; kept for histories predating the rename.
+GOVERNANCE_STOP_ERROR_TYPE: Final[str] = "GovernanceStop"
 
 
 # ═══════════════════════════════════════════════════════════════════
