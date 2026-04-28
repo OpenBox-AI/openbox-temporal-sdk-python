@@ -142,60 +142,109 @@ def _handle_api_error(event_type: str, error_msg: str, on_api_error: str) -> dic
     return {"success": False, "error": error_msg}
 
 
-@activity.defn(name="send_governance_event")
+class GovernanceActivities:
+    """Container for Temporal activities that need OpenBox credentials.
+
+    Credentials live on the instance (never in activity inputs → never in
+    workflow history → not visible to anyone with namespace read access).
+    The worker registers bound methods of a single instance, created at
+    worker-init time by the plugin / create_openbox_worker factory.
+    """
+
+    def __init__(self, api_url: str, api_key: str):
+        self._api_url = api_url.rstrip("/")
+        self._api_key = api_key
+
+    @activity.defn(name="send_governance_event")
+    async def send_governance_event(
+        self, input: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Send a governance event to OpenBox Core.
+
+        Called from WorkflowInboundInterceptor via workflow.execute_activity()
+        to maintain workflow determinism. The `input` dict carries only the
+        event payload and per-call policy — never credentials.
+        """
+        event_payload = input.get("payload", {})
+        timeout = input.get("timeout", 30.0)
+        on_api_error = input.get("on_api_error", "fail_open")
+
+        # Add timestamp in activity context (non-deterministic code allowed)
+        payload = {**event_payload, "timestamp": _rfc3339_now()}
+        event_type = event_payload.get("event_type", "unknown")
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{self._api_url}/api/v1/governance/evaluate",
+                    json=payload,
+                    headers=build_auth_headers(self._api_key),
+                )
+
+                if response.status_code != 200:
+                    return _handle_api_error(
+                        event_type,
+                        f"HTTP {response.status_code}: {response.text}",
+                        on_api_error,
+                    )
+
+                data = response.json()
+                verdict = Verdict.from_string(
+                    data.get("verdict") or data.get("action", "continue")
+                )
+                reason = data.get("reason")
+                policy_id = data.get("policy_id")
+                risk_score = data.get("risk_score", 0.0)
+
+                if verdict.should_stop():
+                    result = await _handle_stop_verdict(
+                        verdict,
+                        reason,
+                        policy_id,
+                        risk_score,
+                        event_type,
+                        event_payload,
+                    )
+                    if result:
+                        return result
+
+                return _build_verdict_result(verdict, reason, policy_id, risk_score)
+
+        except (GovernanceAPIError, ApplicationError):
+            raise
+        except Exception as e:
+            logger.warning(f"Failed to send {event_type} event: {e}")
+            if on_api_error == "fail_closed":
+                raise GovernanceAPIError(str(e))
+            return {"success": False, "error": str(e)}
+
+
+def build_governance_activities(
+    api_url: str, api_key: str
+) -> GovernanceActivities:
+    """Factory used by plugin.py and worker.py to build the activities instance."""
+    return GovernanceActivities(api_url=api_url, api_key=api_key)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backward-compat module-level helper.
+#
+# Not decorated with @activity.defn — worker/plugin register the class-based
+# version above so credentials never flow through activity inputs. This shim
+# exists for direct callers (tests, scripts) who already hold credentials and
+# want to invoke the HTTP logic without constructing the class themselves.
+# ─────────────────────────────────────────────────────────────────────────────
 async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Backward-compat wrapper — delegates to GovernanceActivities.
+
+    Tests and direct callers can keep passing api_url/api_key in the input
+    dict. The class-based activity registered with the worker does NOT see
+    these fields (it reads credentials from self), so nothing written to
+    workflow history ever carries the API key.
     """
-    Activity that sends governance events to OpenBox Core.
-
-    Called from WorkflowInboundInterceptor via workflow.execute_activity()
-    to maintain workflow determinism.
-    """
-    api_url = input.get("api_url", "")
-    api_key = input.get("api_key", "")
-    event_payload = input.get("payload", {})
-    timeout = input.get("timeout", 30.0)
-    on_api_error = input.get("on_api_error", "fail_open")
-
-    # Add timestamp in activity context (non-deterministic code allowed)
-    payload = {**event_payload, "timestamp": _rfc3339_now()}
-    event_type = event_payload.get("event_type", "unknown")
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{api_url}/api/v1/governance/evaluate",
-                json=payload,
-                headers=build_auth_headers(api_key),
-            )
-
-            if response.status_code != 200:
-                return _handle_api_error(
-                    event_type,
-                    f"HTTP {response.status_code}: {response.text}",
-                    on_api_error,
-                )
-
-            data = response.json()
-            verdict = Verdict.from_string(
-                data.get("verdict") or data.get("action", "continue")
-            )
-            reason = data.get("reason")
-            policy_id = data.get("policy_id")
-            risk_score = data.get("risk_score", 0.0)
-
-            if verdict.should_stop():
-                result = await _handle_stop_verdict(
-                    verdict, reason, policy_id, risk_score, event_type, event_payload
-                )
-                if result:
-                    return result
-
-            return _build_verdict_result(verdict, reason, policy_id, risk_score)
-
-    except (GovernanceAPIError, ApplicationError):
-        raise
-    except Exception as e:
-        logger.warning(f"Failed to send {event_type} event: {e}")
-        if on_api_error == "fail_closed":
-            raise GovernanceAPIError(str(e))
-        return {"success": False, "error": str(e)}
+    instance = GovernanceActivities(
+        api_url=input.get("api_url", ""),
+        api_key=input.get("api_key", ""),
+    )
+    forwarded = {k: v for k, v in input.items() if k not in ("api_url", "api_key")}
+    return await instance.send_governance_event(forwarded)

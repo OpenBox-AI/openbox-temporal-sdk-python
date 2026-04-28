@@ -18,6 +18,7 @@ Usage:
     await worker.run()
 """
 
+import logging
 from datetime import timedelta
 from typing import (
     Any,
@@ -35,6 +36,8 @@ from temporalio.worker import Worker, Interceptor
 
 from .config import initialize as validate_api_key, GovernanceConfig
 from .span_processor import WorkflowSpanProcessor
+
+logger = logging.getLogger(__name__)
 
 
 def create_openbox_worker(
@@ -61,6 +64,9 @@ def create_openbox_worker(
     sqlalchemy_engine: Optional[Any] = None,
     # File I/O instrumentation
     instrument_file_io: bool = True,
+    # Header-based W3C trace propagation via Temporal's built-in TracingInterceptor.
+    # Without it, trace IDs set by the caller don't reach workflow/activity spans.
+    enable_trace_propagation: bool = True,
     # Standard Worker options
     activity_executor: Optional[Executor] = None,
     workflow_task_executor: Optional[ThreadPoolExecutor] = None,
@@ -156,8 +162,7 @@ def create_openbox_worker(
         await worker.run()
         ```
     """
-    # Initialize OpenBox
-    print(f"Initializing OpenBox SDK with URL: {openbox_url}")
+    logger.info("Initializing OpenBox SDK with URL: %s", openbox_url)
 
     # 0. Store Temporal client reference for HALT terminate calls
     from .activities import set_temporal_client
@@ -231,27 +236,35 @@ def create_openbox_worker(
         client=governance_client,
     )
 
-    # 6. Get governance activities
-    from .activities import send_governance_event
+    # 6. Build governance activities with credentials captured on the instance
+    # (so api_key never leaks through activity inputs into workflow history).
+    from .activities import build_governance_activities
+
+    governance_activities = build_governance_activities(
+        api_url=openbox_url, api_key=openbox_api_key
+    )
 
     # Add OpenBox components
-    all_interceptors = [workflow_interceptor, activity_interceptor, *interceptors]
-    all_activities = [*activities, send_governance_event]
+    all_interceptors: list = [workflow_interceptor, activity_interceptor, *interceptors]
 
-    print("OpenBox SDK initialized successfully")
-    print(f"  - Governance policy: {governance_policy}")
-    print(f"  - Governance timeout: {governance_timeout}s")
-    print(
-        "  - Events: WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted"
+    # Header-based OTel trace propagation via Temporal's built-in interceptor.
+    if enable_trace_propagation:
+        from temporalio.contrib.opentelemetry import TracingInterceptor
+
+        all_interceptors.append(TracingInterceptor())
+
+    all_activities = [*activities, governance_activities.send_governance_event]
+
+    logger.info(
+        "OpenBox SDK initialized: policy=%s timeout=%ss db=%s file=%s hitl=%s "
+        "hook_governance=enabled events=WorkflowStarted,WorkflowCompleted,"
+        "WorkflowFailed,SignalReceived,ActivityStarted,ActivityCompleted",
+        governance_policy,
+        governance_timeout,
+        "enabled" if instrument_databases else "disabled",
+        "enabled" if instrument_file_io else "disabled",
+        "enabled" if hitl_enabled else "disabled",
     )
-    print(
-        f"  - Database instrumentation: {'enabled' if instrument_databases else 'disabled'}"
-    )
-    print(
-        f"  - File I/O instrumentation: {'enabled' if instrument_file_io else 'disabled'}"
-    )
-    print(f"  - Approval polling: {'enabled' if hitl_enabled else 'disabled'}")
-    print("  - Hook governance: enabled")
 
     # Create and return Worker
     return Worker(
