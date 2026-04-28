@@ -272,12 +272,10 @@ class TestSendGovernanceEvent:
 
     @pytest.mark.asyncio
     async def test_calls_execute_activity_with_correct_args(self, mock_workflow):
-        """Test that _send_governance_event calls workflow.execute_activity with correct args."""
+        """Activity input must carry payload/timeout/policy — never credentials."""
         mock_workflow.execute_activity = AsyncMock(return_value={"verdict": "allow"})
 
         result = await _send_governance_event(
-            api_url="https://api.openbox.ai",
-            api_key="test-key",
             payload={"event_type": "WorkflowStarted"},
             timeout=30.0,
             on_api_error="fail_open",
@@ -291,17 +289,17 @@ class TestSendGovernanceEvent:
 
         # Check args parameter contains expected data
         activity_input = call_args.kwargs["args"][0]
-        assert activity_input["api_url"] == "https://api.openbox.ai"
-        assert activity_input["api_key"] == "test-key"
         assert activity_input["payload"] == {"event_type": "WorkflowStarted"}
         assert activity_input["timeout"] == 30.0
         assert activity_input["on_api_error"] == "fail_open"
+        # Credentials must NOT be in the activity input (would leak via workflow history)
+        assert "api_url" not in activity_input
+        assert "api_key" not in activity_input
 
         assert result == {"verdict": "allow"}
 
     @pytest.mark.asyncio
     async def test_returns_result_on_success(self, mock_workflow):
-        """Test that _send_governance_event returns result on success."""
         expected_result = {
             "verdict": "allow",
             "reason": "Policy passed",
@@ -310,8 +308,6 @@ class TestSendGovernanceEvent:
         mock_workflow.execute_activity = AsyncMock(return_value=expected_result)
 
         result = await _send_governance_event(
-            api_url="https://api.openbox.ai",
-            api_key="test-key",
             payload={},
             timeout=30.0,
         )
@@ -322,78 +318,56 @@ class TestSendGovernanceEvent:
     async def test_raises_governance_halt_error_for_application_error(
         self, mock_workflow
     ):
-        """Test that ApplicationError with GovernanceHalt raises GovernanceHaltError."""
+        """ApplicationError.type == 'GovernanceHalt' must raise GovernanceHaltError."""
+        from temporalio.exceptions import ApplicationError
 
-        # Create a custom ApplicationError class to simulate the real one
-        class ApplicationError(Exception):
-            pass
-
-        error = ApplicationError("GovernanceHalt: Policy violation")
+        error = ApplicationError(
+            "Governance HALT: Policy violation", type="GovernanceHalt"
+        )
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         with pytest.raises(GovernanceHaltError) as exc_info:
             await _send_governance_event(
-                api_url="https://api.openbox.ai",
-                api_key="test-key",
                 payload={},
                 timeout=30.0,
             )
 
-        assert "GovernanceHalt" in str(exc_info.value)
+        assert "Policy violation" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_halt_message(
-        self, mock_workflow
-    ):
-        """Test that error with 'GovernanceHalt' in message raises GovernanceHaltError."""
-        error = Exception("GovernanceHalt: High risk detected")
+    async def test_legacy_governance_stop_type_raises_halt(self, mock_workflow):
+        """Legacy ApplicationError.type == 'GovernanceStop' still routes to halt."""
+        from temporalio.exceptions import ApplicationError
+
+        error = ApplicationError("legacy halt", type="GovernanceStop")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
-        with pytest.raises(GovernanceHaltError) as exc_info:
-            await _send_governance_event(
-                api_url="https://api.openbox.ai",
-                api_key="test-key",
-                payload={},
-                timeout=30.0,
-            )
-
-        assert "GovernanceHalt: High risk detected" in str(exc_info.value)
+        with pytest.raises(GovernanceHaltError):
+            await _send_governance_event(payload={}, timeout=30.0)
 
     @pytest.mark.asyncio
-    async def test_raises_governance_halt_error_for_governance_api_error(
-        self, mock_workflow
-    ):
-        """Test that GovernanceAPIError raises GovernanceHaltError."""
-        error = Exception("GovernanceAPIError: API unreachable")
+    async def test_governance_block_returns_none(self, mock_workflow):
+        """ApplicationError.type == 'GovernanceBlock' returns None (activity-level block)."""
+        from temporalio.exceptions import ApplicationError
+
+        error = ApplicationError("blocked", type="GovernanceBlock")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
-        with pytest.raises(GovernanceHaltError) as exc_info:
-            await _send_governance_event(
-                api_url="https://api.openbox.ai",
-                api_key="test-key",
-                payload={},
-                timeout=30.0,
-            )
-
-        assert "GovernanceAPIError" in str(exc_info.value)
+        result = await _send_governance_event(payload={}, timeout=30.0)
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_raises_governance_halt_error_for_governance_api_error_type(
         self, mock_workflow
     ):
-        """Test that exception with GovernanceAPIError in type name raises GovernanceHaltError."""
+        """ApplicationError.type == 'GovernanceAPIError' (fail_closed+API down) raises halt."""
+        from temporalio.exceptions import ApplicationError
 
-        # Create a custom GovernanceAPIError class to simulate the real one
-        class GovernanceAPIError(Exception):
-            pass
-
-        error = GovernanceAPIError("API failed")
+        error = ApplicationError("API failed", type="GovernanceAPIError")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         with pytest.raises(GovernanceHaltError) as exc_info:
             await _send_governance_event(
-                api_url="https://api.openbox.ai",
-                api_key="test-key",
                 payload={},
                 timeout=30.0,
             )
@@ -401,14 +375,27 @@ class TestSendGovernanceEvent:
         assert "API failed" in str(exc_info.value)
 
     @pytest.mark.asyncio
+    async def test_string_matching_on_message_is_ignored(self, mock_workflow):
+        """Messages containing 'GovernanceHalt' must NOT trigger halt without proper type."""
+        # User workflow could legitimately throw an error whose string happens to contain
+        # "GovernanceHalt" — the old string-match logic would false-positive on this.
+        error = Exception("GovernanceHalt: user happens to mention this string")
+        mock_workflow.execute_activity = AsyncMock(side_effect=error)
+
+        result = await _send_governance_event(
+            payload={},
+            timeout=30.0,
+            on_api_error="fail_open",
+        )
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_returns_none_for_other_errors_with_fail_open(self, mock_workflow):
-        """Test that other errors with fail_open return None."""
+        """Non-governance errors with fail_open return None."""
         error = RuntimeError("Network timeout")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         result = await _send_governance_event(
-            api_url="https://api.openbox.ai",
-            api_key="test-key",
             payload={},
             timeout=30.0,
             on_api_error="fail_open",
@@ -418,13 +405,11 @@ class TestSendGovernanceEvent:
 
     @pytest.mark.asyncio
     async def test_default_on_api_error_is_fail_open(self, mock_workflow):
-        """Test that default on_api_error is fail_open."""
+        """Default on_api_error is fail_open."""
         error = RuntimeError("Some error")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
         result = await _send_governance_event(
-            api_url="https://api.openbox.ai",
-            api_key="test-key",
             payload={},
             timeout=30.0,
             # on_api_error not specified, should default to fail_open
@@ -434,14 +419,12 @@ class TestSendGovernanceEvent:
 
     @pytest.mark.asyncio
     async def test_timeout_is_passed_correctly(self, mock_workflow):
-        """Test that start_to_close_timeout is timeout + 5 seconds."""
+        """start_to_close_timeout is timeout + 5 seconds."""
         from datetime import timedelta
 
         mock_workflow.execute_activity = AsyncMock(return_value={})
 
         await _send_governance_event(
-            api_url="https://api.openbox.ai",
-            api_key="test-key",
             payload={},
             timeout=25.0,
         )
@@ -1257,12 +1240,14 @@ class TestInterceptorClosures:
             execute_input = MagicMock()
             await inbound.execute_workflow(execute_input)
 
-            # Verify the captured values were used
+            # Verify the captured values were used. Credentials are no longer
+            # passed through activity input (they live on the activity instance
+            # itself), so the activity input only carries payload/timeout/policy.
             calls = mock_workflow.execute_activity.call_args_list
             if calls:
                 activity_input = calls[0].kwargs["args"][0]
-                assert activity_input["api_url"] == "https://custom.api.url"
-                assert activity_input["api_key"] == "custom-api-key"
+                assert "api_url" not in activity_input
+                assert "api_key" not in activity_input
                 assert activity_input["timeout"] == 45.0
                 assert activity_input["on_api_error"] == "fail_closed"
 

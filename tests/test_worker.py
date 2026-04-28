@@ -286,10 +286,10 @@ class TestCreateOpenboxWorkerWithConfig:
     @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
     @patch("openbox.workflow_interceptor.GovernanceInterceptor")
     @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
+    @patch("openbox.activities.build_governance_activities")
     def test_adds_send_governance_event_to_activities(
         self,
-        mock_send_governance_event,
+        mock_build_activities,
         mock_activity_interceptor,
         mock_governance_interceptor,
         mock_setup_otel,
@@ -298,8 +298,11 @@ class TestCreateOpenboxWorkerWithConfig:
         mock_validate_api_key,
         mock_worker_class,
     ):
-        """Test adds send_governance_event to activities."""
+        """The class-based send_governance_event method is registered on the worker."""
         from openbox.worker import create_openbox_worker
+
+        sentinel_method = Mock(name="send_governance_event_method")
+        mock_build_activities.return_value.send_governance_event = sentinel_method
 
         mock_client = Mock()
 
@@ -312,13 +315,17 @@ class TestCreateOpenboxWorkerWithConfig:
             activities=[my_activity],
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
+            enable_trace_propagation=False,
         )
 
-        # Verify Worker was called with send_governance_event in activities
         mock_worker_class.assert_called_once()
         call_kwargs = mock_worker_class.call_args[1]
         assert my_activity in call_kwargs["activities"]
-        assert mock_send_governance_event in call_kwargs["activities"]
+        assert sentinel_method in call_kwargs["activities"]
+        # Credentials must be captured on the activity instance, not flowed via input
+        mock_build_activities.assert_called_once_with(
+            api_url="http://localhost:8086", api_key="obx_test_key123"
+        )
 
     @patch("openbox.worker.Worker")
     @patch("openbox.worker.validate_api_key")
@@ -740,6 +747,7 @@ class TestParameterPassthrough:
             interceptors=[mock_custom_interceptor_1, mock_custom_interceptor_2],
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
+            enable_trace_propagation=False,
         )
 
         mock_worker_class.assert_called_once()
@@ -795,10 +803,12 @@ class TestParameterPassthrough:
         call_kwargs = mock_worker_class.call_args[1]
         activities = call_kwargs["activities"]
 
-        # Custom activities should be first, then send_governance_event
+        # Custom activities should be first, then the class-based governance method.
         assert activity_a in activities
         assert activity_b in activities
-        assert mock_send_governance_event in activities
+        assert any(
+            getattr(a, "__name__", "") == "send_governance_event" for a in activities
+        )
 
 
 # ===============================================================================
@@ -1490,33 +1500,38 @@ class TestPrintOutput:
         mock_validate_api_key,
         mock_worker_class,
         mock_print,
+        caplog,
     ):
-        """Test prints initialization messages when OpenBox is configured."""
+        """Initialization status is logged via the module logger (not print())."""
+        import logging
         from openbox.worker import create_openbox_worker
 
         mock_client = Mock()
 
-        create_openbox_worker(
-            client=mock_client,
-            task_queue="test-queue",
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key123",
-            governance_policy="fail_closed",
-            governance_timeout=45.0,
-            instrument_databases=True,
-            instrument_file_io=True,
-            hitl_enabled=True,
-        )
+        with caplog.at_level(logging.INFO, logger="openbox.worker"):
+            create_openbox_worker(
+                client=mock_client,
+                task_queue="test-queue",
+                openbox_url="http://localhost:8086",
+                openbox_api_key="obx_test_key123",
+                governance_policy="fail_closed",
+                governance_timeout=45.0,
+                instrument_databases=True,
+                instrument_file_io=True,
+                hitl_enabled=True,
+                enable_trace_propagation=False,
+            )
 
-        # Verify print calls
-        print_calls = [call[0][0] for call in mock_print.call_args_list]
-        assert "Initializing OpenBox SDK with URL: http://localhost:8086" in print_calls
-        assert "OpenBox SDK initialized successfully" in print_calls
-        assert "  - Governance policy: fail_closed" in print_calls
-        assert "  - Governance timeout: 45.0s" in print_calls
-        assert "  - Database instrumentation: enabled" in print_calls
-        assert "  - File I/O instrumentation: enabled" in print_calls
-        assert "  - Approval polling: enabled" in print_calls
+        # Must NOT use print() — library code should emit to logger
+        mock_print.assert_not_called()
+        log_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "Initializing OpenBox SDK with URL: http://localhost:8086" in log_text
+        assert "OpenBox SDK initialized" in log_text
+        assert "policy=fail_closed" in log_text
+        assert "timeout=45.0s" in log_text
+        assert "db=enabled" in log_text
+        assert "file=enabled" in log_text
+        assert "hitl=enabled" in log_text
 
     @patch("builtins.print")
     @patch("openbox.worker.Worker")
@@ -1538,27 +1553,31 @@ class TestPrintOutput:
         mock_validate_api_key,
         mock_worker_class,
         mock_print,
+        caplog,
     ):
-        """Test prints disabled status when features are turned off."""
+        """Disabled-status values surface in the logger output."""
+        import logging
         from openbox.worker import create_openbox_worker
 
         mock_client = Mock()
 
-        create_openbox_worker(
-            client=mock_client,
-            task_queue="test-queue",
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key123",
-            instrument_databases=False,
-            instrument_file_io=False,
-            hitl_enabled=False,
-        )
+        with caplog.at_level(logging.INFO, logger="openbox.worker"):
+            create_openbox_worker(
+                client=mock_client,
+                task_queue="test-queue",
+                openbox_url="http://localhost:8086",
+                openbox_api_key="obx_test_key123",
+                instrument_databases=False,
+                instrument_file_io=False,
+                hitl_enabled=False,
+                enable_trace_propagation=False,
+            )
 
-        # Verify print calls
-        print_calls = [call[0][0] for call in mock_print.call_args_list]
-        assert "  - Database instrumentation: disabled" in print_calls
-        assert "  - File I/O instrumentation: disabled" in print_calls
-        assert "  - Approval polling: disabled" in print_calls
+        mock_print.assert_not_called()
+        log_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "db=disabled" in log_text
+        assert "file=disabled" in log_text
+        assert "hitl=disabled" in log_text
 
 
 # ===============================================================================
@@ -1684,8 +1703,11 @@ class TestEdgeCases:
         mock_worker_class.assert_called_once()
         call_kwargs = mock_worker_class.call_args[1]
         assert call_kwargs["workflows"] == []
-        # activities will include send_governance_event
-        assert mock_send_governance_event in call_kwargs["activities"]
+        # Activities will include the class-based send_governance_event method.
+        assert any(
+            getattr(a, "__name__", "") == "send_governance_event"
+            for a in call_kwargs["activities"]
+        )
 
     @patch("openbox.worker.Worker")
     @patch("openbox.worker.validate_api_key")
@@ -1880,6 +1902,7 @@ class TestEdgeCases:
             interceptors=custom_interceptors,
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
+            enable_trace_propagation=False,
         )
 
         mock_worker_class.assert_called_once()

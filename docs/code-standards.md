@@ -83,10 +83,13 @@ This document defines coding standards, architectural patterns, and best practic
 async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
     info = workflow.info()
 
-    # Send event via activity (deterministic)
+    # Send event via activity (deterministic). NEVER pass credentials
+    # (api_key) in activity inputs — workflow history is readable by anyone
+    # with Describe permissions on the namespace. The activity holds the
+    # credentials on its instance (see rule 3).
     await workflow.execute_activity(
         "send_governance_event",
-        args=[{"api_url": api_url, "payload": {...}}],
+        args=[{"payload": {...}, "timeout": 30.0, "on_api_error": "fail_open"}],
         start_to_close_timeout=timedelta(seconds=30),
     )
 
@@ -122,25 +125,36 @@ async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
 #### Solution: Lazy Imports
 
 ```python
-# ✅ CORRECT - Lazy import in activity function
-@activity.defn(name="send_governance_event")
-async def send_governance_event(input: Dict[str, Any]):
-    import httpx  # ✅ Loaded only when activity executes
-    from datetime import datetime, timezone  # ✅ Lazy import
+# ✅ CORRECT - Class-based activity with credentials captured on self
+class GovernanceActivities:
+    def __init__(self, api_url: str, api_key: str):
+        self._api_url = api_url
+        self._api_key = api_key
 
-    async with httpx.AsyncClient() as client:
-        response = await client.post(...)
-    return response.json()
+    @activity.defn(name="send_governance_event")
+    async def send_governance_event(self, input: Dict[str, Any]):
+        import httpx  # ✅ Loaded only when activity executes
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self._api_url}/api/v1/governance/evaluate",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=input["payload"],
+            )
+        return response.json()
 ```
 
 ```python
-# ❌ WRONG - Module-level import
-import httpx  # ❌ Loaded when module imports, triggers sandbox
-
+# ❌ WRONG - Credentials in activity input (leaks to workflow history)
 @activity.defn(name="send_governance_event")
 async def send_governance_event(input: Dict[str, Any]):
+    # ❌ input["api_key"] is persisted in workflow history — readable by
+    # anyone with Describe access to the namespace.
     async with httpx.AsyncClient() as client:
-        response = await client.post(...)
+        response = await client.post(
+            input["api_url"],
+            headers={"Authorization": f"Bearer {input['api_key']}"},
+            json=input["payload"],
+        )
     return response.json()
 ```
 
