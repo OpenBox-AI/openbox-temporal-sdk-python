@@ -68,9 +68,14 @@ def _classify_sql(query: Any) -> str:
 
 
 def _generate_span_id() -> str:
-    """Generate a random 16-hex-char span ID for pymongo governance spans."""
-    import random
-    return format(random.getrandbits(64), "016x")
+    """Generate a random 16-hex-char span ID for pymongo governance spans.
+
+    Uses secrets (CSPRNG) rather than random — span IDs are not secrets, but
+    the stronger generator silences security scanners without runtime cost
+    and removes any chance of cross-trace ID collision under heavy load.
+    """
+    import secrets
+    return secrets.token_hex(8)
 
 
 def _build_db_span_data(
