@@ -1,0 +1,84 @@
+name: Generate SLSA Provenance
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "OCI image name without tag or digest"
+        required: true
+        type: string
+      digest:
+        description: "OCI image digest in sha256:<digest> format"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region for ECR authentication"
+        required: true
+        type: string
+      aws_role_to_assume:
+        description: "AWS role ARN assumed via OIDC"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "OCI image name without tag or digest"
+        required: true
+        type: string
+      digest:
+        description: "OCI image digest in sha256:<digest> format"
+        required: true
+        type: string
+      aws_region:
+        description: "AWS region for ECR authentication"
+        required: true
+        type: string
+      aws_role_to_assume:
+        description: "AWS role ARN assumed via OIDC"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare-registry-auth:
+    name: Prepare registry auth
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      registry_username: ${{ steps.registry.outputs.username }}
+      registry_password: ${{ steps.registry.outputs.password }}
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: ${{ inputs.aws_role_to_assume }}
+
+      - name: Fetch ECR registry credentials
+        id: registry
+        run: |
+          password="$(aws ecr get-login-password)"
+          echo "::add-mask::${password}"
+          echo "username=AWS" >> "${GITHUB_OUTPUT}"
+          echo "password=${password}" >> "${GITHUB_OUTPUT}"
+
+  provenance:
+    name: Sign SLSA provenance
+    needs:
+      - prepare-registry-auth
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ inputs.image }}
+      digest: ${{ inputs.digest }}
+      registry-username: ${{ needs.prepare-registry-auth.outputs.registry_username }}
+    secrets:
+      registry-password: ${{ needs.prepare-registry-auth.outputs.registry_password }}
