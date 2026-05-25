@@ -1,5 +1,5 @@
 # tests/test_signing_config.py
-"""Config-level DID/key validation, error mapping, and handoff payload tests."""
+"""Config-level DID/key validation and signing error-mapping tests."""
 
 import base64
 import os
@@ -17,8 +17,6 @@ from openbox.errors import (
     OpenBoxSigningError,
     map_signing_error,
 )
-from openbox.handoff import build_handoff_payload
-
 VALID_DID = "did:aip:12345678-1234-1234-1234-1234567890ab"
 
 
@@ -106,7 +104,6 @@ def test_initialize_loads_signer(monkeypatch):
         validate=False,
         agent_did=VALID_DID,
         agent_private_key=_valid_seed_b64(),
-        multi_agent_session_id="sess-42",
     )
     from openbox.config import get_global_config
 
@@ -114,7 +111,6 @@ def test_initialize_loads_signer(monkeypatch):
     assert cfg.has_signing() is True
     assert cfg.get_signer() is not None
     assert cfg.agent_did == VALID_DID
-    assert cfg.multi_agent_session_id == "sess-42"
 
 
 def test_global_config_repr_excludes_key_and_signer():
@@ -175,38 +171,6 @@ def test_map_signing_error_none():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Handoff payload
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def test_build_handoff_payload_minimal():
-    p = build_handoff_payload(VALID_DID, "sess-1")
-    assert p["event_type"] == "Handoff"
-    assert p["from_agent_did"] == VALID_DID
-    assert p["multi_agent_session_id"] == "sess-1"
-    # contract: never carry a generic agent_did field
-    assert "agent_did" not in p
-
-
-def test_build_handoff_payload_with_timestamp():
-    from datetime import datetime, timezone
-
-    ts = datetime(2026, 5, 25, 12, 0, 0, tzinfo=timezone.utc)
-    p = build_handoff_payload(VALID_DID, "sess-1", ts)
-    assert p["timestamp"].startswith("2026-05-25T12:00:00")
-    assert p["timestamp"].endswith("Z")
-
-
-@pytest.mark.parametrize(
-    "from_did,session",
-    [("", "sess"), ("   ", "sess"), (VALID_DID, ""), (VALID_DID, "  ")],
-)
-def test_build_handoff_payload_requires_both_fields(from_did, session):
-    with pytest.raises(ValueError):
-        build_handoff_payload(from_did, session)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # P1: manual-path constructors inherit the global signer (no unsigned leak)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -239,8 +203,8 @@ def test_governance_client_unsigned_when_no_global_signing():
     assert client._signer is None and client._agent_did is None
 
 
-def test_build_activities_inherits_global_session_id():
-    """Manual build_governance_activities must inherit multi_agent_session_id."""
+def test_build_activities_inherits_global_signer():
+    """Manual build_governance_activities must inherit the global signer/DID."""
     from openbox.activities import build_governance_activities
 
     initialize(
@@ -249,28 +213,11 @@ def test_build_activities_inherits_global_session_id():
         validate=False,
         agent_did=VALID_DID,
         agent_private_key=_valid_seed_b64(),
-        multi_agent_session_id="sess-grp-7",
     )
     acts = build_governance_activities(
         api_url="http://localhost:9999", api_key="obx_test_abc"
     )
-    assert acts._multi_agent_session_id == "sess-grp-7"
     assert acts._signer is not None and acts._agent_did == VALID_DID
-
-
-def test_build_activities_explicit_session_id_overrides_global():
-    from openbox.activities import build_governance_activities
-
-    initialize(
-        api_url="http://localhost:9999",
-        api_key="obx_test_abc",
-        validate=False,
-        multi_agent_session_id="global-sess",
-    )
-    acts = build_governance_activities(
-        api_url="http://h", api_key="k", multi_agent_session_id="explicit-sess"
-    )
-    assert acts._multi_agent_session_id == "explicit-sess"
 
 
 def test_explicit_signer_overrides_global():

@@ -282,7 +282,7 @@ def test_workflow_import_path_excludes_crypto_and_signing():
 
     code = (
         "import sys;"
-        "import openbox, openbox.workflow_interceptor, openbox.types, openbox.handoff;"
+        "import openbox, openbox.workflow_interceptor, openbox.types;"
         "m=set(sys.modules);"
         "cryptol=[x for x in m if x=='cryptography' or x.startswith('cryptography.')];"
         "assert not cryptol, cryptol;"

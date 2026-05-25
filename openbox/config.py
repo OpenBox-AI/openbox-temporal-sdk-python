@@ -122,10 +122,6 @@ class GovernanceConfig:
     # Temporal currently uses its native retry backoff for HITL polling.
     hitl_poll_interval_ms: int = 5000
 
-    # Multi-agent session grouping id, sent as omitempty on every governance
-    # payload built inside interceptors (workflow + activity). None = not sent.
-    multi_agent_session_id: Optional[str] = None
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Global Configuration Singleton
@@ -339,7 +335,6 @@ class _GlobalConfig:
         self.agent_did: Optional[str] = None
         # Loaded Ed25519PrivateKey object — NEVER the raw seed bytes/string.
         self._signer = None
-        self.multi_agent_session_id: Optional[str] = None
 
     def configure(
         self,
@@ -349,7 +344,6 @@ class _GlobalConfig:
         *,
         agent_did: Optional[str] = None,
         signer=None,
-        multi_agent_session_id: Optional[str] = None,
     ):
         """Configure OpenBox settings.
 
@@ -361,7 +355,6 @@ class _GlobalConfig:
         self.governance_timeout = governance_timeout
         self.agent_did = agent_did
         self._signer = signer
-        self.multi_agent_session_id = multi_agent_session_id
 
     def is_configured(self) -> bool:
         """Check if OpenBox is configured."""
@@ -409,7 +402,6 @@ def initialize(
     *,
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
-    multi_agent_session_id: Optional[str] = None,
 ) -> None:
     """
     Initialize OpenBox SDK.
@@ -423,8 +415,6 @@ def initialize(
             headers. Pair with agent_private_key (both-or-neither).
         agent_private_key: Base64 raw 32-byte Ed25519 seed. Signs every Core request
             locally. Non-repudiation material — never logged or stored as raw bytes.
-        multi_agent_session_id: Optional session id grouping events across agents
-            (sent as omitempty on every governance payload).
 
     Raises:
         OpenBoxAuthError: Invalid API key
@@ -488,7 +478,6 @@ def initialize(
         governance_timeout=governance_timeout,
         agent_did=agent_did,
         signer=signer,
-        multi_agent_session_id=multi_agent_session_id,
     )
 
     # Validate API key with server (signed when signing is configured).

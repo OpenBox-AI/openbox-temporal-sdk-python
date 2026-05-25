@@ -59,7 +59,6 @@ class TestCreateOpenboxWorkerWithConfig:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
-            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -145,7 +144,6 @@ class TestCreateOpenboxWorkerWithConfig:
             max_body_size=65536,
             agent_did=None,
             signer=None,
-            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -197,7 +195,6 @@ class TestCreateOpenboxWorkerWithConfig:
             skip_activity_types={"activity_a", "send_governance_event"},
             skip_signals={"signal_a"},
             hitl_enabled=False,
-            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -335,7 +332,6 @@ class TestCreateOpenboxWorkerWithConfig:
             api_key="obx_test_key123",
             agent_did=None,
             signer=None,
-            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
