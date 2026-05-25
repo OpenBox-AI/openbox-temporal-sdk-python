@@ -69,7 +69,6 @@ class TestPluginInit:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
-            multi_agent_session_id=None,
         )
 
     def test_creates_span_processor(self):

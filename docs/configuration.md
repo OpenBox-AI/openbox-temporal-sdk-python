@@ -41,12 +41,10 @@ agents. `agent_did` and `agent_private_key` are **both-or-neither**.
 |-----------|------|---------|-------------|
 | `agent_did` | `str` | `None` | Agent DID, format `did:aip:<uuid>`. Asserted in the `X-OpenBox-Agent-DID` signed header. |
 | `agent_private_key` | `str` | `None` | Base64-encoded raw 32-byte Ed25519 seed. Signs requests locally. Non-repudiation material — never logged, redacted from errors/`__repr__`. |
-| `multi_agent_session_id` | `str` | `None` | Groups events across agents; sent (omitempty) on every governance payload. |
 
 The private key is loaded once into a key object at init; the raw seed is never
 stored, logged, or echoed in errors. The signing module is kept off the Temporal
-workflow sandbox import path. Use `emit_handoff(from_agent_did, multi_agent_session_id)`
-from workflow code to record a multi-agent handoff (routed through a signing activity).
+workflow sandbox import path.
 
 Commonly supplied from env alongside the API key:
 

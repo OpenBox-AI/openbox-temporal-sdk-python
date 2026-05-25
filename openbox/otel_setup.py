@@ -87,7 +87,6 @@ def setup_opentelemetry_for_governance(
     max_body_size: Optional[int] = None,
     agent_did: Optional[str] = None,
     signer: Any = None,
-    multi_agent_session_id: Optional[str] = None,
 ) -> None:
     """
     Setup OpenTelemetry instrumentors with body capture hooks.
@@ -121,11 +120,9 @@ def setup_opentelemetry_for_governance(
     # Fall back to the globally-configured signer/DID when omitted, so a manual
     # SDK setup that called initialize() with signing still signs hook governance
     # calls (not just the validate GET).
-    from .config import resolve_signing_defaults, get_global_config
+    from .config import resolve_signing_defaults
 
     agent_did, signer = resolve_signing_defaults(agent_did, signer)
-    if multi_agent_session_id is None:
-        multi_agent_session_id = get_global_config().multi_agent_session_id
 
     # Configure governance modules
     _hook_gov.configure(
@@ -137,7 +134,6 @@ def setup_opentelemetry_for_governance(
         max_body_size=max_body_size,
         agent_did=agent_did,
         signer=signer,
-        multi_agent_session_id=multi_agent_session_id,
     )
     _db_gov.configure(span_processor)
 

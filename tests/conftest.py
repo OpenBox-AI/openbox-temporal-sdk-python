@@ -46,7 +46,6 @@ def reset_global_config():
         cfg.governance_timeout,
         cfg.agent_did,
         cfg._signer,
-        cfg.multi_agent_session_id,
     )
     yield
     (
@@ -55,7 +54,6 @@ def reset_global_config():
         cfg.governance_timeout,
         cfg.agent_did,
         cfg._signer,
-        cfg.multi_agent_session_id,
     ) = saved
 
 
@@ -68,7 +66,6 @@ def cleanup_governance():
     hook_gov._span_processor = None
     hook_gov._agent_did = None
     hook_gov._signer = None
-    hook_gov._multi_agent_session_id = None
 
 
 def setup_governance(
