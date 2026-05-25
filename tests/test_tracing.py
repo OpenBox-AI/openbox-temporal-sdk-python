@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 import pytest
 
 import openbox.hook_governance as hook_gov
+from .conftest import posted_payload
 from openbox.tracing import (
     _safe_serialize,
     _is_async_function,
@@ -1019,7 +1020,7 @@ class TestTracedGovernanceStarted:
         assert len(calls) == 2
 
         # Check started payload
-        started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
+        started_payload = posted_payload(calls[0])
         trigger = started_payload["spans"][0]
         assert trigger["hook_type"] == "function_call"
         assert trigger["function"] == "my_func"
@@ -1070,7 +1071,7 @@ class TestTracedGovernanceStarted:
             func_with_args(1, 2)
 
         calls = mock_client.post.call_args_list
-        started_payload = calls[0].kwargs.get("json") or calls[0][1].get("json")
+        started_payload = posted_payload(calls[0])
         trigger = started_payload["spans"][0]
         assert "args" in trigger
 
@@ -1101,7 +1102,7 @@ class TestTracedGovernanceCompleted:
         calls = mock_client.post.call_args_list
         assert len(calls) == 2
 
-        completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        completed_payload = posted_payload(calls[1])
         trigger = completed_payload["spans"][0]
         assert trigger["hook_type"] == "function_call"
         assert trigger["stage"] == "completed"
@@ -1118,7 +1119,7 @@ class TestTracedGovernanceCompleted:
             func_with_result()
 
         calls = mock_client.post.call_args_list
-        completed_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        completed_payload = posted_payload(calls[1])
         trigger = completed_payload["spans"][0]
         assert "result" in trigger
 
@@ -1137,7 +1138,7 @@ class TestTracedGovernanceCompleted:
         calls = mock_client.post.call_args_list
         assert len(calls) == 2
 
-        error_payload = calls[1].kwargs.get("json") or calls[1][1].get("json")
+        error_payload = posted_payload(calls[1])
         trigger = error_payload["spans"][0]
         assert trigger["stage"] == "completed"
         assert trigger["error"] == "test error"
@@ -1158,7 +1159,7 @@ class TestTracedGovernanceCompleted:
 
         stages = []
         for c in calls:
-            payload = c.kwargs.get("json") or c[1].get("json")
+            payload = posted_payload(c)
             stages.append(payload["spans"][0]["stage"])
         assert stages == ["started", "completed"]
 
@@ -1192,7 +1193,7 @@ class TestTracedGovernanceAsync:
 
         stages = []
         for c in calls:
-            payload = c[0][1] if len(c[0]) > 1 else c.kwargs.get("json")
+            payload = posted_payload(c)
             stages.append(payload["spans"][0]["stage"])
         assert stages == ["started", "completed"]
 

@@ -37,7 +37,10 @@ _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
 _max_body_size: Optional[int] = None
 _span_processor: Optional["WorkflowSpanProcessor"] = None
-_cached_auth_headers: Optional[dict] = None
+# AIP signing material + multi-agent grouping (set by configure()).
+_agent_did: Optional[str] = None
+_signer: Any = None
+_multi_agent_session_id: Optional[str] = None
 
 # Persistent HTTP clients. httpx Client/AsyncClient themselves are thread-safe
 # for requests; the locks below only guard creation against concurrent activities
@@ -57,6 +60,9 @@ def configure(
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
     max_body_size: Optional[int] = None,
+    agent_did: Optional[str] = None,
+    signer: Any = None,
+    multi_agent_session_id: Optional[str] = None,
 ) -> None:
     """Set governance config. Called once by setup_opentelemetry_for_governance().
 
@@ -67,20 +73,28 @@ def configure(
         api_timeout: Timeout for governance API calls (seconds)
         on_api_error: Error policy — "fail_open" or "fail_closed"
         max_body_size: Max chars for HTTP body capture (None = no limit)
+        agent_did: Agent DID for AIP signed requests (None = unsigned mode)
+        signer: Loaded Ed25519PrivateKey signer (None = unsigned mode)
+        multi_agent_session_id: Optional session id (omitempty) on hook payloads
     """
-    global _api_url, _api_key, _api_timeout, _on_api_error, _max_body_size, _span_processor, _sync_client, _async_client, _cached_auth_headers
+    global _api_url, _api_key, _api_timeout, _on_api_error, _max_body_size, _span_processor, _sync_client, _async_client
+    global _agent_did, _signer, _multi_agent_session_id
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
     _on_api_error = on_api_error
     _max_body_size = max_body_size
     _span_processor = span_processor
-    # Cache auth headers (immutable after configure)
-    _cached_auth_headers = build_auth_headers(api_key)
+    _agent_did = agent_did
+    _signer = signer
+    _multi_agent_session_id = multi_agent_session_id
     # Reset persistent clients so they pick up new timeout/config
     _sync_client = None
     _async_client = None
-    logger.info("Hook-level governance configured")
+    logger.info(
+        "Hook-level governance configured (signing=%s)",
+        "enabled" if (agent_did and signer is not None) else "disabled",
+    )
 
 
 def _get_sync_client() -> httpx.Client:
@@ -158,11 +172,6 @@ def extract_span_context(span) -> tuple:
     return span_id, trace_id, parent_span_id
 
 
-def _auth_headers() -> dict:
-    """Return cached auth headers (built once in configure())."""
-    return _cached_auth_headers or build_auth_headers(_api_key)
-
-
 def build_auth_headers(api_key: str) -> dict:
     """Build standard auth headers for governance API calls.
 
@@ -225,6 +234,10 @@ def _build_payload(
     from .types import rfc3339_now
 
     payload["timestamp"] = rfc3339_now()
+
+    # Multi-agent session grouping (omitempty).
+    if _multi_agent_session_id and "multi_agent_session_id" not in payload:
+        payload["multi_agent_session_id"] = _multi_agent_session_id
 
     # Ensure JSON-serializable (Temporal Payload objects slip through from activity_context)
     try:
@@ -370,12 +383,24 @@ def evaluate_sync(
     if payload is None:
         return
 
+    from .request_signing import prepare_signed_request, send_sync
+
+    headers, body = prepare_signed_request(
+        "POST",
+        "/api/v1/governance/evaluate",
+        payload,
+        api_key=_api_key,
+        agent_did=_agent_did,
+        signer=_signer,
+    )
+
     try:
         client = _get_sync_client()
-        response = client.post(
+        response = send_sync(
+            client,
             f"{_api_url}/api/v1/governance/evaluate",
-            json=payload,
-            headers=_auth_headers(),
+            headers,
+            body,
         )
         _send_and_handle(response, identifier, span=span)
 
@@ -418,12 +443,24 @@ async def evaluate_async(
     if payload is None:
         return
 
+    from .request_signing import prepare_signed_request, send_async
+
+    headers, body = prepare_signed_request(
+        "POST",
+        "/api/v1/governance/evaluate",
+        payload,
+        api_key=_api_key,
+        agent_did=_agent_did,
+        signer=_signer,
+    )
+
     try:
         client = _get_async_client()
-        response = await client.post(
+        response = await send_async(
+            client,
             f"{_api_url}/api/v1/governance/evaluate",
-            json=payload,
-            headers=_auth_headers(),
+            headers,
+            body,
         )
         _send_and_handle(response, identifier, span=span)
 

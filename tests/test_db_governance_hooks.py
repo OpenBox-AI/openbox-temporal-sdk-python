@@ -14,6 +14,7 @@ import pytest
 import openbox.db_governance_hooks as db_gov
 import openbox.hook_governance as hook_gov
 from openbox.types import GovernanceBlockedError, Verdict, WorkflowSpanBuffer
+from .conftest import posted_payload
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Fixtures
@@ -161,8 +162,8 @@ class TestCursorTracerPatch:
             tracer.traced_execution(cursor, cursor.execute, "SELECT * FROM users", None)
 
             assert mock.post.call_count == 2
-            started_payload = mock.post.call_args_list[0].kwargs["json"]
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            started_payload = posted_payload(mock.post.call_args_list[0])
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             assert started_payload["hook_trigger"] is True
             assert completed_payload["hook_trigger"] is True
             started = started_payload["spans"][0]
@@ -209,7 +210,7 @@ class TestCursorTracerPatch:
         for query, expected_op in test_cases:
             with _mock_httpx_client() as mock:
                 tracer.traced_execution(cursor, cursor.execute, query, None)
-                payload = mock.post.call_args_list[0].kwargs["json"]
+                payload = posted_payload(mock.post.call_args_list[0])
                 span = payload["spans"][0]
                 assert (
                     span["db_operation"] == expected_op
@@ -228,7 +229,7 @@ class TestCursorTracerPatch:
         with _mock_httpx_client() as mock:
             tracer.traced_execution(cursor, cursor.execute, "SELECT 1", None)
 
-            payload = mock.post.call_args_list[0].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[0])
             started = payload["spans"][0]
             assert started["db_system"] == "mysql"
             assert started["server_address"] == "mysql-host"
@@ -249,13 +250,11 @@ class TestCursorTracerPatch:
         assert mock_client.post.call_count == 2
 
         # Check started call
-        started_call = mock_client.post.call_args_list[0]
-        started_payload = started_call.kwargs["json"]
+        started_payload = posted_payload(mock_client.post.call_args_list[0])
         started_span = started_payload["spans"][0]
 
         # Check completed call
-        completed_call = mock_client.post.call_args_list[1]
-        completed_payload = completed_call.kwargs["json"]
+        completed_payload = posted_payload(mock_client.post.call_args_list[1])
         completed_span = completed_payload["spans"][0]
 
         # stage must be at ROOT level
@@ -290,7 +289,7 @@ class TestCursorTracerPatch:
                 tracer.traced_execution(cursor, failing_execute, "SELECT 1", None)
 
             assert mock.post.call_count == 2
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             completed = completed_payload["spans"][0]
             assert completed["stage"] == "completed"
             assert completed["error"] == "connection lost"
@@ -325,7 +324,7 @@ class TestRedisHooks:
             req_hook(span, instance, ("GET", "mykey"), {})
 
             assert mock.post.call_count == 1
-            payload = mock.post.call_args_list[0].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[0])
             assert payload["hook_trigger"] is True
             span_data = payload["spans"][0]
             assert span_data["hook_type"] == "db_query"
@@ -363,7 +362,7 @@ class TestRedisHooks:
 
             # 2 calls: started + completed
             assert mock.post.call_count == 2
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             completed = completed_payload["spans"][0]
             assert completed["stage"] == "completed"
             assert completed["db_system"] == "redis"
@@ -394,8 +393,8 @@ class TestSQLAlchemyHooks:
                 conn.execute(__import__("sqlalchemy").text("SELECT 1"))
 
             assert mock.post.call_count == 2
-            started_payload = mock.post.call_args_list[0].kwargs["json"]
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            started_payload = posted_payload(mock.post.call_args_list[0])
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             started = started_payload["spans"][0]
             completed = completed_payload["spans"][0]
             assert started["stage"] == "started"
@@ -431,10 +430,10 @@ class TestSQLAlchemyHooks:
             insert_calls = [
                 c
                 for c in mock.post.call_args_list
-                if c.kwargs["json"]["spans"][0]["db_operation"] == "INSERT"
+                if posted_payload(c)["spans"][0]["db_operation"] == "INSERT"
             ]
             assert len(insert_calls) >= 1
-            assert insert_calls[0].kwargs["json"]["spans"][0]["stage"] == "started"
+            assert posted_payload(insert_calls[0])["spans"][0]["stage"] == "started"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -578,7 +577,7 @@ class TestHookTriggerSchema:
         with _mock_httpx_client() as mock:
             req_hook(span, instance, ("HSET", "myhash", "field", "value"), {})
 
-            payload = mock.post.call_args_list[0].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[0])
             assert payload["hook_trigger"] is True
             span_data = payload["spans"][0]
             required = {
@@ -611,7 +610,7 @@ class TestHookTriggerSchema:
             req_hook(span, instance, ("GET", "k"), {})
             resp_hook(span, instance, "v")
 
-            payload = mock.post.call_args_list[1].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[1])
             span_data = payload["spans"][0]
             assert "duration_ns" in span_data
             assert "error" in span_data
@@ -708,7 +707,7 @@ class TestPymongoCommandListener:
             )
 
             assert mock.post.call_count == 1
-            payload = mock.post.call_args_list[0].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[0])
             assert payload["hook_trigger"] is True
             span_data = payload["spans"][0]
             assert span_data["stage"] == "started"
@@ -744,8 +743,8 @@ class TestPymongoCommandListener:
             )
 
             assert mock.post.call_count == 2
-            started_payload = mock.post.call_args_list[0].kwargs["json"]
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            started_payload = posted_payload(mock.post.call_args_list[0])
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             # db_statement should be consistent between started and completed
             assert (
                 started_payload["spans"][0]["db_statement"]
@@ -781,8 +780,8 @@ class TestPymongoCommandListener:
             )
 
             assert mock.post.call_count == 2
-            started_payload = mock.post.call_args_list[0].kwargs["json"]
-            completed_payload = mock.post.call_args_list[1].kwargs["json"]
+            started_payload = posted_payload(mock.post.call_args_list[0])
+            completed_payload = posted_payload(mock.post.call_args_list[1])
             assert (
                 started_payload["spans"][0]["db_statement"]
                 == completed_payload["spans"][0]["db_statement"]
@@ -844,7 +843,7 @@ class TestPymongoCommandListener:
         with _mock_httpx_client() as mock:
             listener.started(event)
 
-            payload = mock.post.call_args_list[0].kwargs["json"]
+            payload = posted_payload(mock.post.call_args_list[0])
             span_data = payload["spans"][0]
             assert span_data["server_address"] == "unknown"
             assert span_data["server_port"] == 27017

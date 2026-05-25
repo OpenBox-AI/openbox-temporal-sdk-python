@@ -67,6 +67,9 @@ class TestPluginInit:
             api_url="http://localhost:8086",
             api_key="obx_test_key_123",
             governance_timeout=45.0,
+            agent_did=None,
+            agent_private_key=None,
+            multi_agent_session_id=None,
         )
 
     def test_creates_span_processor(self):
@@ -106,6 +109,8 @@ class TestPluginInit:
             api_key="obx_test_key_123",
             timeout=20.0,
             on_api_error="fail_closed",
+            agent_did=None,
+            signer=None,
         )
 
     def test_is_simple_plugin_subclass(self):

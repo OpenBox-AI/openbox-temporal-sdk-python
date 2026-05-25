@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import sys
 
 import pytest
+from .conftest import posted_payload
 
 from openbox.activity_interceptor import (
     _rfc3339_now,
@@ -869,7 +870,7 @@ class TestActivityInterceptor:
         calls = mock_client_instance.post.call_args_list
         # First call should be ActivityStarted
         first_call = calls[0]
-        payload = first_call[1]["json"]
+        payload = posted_payload(first_call)
         assert payload["event_type"] == "ActivityStarted"
 
     @pytest.mark.asyncio
@@ -1115,7 +1116,16 @@ class TestActivityInterceptor:
 
         async def mock_post(*args, **kwargs):
             call_count[0] += 1
-            captured_payloads.append(kwargs.get("json", {}))
+            # Extract payload transparently (json= or content= kwarg)
+            import json as _json
+            body = kwargs.get("json")
+            if body is None:
+                raw = kwargs.get("content")
+                if raw is not None:
+                    body = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+                else:
+                    body = {}
+            captured_payloads.append(body)
             mock_response = MagicMock()
             mock_response.status_code = 200
             if call_count[0] == 1:
@@ -1225,7 +1235,7 @@ class TestActivityInterceptor:
 
         # Verify ActivityCompleted event was sent
         call_args = mock_client_instance.post.call_args
-        payload = call_args[1]["json"]
+        payload = posted_payload(call_args)
         assert payload["event_type"] == "ActivityCompleted"
         assert payload["activity_input"] == [{"input": "data"}]
         assert payload["activity_output"] == {"result": "success"}
@@ -1568,7 +1578,7 @@ class TestActivityInterceptor:
         # Verify the call
         call_args = mock_client_instance.post.call_args
         assert call_args[0][0] == "http://localhost:8086/api/v1/governance/evaluate"
-        payload = call_args[1]["json"]
+        payload = posted_payload(call_args)
         assert payload["source"] == "workflow-telemetry"
         assert payload["event_type"] == "ActivityStarted"
         assert payload["workflow_id"] == "test-workflow-id"
@@ -1624,7 +1634,7 @@ class TestActivityInterceptor:
                 spans=[{"name": "span1"}],
             )
 
-        payload = mock_client_instance.post.call_args[1]["json"]
+        payload = posted_payload(mock_client_instance.post.call_args)
         assert payload["activity_output"] == {"value": "test", "count": 42}
         assert payload["spans"] == [{"name": "span1"}]
 
@@ -1819,7 +1829,7 @@ class TestActivityInterceptor:
         # Verify the request
         call_args = mock_client_instance.post.call_args
         assert call_args[0][0] == "http://localhost:8086/api/v1/governance/approval"
-        payload = call_args[1]["json"]
+        payload = posted_payload(call_args)
         assert payload["workflow_id"] == "wf-123"
         assert payload["run_id"] == "run-456"
         assert payload["activity_id"] == "act-789"
