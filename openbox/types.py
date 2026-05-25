@@ -25,7 +25,6 @@ class WorkflowEventType(str, Enum):
     SIGNAL_RECEIVED = "SignalReceived"
     ACTIVITY_STARTED = "ActivityStarted"
     ACTIVITY_COMPLETED = "ActivityCompleted"
-    HANDOFF = "Handoff"
 
 
 class Verdict(str, Enum):

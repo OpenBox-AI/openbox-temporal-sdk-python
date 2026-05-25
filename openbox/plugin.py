@@ -57,8 +57,6 @@ class OpenBoxPlugin(SimplePlugin):
         # signing_required=true agents; every Core request is signed locally.
         agent_did: Optional[str] = None,
         agent_private_key: Optional[str] = None,
-        # Multi-agent session grouping id (omitempty on every governance payload).
-        multi_agent_session_id: Optional[str] = None,
         governance_timeout: float = 30.0,
         governance_policy: str = "fail_open",
         send_start_event: bool = True,
@@ -85,7 +83,6 @@ class OpenBoxPlugin(SimplePlugin):
             governance_timeout=governance_timeout,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
-            multi_agent_session_id=multi_agent_session_id,
         )
 
         # Pull the loaded signer (loaded once, never re-parsed downstream).
@@ -115,7 +112,6 @@ class OpenBoxPlugin(SimplePlugin):
             max_body_size=65536,
             agent_did=agent_did,
             signer=_signer,
-            multi_agent_session_id=multi_agent_session_id,
         )
 
         # 4. Create governance config
@@ -128,7 +124,6 @@ class OpenBoxPlugin(SimplePlugin):
             skip_activity_types=skip_activity_types or {"send_governance_event"},
             skip_signals=skip_signals or set(),
             hitl_enabled=hitl_enabled,
-            multi_agent_session_id=multi_agent_session_id,
         )
 
         # 5. Create interceptors
@@ -179,7 +174,6 @@ class OpenBoxPlugin(SimplePlugin):
             api_key=openbox_api_key,
             agent_did=agent_did,
             signer=_signer,
-            multi_agent_session_id=multi_agent_session_id,
         )
 
         # 7. Sandbox passthrough for opentelemetry

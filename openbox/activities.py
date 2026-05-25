@@ -150,15 +150,13 @@ class GovernanceActivities:
     worker-init time by the plugin / create_openbox_worker factory.
     """
 
-    def __init__(self, api_url: str, api_key: str, *, agent_did=None, signer=None,
-                 multi_agent_session_id=None):
+    def __init__(self, api_url: str, api_key: str, *, agent_did=None, signer=None):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
-        # AIP signing material + multi-agent grouping — held on the instance so
-        # they never flow through activity inputs / workflow history.
+        # AIP signing material — held on the instance so it never flows through
+        # activity inputs / workflow history.
         self._agent_did = agent_did
         self._signer = signer
-        self._multi_agent_session_id = multi_agent_session_id
 
     @activity.defn(name="send_governance_event")
     async def send_governance_event(
@@ -174,14 +172,8 @@ class GovernanceActivities:
         timeout = input.get("timeout", 30.0)
         on_api_error = input.get("on_api_error", "fail_open")
 
-        # Add timestamp in activity context (non-deterministic code allowed).
-        # setdefault preserves a caller-supplied timestamp (e.g. emit_handoff(ts=...)).
-        payload = {**event_payload}
-        payload.setdefault("timestamp", _rfc3339_now())
-        # Multi-agent session grouping (omitempty) — don't override a payload that
-        # already carries one (e.g. Handoff events set it explicitly).
-        if self._multi_agent_session_id and "multi_agent_session_id" not in payload:
-            payload["multi_agent_session_id"] = self._multi_agent_session_id
+        # Add timestamp in activity context (non-deterministic code allowed)
+        payload = {**event_payload, "timestamp": _rfc3339_now()}
         event_type = event_payload.get("event_type", "unknown")
 
         # Sign once over the exact bytes we transmit (timestamp included).
@@ -248,27 +240,22 @@ def build_governance_activities(
     *,
     agent_did=None,
     signer=None,
-    multi_agent_session_id=None,
 ) -> GovernanceActivities:
     """Factory used by plugin.py and worker.py to build the activities instance.
 
-    agent_did + signer enable AIP signed requests; multi_agent_session_id is sent
-    as omitempty on every event. All three stay on the instance (never in inputs).
+    agent_did + signer enable AIP signed requests; both stay on the instance
+    (never in inputs).
     """
-    # Fall back to the globally-configured signer/DID/session-id when omitted
-    # (manual setups), so workflow/signal events routed through this activity keep
-    # session grouping — not just signed requests.
-    from .config import resolve_signing_defaults, get_global_config
+    # Fall back to the globally-configured signer/DID when omitted (manual setups),
+    # so workflow/signal events routed through this activity are signed too.
+    from .config import resolve_signing_defaults
 
     agent_did, signer = resolve_signing_defaults(agent_did, signer)
-    if multi_agent_session_id is None:
-        multi_agent_session_id = get_global_config().multi_agent_session_id
     return GovernanceActivities(
         api_url=api_url,
         api_key=api_key,
         agent_did=agent_did,
         signer=signer,
-        multi_agent_session_id=multi_agent_session_id,
     )
 
 

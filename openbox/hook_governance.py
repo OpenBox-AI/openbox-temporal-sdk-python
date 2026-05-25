@@ -37,10 +37,9 @@ _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
 _max_body_size: Optional[int] = None
 _span_processor: Optional["WorkflowSpanProcessor"] = None
-# AIP signing material + multi-agent grouping (set by configure()).
+# AIP signing material (set by configure()).
 _agent_did: Optional[str] = None
 _signer: Any = None
-_multi_agent_session_id: Optional[str] = None
 
 # Persistent HTTP clients. httpx Client/AsyncClient themselves are thread-safe
 # for requests; the locks below only guard creation against concurrent activities
@@ -62,7 +61,6 @@ def configure(
     max_body_size: Optional[int] = None,
     agent_did: Optional[str] = None,
     signer: Any = None,
-    multi_agent_session_id: Optional[str] = None,
 ) -> None:
     """Set governance config. Called once by setup_opentelemetry_for_governance().
 
@@ -75,10 +73,9 @@ def configure(
         max_body_size: Max chars for HTTP body capture (None = no limit)
         agent_did: Agent DID for AIP signed requests (None = unsigned mode)
         signer: Loaded Ed25519PrivateKey signer (None = unsigned mode)
-        multi_agent_session_id: Optional session id (omitempty) on hook payloads
     """
     global _api_url, _api_key, _api_timeout, _on_api_error, _max_body_size, _span_processor, _sync_client, _async_client
-    global _agent_did, _signer, _multi_agent_session_id
+    global _agent_did, _signer
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
@@ -87,7 +84,6 @@ def configure(
     _span_processor = span_processor
     _agent_did = agent_did
     _signer = signer
-    _multi_agent_session_id = multi_agent_session_id
     # Reset persistent clients so they pick up new timeout/config
     _sync_client = None
     _async_client = None
@@ -234,10 +230,6 @@ def _build_payload(
     from .types import rfc3339_now
 
     payload["timestamp"] = rfc3339_now()
-
-    # Multi-agent session grouping (omitempty).
-    if _multi_agent_session_id and "multi_agent_session_id" not in payload:
-        payload["multi_agent_session_id"] = _multi_agent_session_id
 
     # Ensure JSON-serializable (Temporal Payload objects slip through from activity_context)
     try:
