@@ -33,6 +33,7 @@ from .errors import (
     OpenBoxAuthError,
     OpenBoxNetworkError,
     OpenBoxInsecureURLError,
+    OpenBoxSigningError,
     GovernanceBlockedError,
     GovernanceHaltError,
     GovernanceAPIError,
@@ -41,6 +42,7 @@ from .errors import (
     ApprovalRejectedError,
     ApprovalTimeoutError,
     extract_governance_error,
+    map_signing_error,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -89,6 +91,12 @@ from .verdict_handler import enforce_verdict, VerdictEnforcementResult
 # ═══════════════════════════════════════════════════════════════════════════════
 
 from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-agent handoff (sandbox-safe — routes through the governance activity)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from .handoff import emit_handoff
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Governance HTTP Client (sandbox-safe — httpx imported lazily inside methods)
@@ -151,6 +159,7 @@ __all__ = [
     "OpenBoxAuthError",
     "OpenBoxNetworkError",
     "OpenBoxInsecureURLError",
+    "OpenBoxSigningError",
     "GovernanceBlockedError",
     "GovernanceHaltError",
     "GovernanceAPIError",
@@ -159,6 +168,7 @@ __all__ = [
     "ApprovalRejectedError",
     "ApprovalTimeoutError",
     "extract_governance_error",
+    "map_signing_error",
     # Types
     "Verdict",
     "WorkflowEventType",
@@ -176,6 +186,8 @@ __all__ = [
     "handle_approval_response",
     "raise_approval_pending",
     "should_skip_hitl",
+    # Multi-agent handoff
+    "emit_handoff",
     # Governance HTTP client
     "GovernanceClient",
 ]

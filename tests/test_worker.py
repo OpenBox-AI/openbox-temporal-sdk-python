@@ -57,6 +57,9 @@ class TestCreateOpenboxWorkerWithConfig:
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
             governance_timeout=45.0,
+            agent_did=None,
+            agent_private_key=None,
+            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -140,6 +143,9 @@ class TestCreateOpenboxWorkerWithConfig:
             api_timeout=30.0,
             on_api_error="fail_open",
             max_body_size=65536,
+            agent_did=None,
+            signer=None,
+            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -191,6 +197,7 @@ class TestCreateOpenboxWorkerWithConfig:
             skip_activity_types={"activity_a", "send_governance_event"},
             skip_signals={"signal_a"},
             hitl_enabled=False,
+            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
@@ -324,7 +331,11 @@ class TestCreateOpenboxWorkerWithConfig:
         assert sentinel_method in call_kwargs["activities"]
         # Credentials must be captured on the activity instance, not flowed via input
         mock_build_activities.assert_called_once_with(
-            api_url="http://localhost:8086", api_key="obx_test_key123"
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            agent_did=None,
+            signer=None,
+            multi_agent_session_id=None,
         )
 
     @patch("openbox.worker.Worker")
