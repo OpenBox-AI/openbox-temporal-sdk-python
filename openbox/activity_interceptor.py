@@ -666,6 +666,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             **serialized_extra,
         }
 
+        # Multi-agent session grouping (omitempty).
+        if (
+            self._config.multi_agent_session_id
+            and "multi_agent_session_id" not in payload
+        ):
+            payload["multi_agent_session_id"] = self._config.multi_agent_session_id
+
         # Final safety check - ensure payload is JSON serializable
         try:
             json.dumps(payload)

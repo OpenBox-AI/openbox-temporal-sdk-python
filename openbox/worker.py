@@ -49,6 +49,12 @@ def create_openbox_worker(
     # OpenBox config (required)
     openbox_url: str,
     openbox_api_key: str,
+    # AIP DID + Ed25519 signing (both-or-neither). When set, every Core request
+    # is signed locally; required for signing_required=true agents.
+    agent_did: Optional[str] = None,
+    agent_private_key: Optional[str] = None,
+    # Multi-agent session grouping id (omitempty on every governance payload).
+    multi_agent_session_id: Optional[str] = None,
     governance_timeout: float = 30.0,
     governance_policy: str = "fail_open",
     send_start_event: bool = True,
@@ -169,12 +175,22 @@ def create_openbox_worker(
 
     set_temporal_client(client)
 
-    # 1. Validate API key (also validates URL security - HTTPS required for non-localhost)
+    # 1. Validate API key (also validates URL security + loads the Ed25519 signer).
+    #    A signing_required=true agent is validated via a signed /auth/validate GET.
     validate_api_key(
         api_url=openbox_url,
         api_key=openbox_api_key,
         governance_timeout=governance_timeout,
+        agent_did=agent_did,
+        agent_private_key=agent_private_key,
+        multi_agent_session_id=multi_agent_session_id,
     )
+
+    # Pull the loaded signer (Ed25519PrivateKey object) from global config so the
+    # raw seed is loaded exactly once and never re-parsed downstream.
+    from .config import get_global_config
+
+    _signer = get_global_config().get_signer()
 
     # 2. Create span processor
     span_processor = WorkflowSpanProcessor(ignored_url_prefixes=[openbox_url])
@@ -194,6 +210,9 @@ def create_openbox_worker(
         api_timeout=governance_timeout,
         on_api_error=governance_policy,
         max_body_size=65536,
+        agent_did=agent_did,
+        signer=_signer,
+        multi_agent_session_id=multi_agent_session_id,
     )
 
     # 4. Create governance config
@@ -206,6 +225,7 @@ def create_openbox_worker(
         skip_activity_types=skip_activity_types or {"send_governance_event"},
         skip_signals=skip_signals or set(),
         hitl_enabled=hitl_enabled,
+        multi_agent_session_id=multi_agent_session_id,
     )
 
     # 5. Create interceptors
@@ -226,6 +246,8 @@ def create_openbox_worker(
         api_key=openbox_api_key,
         timeout=governance_timeout,
         on_api_error=governance_policy,
+        agent_did=agent_did,
+        signer=_signer,
     )
 
     activity_interceptor = ActivityGovernanceInterceptor(
@@ -241,7 +263,11 @@ def create_openbox_worker(
     from .activities import build_governance_activities
 
     governance_activities = build_governance_activities(
-        api_url=openbox_url, api_key=openbox_api_key
+        api_url=openbox_url,
+        api_key=openbox_api_key,
+        agent_did=agent_did,
+        signer=_signer,
+        multi_agent_session_id=multi_agent_session_id,
     )
 
     # Add OpenBox components
