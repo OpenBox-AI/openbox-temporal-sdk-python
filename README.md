@@ -3,7 +3,8 @@
 OpenBox SDK provides **governance and observability** for Temporal workflows by capturing workflow/activity lifecycle events, HTTP telemetry, database queries, and file operations, then sending them to OpenBox Core for policy evaluation.
 
 **Key Features:**
-- 6 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted)
+- 7 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted, Handoff)
+- Multi-agent sessions — propagate a shared `multi_agent_session_id` across workflow + activity events
 - 5-tier verdict system (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
 - **Hook-level governance** — per-operation evaluation (HTTP requests, file I/O, database queries, function tracing) with started/completed stages
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
@@ -199,6 +200,48 @@ OpenBox Core returns a verdict indicating what action the SDK should take.
 | SignalReceived | Signal received | workflow_id, signal_name, signal_args |
 | ActivityStarted | Activity begins | activity_id, activity_type, activity_input |
 | ActivityCompleted | Activity ends | activity_id, activity_type, activity_input, activity_output, spans, status, duration |
+| Handoff | Agent hands off to another agent | from_agent_did, multi_agent_session_id |
+
+When a workflow runs as part of a multi-agent session (see below), every event
+above also carries `multi_agent_session_id`. The field is omitted when no
+session id is supplied.
+
+---
+
+## Multi-Agent Sessions
+
+Group the work of several agents under one shared `multi_agent_session_id`. The
+SDK only **propagates** the id you supply — it never invents one, and it owns no
+routing, session minting, or agent registry (those stay in your application).
+
+**Supply the id** via the Temporal workflow memo at start time:
+
+```python
+await client.start_workflow(
+    MyWorkflow.run,
+    arg,
+    id="order-123",
+    task_queue="my-queue",
+    memo={"openbox_multi_agent_session_id": session_id},
+)
+```
+
+The SDK then tags every governance event (workflow, activity, and hook events)
+with that id, propagating it from the workflow to its activities automatically.
+
+**Emit an explicit handoff** from inside workflow code:
+
+```python
+from openbox import emit_handoff
+
+await emit_handoff(
+    multi_agent_session_id=session_id,
+    from_agent_did="did:aip:...",   # the sending agent
+)
+```
+
+The receiving agent is derived server-side from the signed identity and is never
+sent. `emit_handoff` validates its arguments locally before any network call.
 
 ---
 

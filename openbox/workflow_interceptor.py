@@ -24,9 +24,12 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import (
     Interceptor,
     WorkflowInboundInterceptor,
+    WorkflowOutboundInterceptor,
     WorkflowInterceptorClassInput,
     ExecuteWorkflowInput,
     HandleSignalInput,
+    StartActivityInput,
+    StartLocalActivityInput,
 )
 
 from .errors import (
@@ -36,6 +39,7 @@ from .errors import (
     GOVERNANCE_STOP_ERROR_TYPE,
 )
 from .types import Verdict
+from .multi_agent import read_session_from_memo, inject_session_header
 
 
 def _application_error_type(exc: BaseException) -> Optional[str]:
@@ -241,13 +245,38 @@ class GovernanceInterceptor(Interceptor):
         skip_types = self.skip_workflow_types
         skip_sigs = self.skip_signals
 
+        class _Outbound(WorkflowOutboundInterceptor):
+            """Stamps the multi-agent session id onto every scheduled activity."""
+
+            def start_activity(self, input: StartActivityInput):
+                sid = read_session_from_memo()
+                if sid:
+                    input.headers = inject_session_header(
+                        input.headers, sid, workflow.payload_converter()
+                    )
+                return super().start_activity(input)
+
+            def start_local_activity(self, input: StartLocalActivityInput):
+                sid = read_session_from_memo()
+                if sid:
+                    input.headers = inject_session_header(
+                        input.headers, sid, workflow.payload_converter()
+                    )
+                return super().start_local_activity(input)
+
         class _Inbound(WorkflowInboundInterceptor):
+            def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+                super().init(_Outbound(outbound))
+
             async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
                 info = workflow.info()
 
                 # Skip if configured
                 if info.workflow_type in skip_types:
                     return await super().execute_workflow(input)
+
+                # Multi-agent session id from memo (app-supplied; omitempty).
+                sid = read_session_from_memo()
 
                 # WorkflowStarted event
                 if send_start and workflow.patched("openbox-v2-start"):
@@ -259,6 +288,7 @@ class GovernanceInterceptor(Interceptor):
                             "run_id": info.run_id,
                             "workflow_type": info.workflow_type,
                             "task_queue": info.task_queue,
+                            **({"multi_agent_session_id": sid} if sid else {}),
                         },
                         timeout,
                         on_error,
@@ -288,6 +318,7 @@ class GovernanceInterceptor(Interceptor):
                                 "run_id": info.run_id,
                                 "workflow_type": info.workflow_type,
                                 "workflow_output": workflow_output,
+                                **({"multi_agent_session_id": sid} if sid else {}),
                             },
                             timeout,
                             on_error,
@@ -310,6 +341,7 @@ class GovernanceInterceptor(Interceptor):
                                     "run_id": info.run_id,
                                     "workflow_type": info.workflow_type,
                                     "error": error,
+                                    **({"multi_agent_session_id": sid} if sid else {}),
                                 },
                                 timeout,
                                 on_error,
@@ -328,6 +360,7 @@ class GovernanceInterceptor(Interceptor):
 
                 # SignalReceived event - check verdict and store if "stop"
                 if workflow.patched("openbox-v2-signal"):
+                    sid = read_session_from_memo()
                     result = await _send_governance_event(
                         {
                             "source": "workflow-telemetry",
@@ -338,6 +371,7 @@ class GovernanceInterceptor(Interceptor):
                             "task_queue": info.task_queue,
                             "signal_name": input.signal,
                             "signal_args": input.args,
+                            **({"multi_agent_session_id": sid} if sid else {}),
                         },
                         timeout,
                         on_error,

@@ -57,6 +57,10 @@ from .types import (
     GuardrailsCheckResult,
 )
 
+# Multi-agent primitives (sandbox-safe — only imports temporalio.workflow eagerly;
+# signing/HTTP routed lazily through the governance activity).
+from .multi_agent import emit_handoff
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Span Processor
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -169,6 +173,8 @@ __all__ = [
     "WorkflowSpanBuffer",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
+    # Multi-agent
+    "emit_handoff",
     # Span Processor
     "WorkflowSpanProcessor",
     # Interceptors
