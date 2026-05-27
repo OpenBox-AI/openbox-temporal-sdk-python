@@ -33,6 +33,7 @@ from .errors import (
     OpenBoxAuthError,
     OpenBoxNetworkError,
     OpenBoxInsecureURLError,
+    OpenBoxSigningError,
     GovernanceBlockedError,
     GovernanceHaltError,
     GovernanceAPIError,
@@ -41,6 +42,7 @@ from .errors import (
     ApprovalRejectedError,
     ApprovalTimeoutError,
     extract_governance_error,
+    map_signing_error,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +153,7 @@ __all__ = [
     "OpenBoxAuthError",
     "OpenBoxNetworkError",
     "OpenBoxInsecureURLError",
+    "OpenBoxSigningError",
     "GovernanceBlockedError",
     "GovernanceHaltError",
     "GovernanceAPIError",
@@ -159,6 +162,7 @@ __all__ = [
     "ApprovalRejectedError",
     "ApprovalTimeoutError",
     "extract_governance_error",
+    "map_signing_error",
     # Types
     "Verdict",
     "WorkflowEventType",

@@ -67,14 +67,19 @@ class GovernanceClient:
         api_key: str,
         timeout: float = 30.0,
         on_api_error: str = "fail_open",
+        agent_did: Optional[str] = None,
+        signer=None,
     ):
         self._api_url = api_url.rstrip("/")
+        self._api_key = api_key
         self._timeout = timeout
         self._on_api_error = on_api_error
-        # Cache auth headers at construction (immutable after init)
-        from .hook_governance import build_auth_headers
+        # DID + Ed25519 signer for AIP signed requests (None = unsigned mode).
+        # Fall back to the globally-configured signer when omitted so manual
+        # setups that called initialize() with signing don't send unsigned calls.
+        from .config import resolve_signing_defaults
 
-        self._cached_headers = build_auth_headers(api_key)
+        self._agent_did, self._signer = resolve_signing_defaults(agent_did, signer)
 
     async def evaluate_event(
         self, payload: dict
@@ -91,13 +96,23 @@ class GovernanceClient:
         """
         # Lazy import — avoids Temporal sandbox restrictions at module level
         import httpx
+        from .request_signing import prepare_signed_request
+
+        headers, body = prepare_signed_request(
+            "POST",
+            "/api/v1/governance/evaluate",
+            payload,
+            api_key=self._api_key,
+            agent_did=self._agent_did,
+            signer=self._signer,
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
-                    json=payload,
-                    headers=self._cached_headers,
+                    content=body,
+                    headers=headers,
                 )
 
                 if response.status_code >= 400:
@@ -142,6 +157,7 @@ class GovernanceClient:
         """
         # Lazy import — avoids Temporal sandbox restrictions at module level
         import httpx
+        from .request_signing import prepare_signed_request
 
         payload = {
             "workflow_id": workflow_id,
@@ -149,12 +165,21 @@ class GovernanceClient:
             "activity_id": activity_id,
         }
 
+        headers, body = prepare_signed_request(
+            "POST",
+            "/api/v1/governance/approval",
+            payload,
+            api_key=self._api_key,
+            agent_did=self._agent_did,
+            signer=self._signer,
+        )
+
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/approval",
-                    json=payload,
-                    headers=self._cached_headers,
+                    content=body,
+                    headers=headers,
                 )
 
                 if response.status_code == 200:
