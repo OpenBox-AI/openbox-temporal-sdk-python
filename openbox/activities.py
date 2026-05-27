@@ -35,7 +35,6 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .types import Verdict
-from .hook_governance import build_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +150,13 @@ class GovernanceActivities:
     worker-init time by the plugin / create_openbox_worker factory.
     """
 
-    def __init__(self, api_url: str, api_key: str):
+    def __init__(self, api_url: str, api_key: str, *, agent_did=None, signer=None):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
+        # AIP signing material — held on the instance so it never flows through
+        # activity inputs / workflow history.
+        self._agent_did = agent_did
+        self._signer = signer
 
     @activity.defn(name="send_governance_event")
     async def send_governance_event(
@@ -173,12 +176,24 @@ class GovernanceActivities:
         payload = {**event_payload, "timestamp": _rfc3339_now()}
         event_type = event_payload.get("event_type", "unknown")
 
+        # Sign once over the exact bytes we transmit (timestamp included).
+        from .request_signing import prepare_signed_request
+
+        headers, body = prepare_signed_request(
+            "POST",
+            "/api/v1/governance/evaluate",
+            payload,
+            api_key=self._api_key,
+            agent_did=self._agent_did,
+            signer=self._signer,
+        )
+
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
-                    json=payload,
-                    headers=build_auth_headers(self._api_key),
+                    content=body,
+                    headers=headers,
                 )
 
                 if response.status_code != 200:
@@ -220,10 +235,28 @@ class GovernanceActivities:
 
 
 def build_governance_activities(
-    api_url: str, api_key: str
+    api_url: str,
+    api_key: str,
+    *,
+    agent_did=None,
+    signer=None,
 ) -> GovernanceActivities:
-    """Factory used by plugin.py and worker.py to build the activities instance."""
-    return GovernanceActivities(api_url=api_url, api_key=api_key)
+    """Factory used by plugin.py and worker.py to build the activities instance.
+
+    agent_did + signer enable AIP signed requests; both stay on the instance
+    (never in inputs).
+    """
+    # Fall back to the globally-configured signer/DID when omitted (manual setups),
+    # so workflow/signal events routed through this activity are signed too.
+    from .config import resolve_signing_defaults
+
+    agent_did, signer = resolve_signing_defaults(agent_did, signer)
+    return GovernanceActivities(
+        api_url=api_url,
+        api_key=api_key,
+        agent_did=agent_did,
+        signer=signer,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
