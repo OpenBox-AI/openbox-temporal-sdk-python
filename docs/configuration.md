@@ -31,6 +31,28 @@
 | `hitl_enabled` | `bool` | `True` | Enable approval polling for `REQUIRE_APPROVAL` |
 | `hitl_poll_interval_ms` | `int` | `5000` | Polling interval in milliseconds for approval status |
 
+## Identity & Signing (AIP DID)
+
+When provided, every request to OpenBox Core is signed locally with Ed25519 and
+carries the agent's DID in signed headers — required for `signing_required=true`
+agents. `agent_did` and `agent_private_key` are **both-or-neither**.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `agent_did` | `str` | `None` | Agent DID, format `did:aip:<uuid>`. Asserted in the `X-OpenBox-Agent-DID` signed header. |
+| `agent_private_key` | `str` | `None` | Base64-encoded raw 32-byte Ed25519 seed. Signs requests locally. Non-repudiation material — never logged, redacted from errors/`__repr__`. |
+
+The private key is loaded once into a key object at init; the raw seed is never
+stored, logged, or echoed in errors. The signing module is kept off the Temporal
+workflow sandbox import path.
+
+Commonly supplied from env alongside the API key:
+
+```
+OPENBOX_AGENT_DID=did:aip:<uuid>
+OPENBOX_AGENT_PRIVATE_KEY=<base64 raw 32-byte Ed25519 seed>
+```
+
 ## Governance Context
 
 | Parameter | Type | Default | Description |
@@ -59,6 +81,10 @@ worker = create_openbox_worker(
     # Required
     openbox_url=os.getenv("OPENBOX_URL"),
     openbox_api_key=os.getenv("OPENBOX_API_KEY"),
+
+    # Identity & signing (both-or-neither)
+    agent_did=os.getenv("OPENBOX_AGENT_DID"),
+    agent_private_key=os.getenv("OPENBOX_AGENT_PRIVATE_KEY"),
 
     # Optional
     governance_policy="fail_closed",

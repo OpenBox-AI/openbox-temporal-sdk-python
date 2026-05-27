@@ -1,5 +1,6 @@
 """Shared test fixtures for governance tests."""
 
+import json as _json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,53 @@ import openbox.hook_governance as hook_gov
 from openbox.types import GovernanceBlockedError, WorkflowSpanBuffer
 
 
+def posted_payload(call) -> dict:
+    """Decode the governance payload from a mocked ``.post`` call.
+
+    The signed transport sends ``content=<compact json bytes>`` instead of the
+    legacy ``json=<dict>``. This helper transparently reads whichever form the
+    call used so payload assertions stay transport-agnostic.
+    """
+    kw = getattr(call, "kwargs", None) or (call[1] if len(call) > 1 else {})
+    if kw.get("json") is not None:
+        return kw["json"]
+    body = kw.get("content")
+    if body is None:
+        return {}
+    if isinstance(body, (bytes, bytearray)):
+        body = body.decode("utf-8")
+    return _json.loads(body)
+
+
+@pytest.fixture(autouse=True)
+def reset_global_config():
+    """Reset the global _GlobalConfig singleton around every test.
+
+    initialize() mutates a module-level singleton that worker.py reads via
+    get_global_config().get_signer(). Without this, a test that enables signing
+    leaks the signer/DID into later tests (e.g. worker tests that mock
+    validate_api_key and expect signer=None).
+    """
+    import openbox.config as _cfg
+
+    cfg = _cfg.get_global_config()
+    saved = (
+        cfg.api_url,
+        cfg.api_key,
+        cfg.governance_timeout,
+        cfg.agent_did,
+        cfg._signer,
+    )
+    yield
+    (
+        cfg.api_url,
+        cfg.api_key,
+        cfg.governance_timeout,
+        cfg.agent_did,
+        cfg._signer,
+    ) = saved
+
+
 @pytest.fixture
 def cleanup_governance():
     """Reset hook_governance module state after each test."""
@@ -16,6 +64,8 @@ def cleanup_governance():
     hook_gov._api_url = ""
     hook_gov._api_key = ""
     hook_gov._span_processor = None
+    hook_gov._agent_did = None
+    hook_gov._signer = None
 
 
 def setup_governance(

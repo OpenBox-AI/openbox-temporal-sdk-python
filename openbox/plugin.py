@@ -53,6 +53,10 @@ class OpenBoxPlugin(SimplePlugin):
         *,
         openbox_url: str,
         openbox_api_key: str,
+        # AIP DID + Ed25519 signing (both-or-neither). Required for
+        # signing_required=true agents; every Core request is signed locally.
+        agent_did: Optional[str] = None,
+        agent_private_key: Optional[str] = None,
         governance_timeout: float = 30.0,
         governance_policy: str = "fail_open",
         send_start_event: bool = True,
@@ -71,12 +75,20 @@ class OpenBoxPlugin(SimplePlugin):
         # TracingInterceptor under the hood.
         enable_trace_propagation: bool = True,
     ):
-        # 1. Validate API key (sync, uses urllib)
+        # 1. Validate API key (sync, uses urllib). Also loads the Ed25519 signer
+        #    and validates a signing_required=true agent via a signed GET.
         validate_api_key(
             api_url=openbox_url,
             api_key=openbox_api_key,
             governance_timeout=governance_timeout,
+            agent_did=agent_did,
+            agent_private_key=agent_private_key,
         )
+
+        # Pull the loaded signer (loaded once, never re-parsed downstream).
+        from .config import get_global_config
+
+        _signer = get_global_config().get_signer()
 
         # 2. Create span processor
         self._span_processor = WorkflowSpanProcessor(
@@ -98,6 +110,8 @@ class OpenBoxPlugin(SimplePlugin):
             api_timeout=governance_timeout,
             on_api_error=governance_policy,
             max_body_size=65536,
+            agent_did=agent_did,
+            signer=_signer,
         )
 
         # 4. Create governance config
@@ -121,6 +135,8 @@ class OpenBoxPlugin(SimplePlugin):
             api_key=openbox_api_key,
             timeout=governance_timeout,
             on_api_error=governance_policy,
+            agent_did=agent_did,
+            signer=_signer,
         )
 
         interceptors: list = [
@@ -154,7 +170,10 @@ class OpenBoxPlugin(SimplePlugin):
         from .activities import build_governance_activities
 
         governance_activities = build_governance_activities(
-            api_url=openbox_url, api_key=openbox_api_key
+            api_url=openbox_url,
+            api_key=openbox_api_key,
+            agent_did=agent_did,
+            signer=_signer,
         )
 
         # 7. Sandbox passthrough for opentelemetry

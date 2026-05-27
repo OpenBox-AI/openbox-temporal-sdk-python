@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import httpx
 from temporalio.exceptions import ApplicationError
+from .conftest import posted_payload
 
 from openbox.activities import (
     _rfc3339_now,
@@ -326,7 +327,7 @@ class TestSendGovernanceEvent:
 
             # Get the actual call arguments
             call_args = mock_client.post.call_args
-            sent_payload = call_args.kwargs["json"]
+            sent_payload = posted_payload(call_args)
 
             # Verify timestamp was added
             assert "timestamp" in sent_payload
@@ -346,7 +347,7 @@ class TestSendGovernanceEvent:
             await send_governance_event(base_input)
 
             call_args = mock_client.post.call_args
-            sent_payload = call_args.kwargs["json"]
+            sent_payload = posted_payload(call_args)
 
             assert sent_payload["event_type"] == "WorkflowStarted"
             assert sent_payload["workflow_id"] == "test-workflow-123"
@@ -755,7 +756,7 @@ class TestSendGovernanceEvent:
             assert result["success"] is True
             # Timestamp should still be added
             call_args = mock_client.post.call_args
-            sent_payload = call_args.kwargs["json"]
+            sent_payload = posted_payload(call_args)
             assert "timestamp" in sent_payload
 
     async def test_missing_reason_in_response_uses_default(self, base_input):

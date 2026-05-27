@@ -71,6 +71,70 @@ class OpenBoxInsecureURLError(OpenBoxConfigError):
     """Raised when HTTP is used for non-localhost URLs."""
 
 
+class OpenBoxSigningError(OpenBoxAuthError):
+    """Raised when Core rejects a signed (AIP DID) request.
+
+    Attributes:
+        reason_code: Core's machine reason code (e.g. ``signature_invalid``).
+    """
+
+    def __init__(self, message: str, reason_code: str | None = None):
+        self.reason_code = reason_code
+        super().__init__(message)
+
+
+# Core signed-request rejection reason codes → actionable SDK guidance.
+# NOTE: forward-compatible. Core today often collapses identity failures into a
+# generic "invalid token" body with no machine code; when that happens
+# map_signing_error() is not reached and callers get a generic OpenBoxAuthError.
+# These richer messages activate once Core emits a machine reason code in the
+# body ("reason_code"/"code"/"reason"). Keys mirror Core's verification handler.
+_SIGNING_REASON_MESSAGES: dict[str, str] = {
+    "signature_invalid": (
+        "Request signature rejected (signature_invalid). The signed bytes did not "
+        "match — usually a body-hash mismatch (send content= bytes, never json=) or "
+        "a wrong/rotated private key."
+    ),
+    "nonce_replayed": (
+        "Request nonce was already used (nonce_replayed). Each request must carry a "
+        "fresh nonce; do not retry a fully-prepared request verbatim."
+    ),
+    "did_agent_mismatch": (
+        "DID does not match the authenticated agent (did_agent_mismatch). Check that "
+        "agent_did matches the agent the API key/private key were provisioned for."
+    ),
+    "verifier_not_configured": (
+        "Core has no verifier for this agent (verifier_not_configured). The agent's "
+        "public key may not be imported to KMS yet — re-provision the agent."
+    ),
+    # Core's code is "timestamp_outside_window"; "timestamp_skew" kept as an alias.
+    "timestamp_outside_window": (
+        "Request timestamp outside the allowed window (timestamp_outside_window). Sync "
+        "the host clock (NTP); signatures are valid only within ±300s."
+    ),
+    "timestamp_skew": (
+        "Request timestamp outside the allowed window (timestamp_skew). Sync the host "
+        "clock (NTP); signatures are valid only within ±300s."
+    ),
+}
+
+
+def map_signing_error(reason_code: str | None, fallback: str = "") -> OpenBoxSigningError:
+    """Map a Core signing reason code to an actionable OpenBoxSigningError.
+
+    Unknown/empty codes fall back to a generic message (optionally augmented with
+    ``fallback`` context). Never raises — always returns an exception to raise.
+    """
+    if reason_code and reason_code in _SIGNING_REASON_MESSAGES:
+        return OpenBoxSigningError(_SIGNING_REASON_MESSAGES[reason_code], reason_code)
+    msg = fallback or (
+        f"Signed request rejected by OpenBox Core"
+        + (f" ({reason_code})" if reason_code else "")
+        + "."
+    )
+    return OpenBoxSigningError(msg, reason_code)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Governance verdict errors
 # ═══════════════════════════════════════════════════════════════════

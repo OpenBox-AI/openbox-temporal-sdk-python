@@ -18,6 +18,7 @@ import sys
 import pytest
 from unittest.mock import MagicMock, patch, call
 from typing import Optional
+from .conftest import posted_payload
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Helpers to check if optional instrumentation packages are available
@@ -1745,7 +1746,7 @@ class TestGovernanceStageField:
             )
 
             call_args = mock_client_instance.post.call_args
-            payload = call_args.kwargs["json"]
+            payload = posted_payload(call_args)
             spans = payload["spans"]
             assert len(spans) == 1
             assert spans[0]["stage"] == "started"
@@ -1809,8 +1810,7 @@ class TestGovernanceStageField:
             assert mock_client_instance.post.call_count == 2
 
             # 1st call should have started stage
-            first_call = mock_client_instance.post.call_args_list[0]
-            first_payload = first_call.kwargs["json"]
+            first_payload = posted_payload(mock_client_instance.post.call_args_list[0])
             first_spans = first_payload["spans"]
             assert len(first_spans) == 1
             assert first_spans[0]["stage"] == "started"
@@ -1818,8 +1818,7 @@ class TestGovernanceStageField:
             assert first_span["stage"] == "started"
 
             # 2nd call should have completed stage with response data
-            second_call = mock_client_instance.post.call_args_list[1]
-            second_payload = second_call.kwargs["json"]
+            second_payload = posted_payload(mock_client_instance.post.call_args_list[1])
             second_spans = second_payload["spans"]
             assert len(second_spans) == 1
             assert second_spans[0]["stage"] == "completed"
@@ -1862,7 +1861,7 @@ class TestGovernanceStageField:
             )
 
             call_args = mock_client_instance.post.call_args
-            payload = call_args.kwargs["json"]
+            payload = posted_payload(call_args)
             new_span = payload["spans"][-1]
             assert new_span.get("http_status_code") is None
 
