@@ -49,7 +49,7 @@ dependencies = [
     "opentelemetry-instrumentation-redis>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
     # Ed25519 request signing (AIP DID) — lazy-imported off the workflow sandbox path
-    "cryptography>=43,<47",
+    "cryptography>=43,<49",
 ]
 
 [project.urls]
