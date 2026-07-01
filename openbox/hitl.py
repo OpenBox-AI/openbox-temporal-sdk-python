@@ -88,9 +88,21 @@ def handle_approval_response(
             non_retryable=True,
         )
 
+    # Parse via the shared base-SDK ApprovalResult. NOTE: decision-source
+    # precedence is now ACTION over VERDICT when both are present (previously
+    # verdict-first) — regression-gated by tests/test_approval_action_precedence.py.
+    # When NEITHER field is present, the result stays pending (never auto-ALLOW).
+    from openbox_core.contracts.results import ApprovalResult
+
     from .types import Verdict
 
-    verdict = Verdict.from_string(response.get("verdict") or response.get("action"))
+    approval = ApprovalResult.from_dict(response)
+    verdict = approval.verdict
+
+    if verdict is None:
+        # No decision yet — keep polling (previously from_string(None) treated
+        # this as ALLOW; pending is the fail-safe reading).
+        raise_approval_pending(f"Awaiting approval for activity {activity_type}")
 
     if verdict == Verdict.ALLOW:
         # Approval granted — caller clears buffer.pending_approval and proceeds
