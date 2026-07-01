@@ -2,6 +2,47 @@
 
 All notable changes to OpenBox SDK for Temporal Workflows.
 
+## [Unreleased] - openbox-core base SDK migration branch
+
+### Changed
+
+- **Depends on `openbox-sdk-python>=0.1.0`** (import package `openbox_core`) — the shared
+  base SDK owning contracts, the always-strict gate, identity/signing, the evaluate
+  client, context runtime, Core `SpanData` wire serialization, generic instrumentation,
+  and the conformance kit.
+- `request_signing` now shims over `openbox_core.identity`. Signed request bytes are
+  UNCHANGED — gated byte-for-byte by a golden fixture generated from the pre-migration
+  signer (`tests/test_base_sdk_signing_parity.py`).
+- `Verdict`, `GuardrailsCheckResult`, and `WorkflowEventType` re-export the shared
+  contracts; `GovernanceVerdictResponse` subclasses the shared `EvaluationResult`
+  (same public surface, plus `fallback_used`/`diagnostics`/`raw`/`approval_expiration_time`).
+- Workflow lifecycle events route through shared `EventEnvelope` factories
+  (sandbox-safe pure contracts; wire payloads unchanged).
+- Activity execution binds the shared `ActivityContext` with a guaranteed
+  try/finally reset — governance context can no longer leak when an activity raises.
+
+### Behavior changes (regression-gated)
+
+- **Approval decision precedence:** approval poll responses parse via the shared
+  `ApprovalResult`; `action` now outranks `verdict` when both are present
+  (previously verdict-first), and a response with NEITHER field stays PENDING
+  (previously implicit ALLOW). Pinned by `tests/test_approval_action_precedence.py`.
+
+### Added
+
+- `openbox.core_adapter` — `TemporalFrameworkAdapter` (maps base-SDK verdicts to
+  native `ApplicationError` types and the HITL retry loop), `create_core_runtime`
+  (opt-in core runtime at worker scope), shared context-store helpers.
+- Gates: workflow-sandbox import-safety, base-SDK conformance suite driven by the
+  Temporal adapter, public-API compatibility suite.
+
+### Migration status
+
+- Legacy in-repo hook instrumentation remains the DEFAULT. The per-operation flip to
+  core instrumentation (HTTP first, then DB/file/function) is gated on hook-payload
+  parity; Redis/Mongo/psycopg2-direct stay on legacy hooks until the base SDK scopes
+  them. Duplicated modules are removed only after parity.
+
 ## [1.1.2] - 2026-04-22
 
 ### Security
