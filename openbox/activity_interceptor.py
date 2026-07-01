@@ -523,28 +523,37 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 "temporal.activity_id": info.activity_id,
             },
         ) as span:
+            trace_id = span.get_span_context().trace_id
             self._span_processor.register_trace(
-                span.get_span_context().trace_id,
+                trace_id,
                 info.workflow_id,
                 info.activity_id,
             )
 
-            try:
-                result = await self.next.execute_activity(input)
-                activity_output = _serialize_value(result)
-            except GovernanceBlockedError as e:
-                status = "failed"
-                error = {
-                    "type": "GovernanceBlockedError",
-                    "message": str(e),
-                    "verdict": e.verdict,
-                    "url": e.url,
-                }
-                self._handle_hook_governance_error(e, info)
-            except Exception as e:
-                status = "failed"
-                error = {"type": type(e).__name__, "message": str(e)}
-                raise
+            # Bind the SHARED base-SDK ActivityContext (and trace correlation)
+            # for the duration of the activity. The context-manager reset runs
+            # in a finally, so context can no longer leak when the activity
+            # raises (the legacy span-processor registration above stays until
+            # instrumentation parity retires it).
+            from .core_adapter import core_activity_scope
+
+            with core_activity_scope(info, trace_id=trace_id):
+                try:
+                    result = await self.next.execute_activity(input)
+                    activity_output = _serialize_value(result)
+                except GovernanceBlockedError as e:
+                    status = "failed"
+                    error = {
+                        "type": "GovernanceBlockedError",
+                        "message": str(e),
+                        "verdict": e.verdict,
+                        "url": e.url,
+                    }
+                    self._handle_hook_governance_error(e, info)
+                except Exception as e:
+                    status = "failed"
+                    error = {"type": type(e).__name__, "message": str(e)}
+                    raise
 
         end_time = time.time()
         return result, status, error, activity_output, end_time

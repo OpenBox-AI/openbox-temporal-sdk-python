@@ -35,6 +35,10 @@ from .errors import (
     GOVERNANCE_HALT_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
 )
+# Shared event contracts — pure/import-safe in the workflow sandbox (verified
+# by the base SDK's import-safety harness + tests/test_workflow_sandbox_import_safety.py).
+from openbox_core.contracts import events as _events
+
 from .types import Verdict
 
 
@@ -252,14 +256,12 @@ class GovernanceInterceptor(Interceptor):
                 # WorkflowStarted event
                 if send_start and workflow.patched("openbox-v2-start"):
                     await _send_governance_event(
-                        {
-                            "source": "workflow-telemetry",
-                            "event_type": "WorkflowStarted",
-                            "workflow_id": info.workflow_id,
-                            "run_id": info.run_id,
-                            "workflow_type": info.workflow_type,
-                            "task_queue": info.task_queue,
-                        },
+                        _events.workflow_started(
+                            workflow_id=info.workflow_id,
+                            run_id=info.run_id,
+                            workflow_type=info.workflow_type,
+                            task_queue=info.task_queue,
+                        ).to_payload_dict(),
                         timeout,
                         on_error,
                     )
@@ -281,14 +283,12 @@ class GovernanceInterceptor(Interceptor):
                             )
 
                         await _send_governance_event(
-                            {
-                                "source": "workflow-telemetry",
-                                "event_type": "WorkflowCompleted",
-                                "workflow_id": info.workflow_id,
-                                "run_id": info.run_id,
-                                "workflow_type": info.workflow_type,
-                                "workflow_output": workflow_output,
-                            },
+                            _events.workflow_completed(
+                                workflow_id=info.workflow_id,
+                                run_id=info.run_id,
+                                workflow_type=info.workflow_type,
+                                extra={"workflow_output": workflow_output},
+                            ).to_payload_dict(),
                             timeout,
                             on_error,
                         )
@@ -303,14 +303,12 @@ class GovernanceInterceptor(Interceptor):
                         # GovernanceHaltError and shadow the real workflow exception).
                         try:
                             await _send_governance_event(
-                                {
-                                    "source": "workflow-telemetry",
-                                    "event_type": "WorkflowFailed",
-                                    "workflow_id": info.workflow_id,
-                                    "run_id": info.run_id,
-                                    "workflow_type": info.workflow_type,
-                                    "error": error,
-                                },
+                                _events.workflow_failed(
+                                    workflow_id=info.workflow_id,
+                                    run_id=info.run_id,
+                                    workflow_type=info.workflow_type,
+                                    error=error,
+                                ).to_payload_dict(),
                                 timeout,
                                 on_error,
                             )
@@ -329,16 +327,14 @@ class GovernanceInterceptor(Interceptor):
                 # SignalReceived event - check verdict and store if "stop"
                 if workflow.patched("openbox-v2-signal"):
                     result = await _send_governance_event(
-                        {
-                            "source": "workflow-telemetry",
-                            "event_type": "SignalReceived",
-                            "workflow_id": info.workflow_id,
-                            "run_id": info.run_id,
-                            "workflow_type": info.workflow_type,
-                            "task_queue": info.task_queue,
-                            "signal_name": input.signal,
-                            "signal_args": input.args,
-                        },
+                        _events.signal_received(
+                            workflow_id=info.workflow_id,
+                            run_id=info.run_id,
+                            workflow_type=info.workflow_type,
+                            task_queue=info.task_queue,
+                            signal_name=input.signal,
+                            extra={"signal_args": input.args},
+                        ).to_payload_dict(),
                         timeout,
                         on_error,
                     )
