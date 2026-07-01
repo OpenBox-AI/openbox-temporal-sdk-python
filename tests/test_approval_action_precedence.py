@@ -79,3 +79,33 @@ class TestUnchangedSemantics:
         from openbox_core.contracts.results import ApprovalResult
 
         assert ApprovalResult.from_dict({"id": "legacy"}).approval_id == "legacy"
+
+
+class TestStrictDecisionVocabularyGate:
+    """C1 hardening gate: unparseable decisions NEVER auto-approve.
+
+    The evaluate-path leniency (unknown verdict -> ALLOW, legacy parity)
+    must not exist at the human-approval boundary: empty ``action`` strings
+    no longer shadow the verdict, and unknown vocabulary keeps polling.
+    """
+
+    def test_empty_action_does_not_shadow_blocking_verdict(self):
+        with pytest.raises(ApplicationError) as exc_info:
+            call({"verdict": "block", "action": "", "reason": "denied"})
+        assert exc_info.value.type == "ApprovalRejected"
+
+    def test_empty_action_with_pending_verdict_keeps_polling(self):
+        with pytest.raises(ApplicationError) as exc_info:
+            call({"verdict": "require_approval", "action": ""})
+        assert exc_info.value.type == "ApprovalPending"
+
+    def test_unknown_action_vocabulary_keeps_polling_never_approves(self):
+        for junk in ("denied", "pending", "approved-maybe"):
+            with pytest.raises(ApplicationError) as exc_info:
+                call({"action": junk})
+            assert exc_info.value.type == "ApprovalPending", junk
+
+    def test_unknown_verdict_vocabulary_keeps_polling(self):
+        with pytest.raises(ApplicationError) as exc_info:
+            call({"verdict": "banana"})
+        assert exc_info.value.type == "ApprovalPending"
