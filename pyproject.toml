@@ -50,7 +50,15 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
     # Ed25519 request signing (AIP DID) — lazy-imported off the workflow sandbox path
     "cryptography>=43,<47",
+    # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
+    # client, context runtime, generic instrumentation, conformance kit.
+    "openbox-sdk-python>=0.1.0",
 ]
+
+# Local path dep during migration development; swapped for the published
+# package at release.
+[tool.uv.sources]
+openbox-sdk-python = { path = "../openbox-sdk-python", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/OpenBox-AI/temporal-sdk-python"
