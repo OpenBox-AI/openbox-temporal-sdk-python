@@ -15,6 +15,7 @@ import logging
 from typing import Optional
 
 from . import hook_governance as _hook_gov
+from .types import GovernanceBlockedError
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +148,6 @@ def setup_file_io_instrumentation() -> bool:
             """
             if not _hook_gov.is_configured():
                 return
-            from .types import GovernanceBlockedError
 
             active_span = span or self._parent_span
             try:
@@ -273,7 +273,6 @@ def setup_file_io_instrumentation() -> bool:
         def close(self):
             # Governance "completed" — reports what happened during file lifecycle
             # Use try/finally to ensure file handle and span are always cleaned up
-            from .types import GovernanceBlockedError
 
             gov_error = None
             try:
@@ -334,7 +333,6 @@ def setup_file_io_instrumentation() -> bool:
 
         # Governance "started" — can block file access before it happens
         if _hook_gov.is_configured():
-            from .types import GovernanceBlockedError
 
             try:
                 open_span_data = _build_file_span_data(
