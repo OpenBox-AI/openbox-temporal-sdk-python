@@ -783,3 +783,55 @@ class TestFileGovernanceSpanData:
                 assert len(payload["spans"]) >= 1
         finally:
             os.unlink(tmp_path)
+
+
+class TestSelfGovernanceReentrancy:
+    """Opens performed BY governance evaluation must never be governed —
+    evaluation opens files itself (httpx/ssl, package metadata scans); the
+    live worker recursed to RecursionError before this guard existed."""
+
+    def test_nested_open_during_evaluate_passes_through(self):
+        _setup_governance()
+        outer = _make_temp_file(b"app data")
+        nested = _make_temp_file(b"metadata blob")
+        nested_reads = []
+        eval_calls = []
+
+        def evaluating_opens_a_file(*args, **kwargs):
+            eval_calls.append(1)
+            # Simulates httpx/importlib_metadata opening files mid-evaluate.
+            with open(nested) as fh:
+                nested_reads.append(fh.read())
+            return None
+
+        with patch.object(
+            hook_gov, "evaluate_sync", side_effect=evaluating_opens_a_file
+        ):
+            with open(outer) as fh:  # governed app-file open
+                assert fh.read() == "app data"
+
+        # Nested open worked, returned REAL content, and did not re-evaluate.
+        assert nested_reads and nested_reads[0] == "metadata blob"
+        # One evaluate for the outer open (+ read/close stages) — the nested
+        # open added none. Without the guard this recursed unboundedly.
+        assert 1 <= len(eval_calls) <= 4
+
+    def test_interpreter_prefix_paths_skip_governance(self):
+        import sysconfig
+
+        _setup_governance()
+        purelib = sysconfig.get_paths()["purelib"]
+        with patch("openbox.hook_governance._get_sync_client") as mock_get:
+            try:
+                open(f"{purelib}/some_pkg/METADATA", "r")
+            except (FileNotFoundError, OSError, NotADirectoryError):
+                pass  # existence irrelevant — only that governance never fired
+            mock_get.assert_not_called()
+
+    def test_app_paths_still_governed(self):
+        _setup_governance()
+        path = _make_temp_file(b"governed")
+        with patch.object(hook_gov, "evaluate_sync") as mock_eval:
+            with open(path) as fh:
+                fh.read()
+        assert mock_eval.called
