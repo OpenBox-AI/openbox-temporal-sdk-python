@@ -56,6 +56,18 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 - Gates: workflow-sandbox import-safety, base-SDK conformance suite driven by the
   Temporal adapter, public-API compatibility suite.
 
+### Fixed (legacy file instrumentation — pre-existing upstream)
+
+- **Runtime RecursionError under file instrumentation:** governance evaluation
+  itself opens files (httpx/ssl, package-metadata scans via importlib_metadata/
+  zipp) — governing those opens re-evaluated recursively until RecursionError.
+  traced_open now (1) passes through any open performed on a thread already
+  inside file-governance work (re-entrancy guard) and (2) bypasses
+  interpreter-owned trees (venv, stdlib, site-packages — sys.prefix/base_prefix
+  + sysconfig paths): those reads are Python machinery, not application data
+  access. Application paths (./.env, data files, temp files) remain governed.
+  Same guard mirrored in the base SDK's file instrumentation.
+
 ### Migration status
 
 - Legacy in-repo hook instrumentation remains the DEFAULT. The per-operation flip to

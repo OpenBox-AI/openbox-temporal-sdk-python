@@ -14,8 +14,52 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+import sys
+import sysconfig
+import threading
+
 from . import hook_governance as _hook_gov
 from .types import GovernanceBlockedError
+
+# Re-entrancy guard: governance evaluation itself opens files (httpx/ssl,
+# package metadata scans, telemetry). Governing THOSE opens evaluates again
+# and recurses until RecursionError. Any open() on a thread that is already
+# inside file-governance work passes straight through.
+_reentrancy = threading.local()
+
+
+def _self_governance_active() -> bool:
+    return getattr(_reentrancy, "active", False)
+
+
+class _no_self_governance:
+    """Guard scope: file opens performed inside are never governed."""
+
+    def __enter__(self):
+        self._outer = getattr(_reentrancy, "active", False)
+        _reentrancy.active = True
+
+    def __exit__(self, *exc):
+        _reentrancy.active = self._outer
+        return False
+
+
+# Interpreter-owned trees (venv AND base install — they differ in venvs).
+# Reads under these are Python machinery (imports, package metadata, CA
+# bundles), not application data access — governing them is pure noise and
+# the metadata scans re-enter governance.
+_INTERPRETER_PREFIXES = tuple(
+    {
+        sys.prefix,
+        sys.exec_prefix,
+        sys.base_prefix,
+        sys.base_exec_prefix,
+        sysconfig.get_paths().get("stdlib", sys.base_prefix),
+        sysconfig.get_paths().get("platstdlib", sys.base_prefix),
+        sysconfig.get_paths().get("purelib", sys.prefix),
+        sysconfig.get_paths().get("platlib", sys.prefix),
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -151,19 +195,20 @@ def setup_file_io_instrumentation() -> bool:
 
             active_span = span or self._parent_span
             try:
-                span_data = _build_file_span_data(
-                    active_span,
-                    self._file_path,
-                    self._mode,
-                    operation,
-                    stage,
-                    **extra,
-                )
-                _hook_gov.evaluate_sync(
-                    active_span,
-                    identifier=self._file_path,
-                    span_data=span_data,
-                )
+                with _no_self_governance():
+                    span_data = _build_file_span_data(
+                        active_span,
+                        self._file_path,
+                        self._mode,
+                        operation,
+                        stage,
+                        **extra,
+                    )
+                    _hook_gov.evaluate_sync(
+                        active_span,
+                        identifier=self._file_path,
+                        span_data=span_data,
+                    )
             except GovernanceBlockedError:
                 raise
             except Exception:
@@ -323,8 +368,13 @@ def setup_file_io_instrumentation() -> bool:
     def traced_open(file, mode="r", *args, **kwargs):
         file_str = str(file)
 
-        # Skip system/noisy paths
-        if any(p in file_str for p in _skip_patterns):
+        # Pass through: opens performed BY governance evaluation itself,
+        # interpreter-owned trees (venv/stdlib/site-packages), noisy paths.
+        if (
+            _self_governance_active()
+            or file_str.startswith(_INTERPRETER_PREFIXES)
+            or any(p in file_str for p in _skip_patterns)
+        ):
             return _original_open(file, mode, *args, **kwargs)
 
         span = _tracer.start_span("file.open")
@@ -335,18 +385,19 @@ def setup_file_io_instrumentation() -> bool:
         if _hook_gov.is_configured():
 
             try:
-                open_span_data = _build_file_span_data(
-                    span,
-                    file_str,
-                    mode,
-                    "open",
-                    "started",
-                )
-                _hook_gov.evaluate_sync(
-                    span,
-                    identifier=file_str,
-                    span_data=open_span_data,
-                )
+                with _no_self_governance():
+                    open_span_data = _build_file_span_data(
+                        span,
+                        file_str,
+                        mode,
+                        "open",
+                        "started",
+                    )
+                    _hook_gov.evaluate_sync(
+                        span,
+                        identifier=file_str,
+                        span_data=open_span_data,
+                    )
             except GovernanceBlockedError:
                 span.set_attribute("error", True)
                 span.set_attribute("governance.blocked", True)
