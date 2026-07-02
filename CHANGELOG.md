@@ -28,11 +28,28 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   (previously verdict-first), and a response with NEITHER field stays PENDING
   (previously implicit ALLOW). Pinned by `tests/test_approval_action_precedence.py`.
 
+### Known divergences of the OPT-IN core runtime (documented, not defaults)
+
+- **Completed-hook semantics:** core completed hooks never raise to the caller —
+  stop verdicts mark FUTURE execution blocked (abort/halt flags). Some legacy
+  completed hooks could raise after the operation ran (HTTP response hook, file
+  close); raising post-hoc cannot undo the operation, so the core model drops it
+  by design. Applies only once instrumentation flips to core.
+- **Fail-closed shaping:** core maps started-hook evaluation failures under
+  `on_api_error="fail_closed"` (and started-hook contract errors, always) to a
+  non-retryable `GovernanceHalt` via the adapter — same terminal effect as
+  legacy's HALT-shaped `GovernanceBlockedError`, different exception chain.
+
 ### Added
 
 - `openbox.core_adapter` — `TemporalFrameworkAdapter` (maps base-SDK verdicts to
-  native `ApplicationError` types and the HITL retry loop), `create_core_runtime`
-  (opt-in core runtime at worker scope), shared context-store helpers.
+  native `ApplicationError` types and the HITL retry loop; bridges core
+  REQUIRE_APPROVAL into the legacy `pending_approval` retry-poll buffer and
+  degrades approval to non-retryable block when HITL is disabled/skipped),
+  `create_core_runtime` (opt-in core runtime at worker scope; accepts
+  `span_processor`/`hitl_enabled`/`skip_hitl_activity_types`), shared
+  context-store helpers. Core activity binding carries `activity_input` +
+  `multi_agent_session_id` so core hook payloads match legacy policy context.
 - Gates: workflow-sandbox import-safety, base-SDK conformance suite driven by the
   Temporal adapter, public-API compatibility suite.
 

@@ -2686,3 +2686,62 @@ class TestActivityMultiAgentSession:
 
         ctx = mock_span_processor.set_activity_context.call_args.args[2]
         assert ctx["multi_agent_session_id"] == "sess-hook"
+
+
+class TestCoreContextBindingCarriesPolicyFields:
+    """The core ActivityContext bound around execution must carry the SAME
+    policy context legacy stores on the span-processor buffer — core hook
+    payloads read activity_input / multi_agent_session_id from it."""
+
+    @pytest.fixture
+    def mock_activity_info(self):
+        info = MagicMock()
+        info.workflow_id = "test-workflow-id"
+        info.workflow_run_id = "test-run-id"
+        info.workflow_type = "TestWorkflow"
+        info.activity_id = "test-activity-id"
+        info.activity_type = "test_activity"
+        info.task_queue = "test-queue"
+        info.attempt = 1
+        return info
+
+    @pytest.mark.asyncio
+    async def test_run_activity_binds_input_and_session_id(
+        self, mock_span_processor, mock_activity_info
+    ):
+        from openbox.core_adapter import get_core_context_store
+
+        observed = {}
+
+        async def capture_context(input):
+            ctx = get_core_context_store().current_activity_context()
+            observed["activity_input"] = ctx.activity_input
+            observed["session_id"] = ctx.multi_agent_session_id
+            return "ok"
+
+        mock_next = AsyncMock()
+        mock_next.execute_activity = AsyncMock(side_effect=capture_context)
+        interceptor = _ActivityInterceptor(
+            next_interceptor=mock_next,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            span_processor=mock_span_processor,
+            config=GovernanceConfig(),
+        )
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity:
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            result, status, *_ = await interceptor._run_activity(
+                MagicMock(args=["a1"]),
+                mock_activity_info,
+                activity_input=["serialized-input"],
+                session_id="sid-42",
+            )
+
+        assert result == "ok"
+        assert status == "completed"
+        assert observed["activity_input"] == ["serialized-input"]
+        assert observed["session_id"] == "sid-42"
+        # Reset after the scope exits — no leak.
+        assert get_core_context_store().current_activity_context() is None
