@@ -61,6 +61,22 @@ OPENBOX_AGENT_PRIVATE_KEY=<base64 raw 32-byte Ed25519 seed>
 | `agent_name` | `str` | `None` | Agent name for governance context (optional) |
 | `tool_type_map` | `dict` | `{}` | Mapping of tool names to types for governance evaluation |
 
+## Multi-Agent Sessions
+
+No worker/plugin parameters. Your application supplies the shared
+`multi_agent_session_id` per workflow via the Temporal **workflow memo**; the SDK
+only propagates it. The SDK never invents a session id.
+
+| Mechanism | Key | Set by |
+|-----------|-----|--------|
+| Workflow memo | `openbox_multi_agent_session_id` | App, at `start_workflow(memo={...})` |
+
+When the memo is present, the id is attached to every workflow, activity, and
+hook governance event, and is propagated from the workflow to its activities
+internally. Emit an explicit handoff from workflow code with
+`emit_handoff(multi_agent_session_id=..., from_agent_did=...)`. See the README
+"Multi-Agent Sessions" section for usage.
+
 ## Instrumentation
 
 | Parameter | Type | Default | Description |

@@ -86,6 +86,7 @@ from .types import (
     GovernanceBlockedError,
 )
 from .hook_governance import build_auth_headers
+from .multi_agent import read_session_from_header
 from .activities import _terminate_workflow_for_halt
 from .verdict_handler import enforce_verdict
 from .errors import GovernanceHaltError, GuardrailsValidationError
@@ -204,6 +205,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if info.activity_type in self._config.skip_activity_types:
             return await self.next.execute_activity(input)
 
+        # Multi-agent session id from the header stamped by the workflow outbound
+        # interceptor. Request-local — never stored on self / a module global, since
+        # one worker serves many sessions concurrently.
+        session_id = read_session_from_header(
+            input.headers, activity.payload_converter()
+        )
+
         # Check for blocking verdicts from prior governance (signal or buffer)
         await self._check_pending_verdicts(info)
 
@@ -229,6 +237,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             governance_verdict = await self._send_activity_event(
                 info,
                 WorkflowEventType.ACTIVITY_STARTED.value,
+                multi_agent_session_id=session_id,
                 activity_input=activity_input,
             )
 
@@ -248,6 +257,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 "attempt": info.attempt,
                 "activity_input": activity_input,
                 "activity_output": None,
+                # Hook events copy this context dict, so HTTP/DB/file events
+                # inherit the session id for free (omitempty).
+                **({"multi_agent_session_id": session_id} if session_id else {}),
             },
         )
 
@@ -269,6 +281,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         result = await self._handle_completion(
             info, status, error, start_time, end_time,
             activity_input, activity_output, result,
+            session_id,
         )
 
         return result
@@ -592,7 +605,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
     async def _handle_completion(
         self, info, status, error, start_time, end_time,
-        activity_input, activity_output, result,
+        activity_input, activity_output, result, multi_agent_session_id=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
         # Check abort/halt flags
@@ -629,6 +642,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             completed_verdict = await self._send_activity_event(
                 info,
                 WorkflowEventType.ACTIVITY_COMPLETED.value,
+                multi_agent_session_id=multi_agent_session_id,
                 status=status,
                 start_time=start_time,
                 end_time=end_time,
@@ -650,7 +664,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
     # ─── Event sending ────────────────────────────────────────────────────
 
     async def _send_activity_event(
-        self, info, event_type: str, **extra
+        self, info, event_type: str, multi_agent_session_id=None, **extra
     ) -> Optional[GovernanceVerdictResponse]:
         """Send activity event via GovernanceClient."""
         serialized_extra = {}
@@ -672,6 +686,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             "task_queue": info.task_queue,
             "attempt": info.attempt,
             "timestamp": _rfc3339_now(),
+            # App-supplied multi-agent session id, propagated from the workflow
+            # header. Omitted entirely when absent (never a null key).
+            **(
+                {"multi_agent_session_id": multi_agent_session_id}
+                if multi_agent_session_id
+                else {}
+            ),
             **serialized_extra,
         }
 
