@@ -39,6 +39,9 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   `on_api_error="fail_closed"` (and started-hook contract errors, always) to a
   non-retryable `GovernanceHalt` via the adapter — same terminal effect as
   legacy's HALT-shaped `GovernanceBlockedError`, different exception chain.
+- **Redaction point for `activity_input`:** the core `ActivityContext` receives
+  the post-redaction input (what actually ran); the legacy buffer stored the
+  pre-redaction value. Core hook payloads therefore never leak redacted fields.
 
 ### Added
 
@@ -59,6 +62,12 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   core instrumentation (HTTP first, then DB/file/function) is gated on hook-payload
   parity; Redis/Mongo/psycopg2-direct stay on legacy hooks until the base SDK scopes
   them. Duplicated modules are removed only after parity.
+- Flip checklist (must land WITH the flip): worker init passes its
+  `WorkflowSpanProcessor` + HITL config into `create_core_runtime(...)` (without it
+  core REQUIRE_APPROVAL logs a warning and the retry re-evaluates instead of
+  polling); decide the consumer/reset story for the core store's process-global
+  halt flag and the abort-set growth on long-lived workers before anything
+  consumes them.
 
 ## [1.1.2] - 2026-04-22
 
