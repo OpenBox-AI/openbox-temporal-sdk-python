@@ -68,6 +68,17 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   access. Application paths (./.env, data files, temp files) remain governed.
   Same guard mirrored in the base SDK's file instrumentation.
 
+### Fixed (HTTP hook payloads — pre-existing upstream)
+
+- **Mangled method on httpx spans:** OTel's httpx instrumentation passes the
+  method as BYTES; `str(b"POST")` shipped `http_method: "b'POST'"` on every
+  httpx started span. Methods now decode bytes-safely at all client paths.
+- **Credential leak in governance payloads:** raw request/response headers
+  (`authorization`, `cookie`, `set-cookie`, `x-api-key`, …) were sent to Core
+  verbatim — live API keys landed in Core logs. All header dicts are now
+  redacted at the span-data builder choke point. Same redaction added to the
+  base SDK instrumentation. **Rotate any API keys that appeared in payloads.**
+
 ### Migration status
 
 - Legacy in-repo hook instrumentation remains the DEFAULT. The per-operation flip to

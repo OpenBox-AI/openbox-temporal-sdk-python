@@ -73,3 +73,58 @@ class TestBuildHttpSpanDataTruncation:
 
         assert result["request_body"] == large_body
         assert result["response_body"] == large_body
+
+
+class TestMethodDecodingAndHeaderRedaction:
+    """OTel's httpx instrumentation passes method as BYTES — str() mangled it
+    into "b'POST'" on every httpx span. And raw request/response headers
+    carried live credentials (authorization/cookie) into governance payloads."""
+
+    def test_bytes_method_decodes_clean(self):
+        from openbox.http_governance_hooks import _decode_method
+
+        assert _decode_method(b"POST") == "POST"
+        assert _decode_method("GET") == "GET"
+        assert _decode_method(None) == "UNKNOWN"
+        assert _decode_method(b"") == "UNKNOWN"
+
+    def test_span_data_builder_decodes_bytes_method(self):
+        from openbox.http_governance_hooks import _build_http_span_data
+
+        span_data = _build_http_span_data(None, b"POST", "https://api.example.com", "started")
+        assert span_data["http_method"] == "POST"
+
+    def test_credential_headers_redacted_in_span_data(self):
+        from openbox.http_governance_hooks import _build_http_span_data
+
+        span_data = _build_http_span_data(
+            None,
+            "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "started",
+            request_headers={
+                "Authorization": "Bearer sk-proj-SECRET",
+                "Cookie": "__cf_bm=SECRET",
+                "x-api-key": b"SECRET-BYTES",
+                "content-type": "application/json",
+            },
+        )
+        headers = span_data["request_headers"]
+        assert headers["Authorization"] == "[REDACTED]"
+        assert headers["Cookie"] == "[REDACTED]"
+        assert headers["x-api-key"] == "[REDACTED]"
+        assert headers["content-type"] == "application/json"
+        assert "SECRET" not in str(span_data)
+
+    def test_response_set_cookie_redacted(self):
+        from openbox.http_governance_hooks import _build_http_span_data
+
+        span_data = _build_http_span_data(
+            None,
+            "GET",
+            "https://api.example.com",
+            "completed",
+            response_headers={"Set-Cookie": "session=SECRET", "server": "nginx"},
+        )
+        assert span_data["response_headers"]["Set-Cookie"] == "[REDACTED]"
+        assert span_data["response_headers"]["server"] == "nginx"
