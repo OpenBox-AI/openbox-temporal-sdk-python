@@ -80,7 +80,7 @@ def setup_opentelemetry_for_governance(
     ignored_urls: Optional[list] = None,
     instrument_databases: bool = True,
     db_libraries: Optional[Set[str]] = None,
-    instrument_file_io: bool = False,
+    instrument_file_io: bool = True,
     sqlalchemy_engine: Optional[Any] = None,
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
