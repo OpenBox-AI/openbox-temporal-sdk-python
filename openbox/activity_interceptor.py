@@ -274,7 +274,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         # Execute the actual activity
         result, status, error, activity_output, end_time = await self._run_activity(
-            input, info
+            input, info, activity_input=activity_input, session_id=session_id
         )
 
         # Send ActivityCompleted + enforce verdict + apply output redaction
@@ -519,7 +519,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
     # ─── Activity execution ───────────────────────────────────────────────
 
-    async def _run_activity(self, input: ExecuteActivityInput, info):
+    async def _run_activity(
+        self,
+        input: ExecuteActivityInput,
+        info,
+        activity_input=None,
+        session_id=None,
+    ):
         """Execute the activity and handle hook-level governance errors."""
         from .hitl import should_skip_hitl, raise_approval_pending
 
@@ -550,7 +556,15 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             # instrumentation parity retires it).
             from .core_adapter import core_activity_scope
 
-            with core_activity_scope(info, trace_id=trace_id):
+            # Pass the SAME policy context legacy stores on the span-processor
+            # buffer — core hook payloads read these via ctx.to_payload_fields();
+            # omitting them would send weaker policy context than legacy hooks.
+            with core_activity_scope(
+                info,
+                activity_input,
+                trace_id=trace_id,
+                multi_agent_session_id=session_id,
+            ):
                 try:
                     result = await self.next.execute_activity(input)
                     activity_output = _serialize_value(result)
