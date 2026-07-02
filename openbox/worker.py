@@ -135,7 +135,7 @@ def create_openbox_worker(
                           instrumentation works on pre-existing engines.
 
         # File I/O instrumentation
-        instrument_file_io: Instrument file I/O operations (default: False)
+        instrument_file_io: Instrument file I/O operations (default: True)
 
         # Standard Worker options (passed through to Worker)
         activity_executor: Executor for activities
