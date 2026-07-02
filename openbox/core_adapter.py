@@ -48,9 +48,32 @@ def get_core_context_store() -> ContextStore:
 
 
 class TemporalFrameworkAdapter:
-    """Maps base-SDK governance outcomes onto Temporal-native behavior."""
+    """Maps base-SDK governance outcomes onto Temporal-native behavior.
+
+    Args:
+        span_processor: Legacy ``WorkflowSpanProcessor`` — when provided,
+            REQUIRE_APPROVAL marks ``buffer.pending_approval`` so the retry
+            attempt POLLS approval status instead of re-evaluating from
+            scratch (the legacy HITL loop keys off that flag).
+        hitl_enabled / skip_hitl_activity_types: mirror the legacy config;
+            REQUIRE_APPROVAL with HITL unavailable degrades to a
+            non-retryable block (fail safe), matching the legacy hook path.
+    """
 
     name = "temporal"
+
+    def __init__(
+        self,
+        span_processor: Any = None,
+        *,
+        hitl_enabled: bool = True,
+        skip_hitl_activity_types: Optional[set] = None,
+        context_store: Optional[ContextStore] = None,
+    ):
+        self._span_processor = span_processor
+        self._hitl_enabled = hitl_enabled
+        self._skip_hitl_activity_types = skip_hitl_activity_types or set()
+        self._store = context_store if context_store is not None else _core_context_store
 
     async def handle_approval(self, result: EvaluationResult) -> None:
         """REQUIRE_APPROVAL -> Temporal's retry-based HITL loop.
@@ -60,8 +83,33 @@ class TemporalFrameworkAdapter:
         the next attempt. The base runtime treats a raise here as
         \"not approved yet\" — exactly the Temporal semantics.
         """
-        from .hitl import raise_approval_pending
+        self._pending_approval_or_block(result)
 
+    def handle_approval_sync(self, result: EvaluationResult) -> None:
+        """Sync hook seam — same retry-based flow (never polls inline; an
+        inline wait would wedge the activity thread Temporal is retrying)."""
+        self._pending_approval_or_block(result)
+
+    def _pending_approval_or_block(self, result: EvaluationResult) -> None:
+        from .hitl import raise_approval_pending, should_skip_hitl
+
+        ctx = self._store.current_activity_context()
+        activity_type = ctx.activity_type if ctx else ""
+        if should_skip_hitl(
+            activity_type,
+            hitl_enabled=self._hitl_enabled,
+            skip_types=self._skip_hitl_activity_types,
+        ):
+            # HITL unavailable for this activity: approval can never resolve,
+            # so degrade to a non-retryable block (legacy hook behavior).
+            self._raise_application_error(result)
+        # Flag the legacy buffer BEFORE raising: the retry attempt only polls
+        # approval status when ``pending_approval`` is set — without it every
+        # retry re-runs started-hook evaluation from scratch.
+        if self._span_processor is not None and ctx is not None:
+            buffer = self._span_processor.get_buffer(ctx.workflow_id)
+            if buffer is not None:
+                buffer.pending_approval = True
         raise_approval_pending(result.reason or "Approval required")
 
     def raise_lifecycle_blocked(self, result: EvaluationResult) -> NoReturn:
@@ -144,6 +192,9 @@ def create_core_runtime(
     on_api_error: str = "fail_open",
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    span_processor: Any = None,
+    hitl_enabled: bool = True,
+    skip_hitl_activity_types: Optional[set] = None,
     **instrumentation_toggles: Any,
 ):
     """Build an ``OpenBoxRuntime`` wired for Temporal (OPT-IN, worker scope).
@@ -173,6 +224,11 @@ def create_core_runtime(
     ).normalized()
     return OpenBoxRuntime(
         config,
-        TemporalFrameworkAdapter(),
+        TemporalFrameworkAdapter(
+            span_processor,
+            hitl_enabled=hitl_enabled,
+            skip_hitl_activity_types=skip_hitl_activity_types,
+            context_store=_core_context_store,
+        ),
         context_store=_core_context_store,
     )
