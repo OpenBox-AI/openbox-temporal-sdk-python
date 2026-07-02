@@ -19,6 +19,7 @@ code (guarded by tests/test_workflow_sandbox_import_safety.py).
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from typing import Any, Iterator, NoReturn, Optional
 
@@ -30,6 +31,8 @@ from .errors import (
     GOVERNANCE_BLOCK_ERROR_TYPE,
     GOVERNANCE_HALT_ERROR_TYPE,
 )
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "TemporalFrameworkAdapter",
@@ -85,15 +88,21 @@ class TemporalFrameworkAdapter:
         """
         self._pending_approval_or_block(result)
 
-    def handle_approval_sync(self, result: EvaluationResult) -> None:
+    def handle_approval_sync(
+        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+    ) -> None:
         """Sync hook seam — same retry-based flow (never polls inline; an
         inline wait would wedge the activity thread Temporal is retrying)."""
-        self._pending_approval_or_block(result)
+        self._pending_approval_or_block(result, context)
 
-    def _pending_approval_or_block(self, result: EvaluationResult) -> None:
+    def _pending_approval_or_block(
+        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+    ) -> None:
         from .hitl import raise_approval_pending, should_skip_hitl
 
-        ctx = self._store.current_activity_context()
+        # Span-resolved context from the hook runtime wins; ambient ContextVar
+        # lookup is the fallback (it can miss in user-spawned threads).
+        ctx = context if context is not None else self._store.current_activity_context()
         activity_type = ctx.activity_type if ctx else ""
         if should_skip_hitl(
             activity_type,
@@ -106,10 +115,25 @@ class TemporalFrameworkAdapter:
         # Flag the legacy buffer BEFORE raising: the retry attempt only polls
         # approval status when ``pending_approval`` is set — without it every
         # retry re-runs started-hook evaluation from scratch.
-        if self._span_processor is not None and ctx is not None:
-            buffer = self._span_processor.get_buffer(ctx.workflow_id)
-            if buffer is not None:
-                buffer.pending_approval = True
+        buffer = (
+            self._span_processor.get_buffer(ctx.workflow_id)
+            if self._span_processor is not None and ctx is not None
+            else None
+        )
+        if buffer is not None:
+            buffer.pending_approval = True
+        else:
+            # Without the buffer flag the retry attempt RE-EVALUATES instead
+            # of polling approval status — approval still blocks (safe) but
+            # the HITL loop degrades. Loud so the wiring gap is visible.
+            logger.warning(
+                "core REQUIRE_APPROVAL without a legacy span-processor buffer "
+                "(span_processor=%s, ctx=%s): retry will re-evaluate instead "
+                "of polling approval status — pass span_processor to "
+                "create_core_runtime()",
+                "set" if self._span_processor is not None else "None",
+                "bound" if ctx is not None else "missing",
+            )
         raise_approval_pending(result.reason or "Approval required")
 
     def raise_lifecycle_blocked(self, result: EvaluationResult) -> NoReturn:
