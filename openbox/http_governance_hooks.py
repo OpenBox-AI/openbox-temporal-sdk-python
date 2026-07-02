@@ -54,6 +54,44 @@ _TEXT_CONTENT_TYPES = (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+# Headers whose values are credentials/secrets — never ship them into
+# governance payloads (they land in Core logs verbatim otherwise).
+_SENSITIVE_HEADERS = frozenset(
+    {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "api-key",
+        "x-auth-token",
+        "x-amz-security-token",
+    }
+)
+
+
+def _decode_method(method) -> str:
+    """HTTP method as str. OTel's httpx instrumentation passes BYTES
+    (b"POST") — plain str() would mangle it into "b'POST'"."""
+    if isinstance(method, bytes):
+        return method.decode("ascii", errors="ignore") or "UNKNOWN"
+    return str(method) if method else "UNKNOWN"
+
+
+def _sanitize_headers(headers):
+    """Copy headers with credential values redacted; bytes decoded."""
+    if not headers:
+        return headers
+    sanitized = {}
+    for key, value in dict(headers).items():
+        if isinstance(key, bytes):
+            key = key.decode("latin-1", errors="ignore")
+        if isinstance(value, bytes):
+            value = value.decode("latin-1", errors="ignore")
+        sanitized[key] = "[REDACTED]" if str(key).lower() in _SENSITIVE_HEADERS else value
+    return sanitized
+
+
 def _should_ignore_url(url: str) -> bool:
     """Check if URL should be ignored (e.g., OpenBox Core API)."""
     if not url:
@@ -134,12 +172,12 @@ def _build_http_span_data(
         # Hook type identification
         "hook_type": "http_request",
         # HTTP-specific root fields
-        "http_method": http_method,
+        "http_method": _decode_method(http_method),
         "http_url": http_url,
         "request_body": request_body,
-        "request_headers": request_headers,
+        "request_headers": _sanitize_headers(request_headers),
         "response_body": response_body,
-        "response_headers": response_headers,
+        "response_headers": _sanitize_headers(response_headers),
         "http_status_code": http_status_code,
         "error": error,
     }
@@ -332,7 +370,7 @@ def _httpx_request_hook(span, request) -> None:
 
     # Hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
+        method = _decode_method(getattr(request, "method", None))
         req_body = body if isinstance(body, str) else None
         span_data = _build_http_span_data(
             span,
@@ -453,7 +491,7 @@ async def _httpx_async_request_hook(span, request) -> None:
 
     # Async hook-level governance evaluation
     if _hook_gov.is_configured() and url:
-        method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
+        method = _decode_method(getattr(request, "method", None))
         req_body = body if isinstance(body, str) else None
         span_data = _build_http_span_data(
             span,
@@ -607,7 +645,7 @@ def _prepare_completed_governance(
     """Build 'completed' governance args. Returns tuple or None if not applicable."""
     if not (_hook_gov.is_configured() and url and http_span):
         return None
-    method = str(request.method) if hasattr(request, "method") else "UNKNOWN"
+    method = _decode_method(getattr(request, "method", None))
     span_data = _build_http_span_data(
         http_span,
         method,
