@@ -2580,3 +2580,109 @@ class TestHookLevelRequireApproval:
 
             assert exc_info.value.type == "ApprovalPending"
             assert exc_info.value.non_retryable is False
+
+
+# =============================================================================
+# Multi-Agent Session Propagation (activity side)
+# =============================================================================
+
+
+class TestActivityMultiAgentSession:
+    """Activity interceptor reads the session header and tags activity events."""
+
+    def _converter(self):
+        from temporalio.converter import default as _default_converter
+
+        return _default_converter().payload_converter
+
+    def _mock_tracer(self):
+        mock_span = MagicMock()
+        mock_span.get_span_context.return_value.trace_id = 123
+        mock_span.get_span_context.return_value.span_id = 456
+        mock_tracer = MagicMock()
+        mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
+            return_value=mock_span
+        )
+        mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
+            return_value=False
+        )
+        return mock_tracer
+
+    def _interceptor(self, mock_span_processor, mock_client):
+        mock_next = AsyncMock()
+        mock_next.execute_activity = AsyncMock(return_value="activity_result")
+        return _ActivityInterceptor(
+            next_interceptor=mock_next,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            span_processor=mock_span_processor,
+            config=GovernanceConfig(),
+            client=mock_client,
+        )
+
+    async def _run(self, mock_span_processor, mock_activity_info, headers):
+        from openbox.multi_agent import HEADER_KEY  # noqa: F401
+
+        conv = self._converter()
+        mock_client = MagicMock()
+        mock_client.evaluate_event = AsyncMock(return_value=None)
+        interceptor = self._interceptor(mock_span_processor, mock_client)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+        mock_input.headers = headers
+
+        with (
+            patch("openbox.activity_interceptor.activity") as mock_activity,
+            patch("openbox.activity_interceptor.trace") as mock_trace,
+        ):
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_activity.payload_converter.return_value = conv
+            mock_trace.get_tracer.return_value = self._mock_tracer()
+
+            await interceptor.execute_activity(mock_input)
+
+        event_payloads = {
+            call.args[0]["event_type"]: call.args[0]
+            for call in mock_client.evaluate_event.call_args_list
+        }
+        return event_payloads
+
+    @pytest.mark.asyncio
+    async def test_events_tagged_when_header_present(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Header present → ActivityStarted + ActivityCompleted carry the session id."""
+        conv = self._converter()
+        from openbox.multi_agent import HEADER_KEY
+
+        headers = {HEADER_KEY: conv.to_payload("sess-act")}
+        payloads = await self._run(mock_span_processor, mock_activity_info, headers)
+
+        assert payloads["ActivityStarted"]["multi_agent_session_id"] == "sess-act"
+        assert payloads["ActivityCompleted"]["multi_agent_session_id"] == "sess-act"
+
+    @pytest.mark.asyncio
+    async def test_events_not_tagged_when_header_absent(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Header absent → multi_agent_session_id omitted from both events."""
+        payloads = await self._run(mock_span_processor, mock_activity_info, {})
+
+        assert "multi_agent_session_id" not in payloads["ActivityStarted"]
+        assert "multi_agent_session_id" not in payloads["ActivityCompleted"]
+
+    @pytest.mark.asyncio
+    async def test_activity_context_carries_session_id_for_hooks(
+        self, mock_span_processor, mock_activity_info
+    ):
+        """Buffered activity context carries the id so hook events inherit it."""
+        conv = self._converter()
+        from openbox.multi_agent import HEADER_KEY
+
+        headers = {HEADER_KEY: conv.to_payload("sess-hook")}
+        await self._run(mock_span_processor, mock_activity_info, headers)
+
+        ctx = mock_span_processor.set_activity_context.call_args.args[2]
+        assert ctx["multi_agent_session_id"] == "sess-hook"
