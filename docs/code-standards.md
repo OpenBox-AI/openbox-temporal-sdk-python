@@ -37,10 +37,10 @@ This document defines coding standards, architectural patterns, and best practic
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                 Instrumentation Layer                           │
-│  - WorkflowSpanProcessor (OTel span buffering)                  │
-│  - otel_setup (HTTP/DB/File instrumentation)                    │
-│  - tracing (@traced decorator)                                  │
+│              Instrumentation Layer (openbox_core)               │
+│  - base runtime owns HTTP/DB/File/function hook instrumentation │
+│  - built + owned by the worker/plugin via create_core_runtime() │
+│  - tracing (@traced wraps the base governed() decorator)        │
 └────────────────────────┬────────────────────────────────────────┘
                          │
                          ▼
@@ -189,13 +189,13 @@ logger.info("Message")  # Triggers sandbox violation
 - ✅ `types.py` - Pure Python dataclasses and enums
 - ✅ `config.py` - Lazy imports for urllib/logging
 - ✅ `workflow_interceptor.py` - No direct HTTP
-- ✅ `span_processor.py` - No external dependencies
+- ✅ `governance_state.py` - In-memory state, no external dependencies
 
 #### Activity-Only Modules (NOT re-exported)
 - ❌ `activities.py` - Uses `httpx`
 - ❌ `activity_interceptor.py` - Uses `opentelemetry`
-- ❌ `otel_setup.py` - Uses `opentelemetry`
-- ❌ `tracing.py` - Uses `opentelemetry`
+- ❌ `core_adapter.py` - Imports the `openbox_core` runtime + `temporalio.exceptions`
+- ❌ `tracing.py` - Uses `opentelemetry` / the base `governed()` decorator
 
 #### Public API Pattern
 
@@ -209,14 +209,13 @@ from .errors import OpenBoxError, GovernanceBlockedError
 from .client import GovernanceClient
 from .verdict_handler import enforce_verdict
 
-# ❌ NOT exported (uses OTel/httpx)
+# ❌ NOT exported (uses OTel/httpx or the base runtime)
 # from .activity_interceptor import ActivityGovernanceInterceptor
 # from .activities import send_governance_event
-# from .hook_governance import evaluate_sync, evaluate_async
+# from .core_adapter import create_core_runtime
 
 # Users must import directly:
 # from openbox.activity_interceptor import ActivityGovernanceInterceptor
-# from openbox.otel_setup import setup_opentelemetry_for_governance
 # from openbox.tracing import traced
 ```
 
@@ -687,21 +686,16 @@ def _validate_api_key_with_server(api_url: str, api_key: str):
 
 ### Sensitive Data Handling
 
-**Rules:**
-- ✅ Store HTTP bodies in span processor buffer, NOT in OTel span attributes
-- ✅ Only capture text content types (skip binary)
-- ✅ Ignore configured URLs (e.g., OpenBox Core API)
-- ✅ Redact sensitive fields via guardrails system
-- ❌ Never log API keys or tokens
+Hook payload capture (HTTP/DB/file bodies) is owned by the `openbox_core` base
+runtime; the base SDK keeps captured bodies out of exported OTel span attributes,
+applies body-size truncation, and skips its own evaluation traffic. Within the
+Temporal SDK:
+
+- ✅ Never log API keys or tokens
+- ✅ Never pass credentials (`api_key`, private key) through activity inputs — they
+     would land in readable workflow history (hold them on the activity instance)
+- ✅ Redact credential headers before they reach any payload
 - ❌ Never export sensitive data to external tracing systems
-
-```python
-# ✅ CORRECT - Bodies stored separately
-_span_processor.store_body(span_id, request_body=body)
-
-# ❌ WRONG - Bodies in OTel attributes (exported!)
-span.set_attribute("http.request.body", body)
-```
 
 ---
 
@@ -709,33 +703,20 @@ span.set_attribute("http.request.body", body)
 
 ### Optimization Rules
 
-1. **Lazy Initialization**: Defer expensive operations until needed
-2. **Buffer Spans**: Batch span submission, don't send per-span
-3. **Skip Ignored URLs**: Early return to avoid instrumentation overhead
-4. **Limit Body Size**: Configurable max body size (default: no limit)
-5. **Thread-Safe**: Use locks for shared state
+1. **Lazy Initialization**: Defer expensive imports until needed (keeps the
+   workflow sandbox import path clean)
+2. **Install Once**: Build and install the base runtime once per worker process
+   (`runtime.install_instrumentation()` is idempotent)
+3. **Skip Filtered Types**: Use `skip_workflow_types` / `skip_activity_types` /
+   `skip_signals` to avoid governance overhead where it is not wanted
+4. **Thread-Safe State**: Guard shared `TemporalGovernanceState` access with locks
 
-### Example: Skip Ignored URLs
+### Example: Skip Filtered Activity Types
 
 ```python
-def _should_ignore_url(url: str) -> bool:
-    """Check if URL should be ignored (early return)."""
-    if not url:
-        return False
-    for prefix in _ignored_url_prefixes:
-        if url.startswith(prefix):
-            return True  # ✅ Early return
-    return False
-
-def _httpx_request_hook(span, request):
-    """Hook called before httpx sends a request."""
-    # ✅ Early return for ignored URLs
-    if _should_ignore_url(str(request.url)):
-        return
-
-    # Expensive body capture
-    body = extract_body(request)
-    _span_processor.store_body(span_id, request_body=body)
+# Config-driven early return keeps unrelated activities off the governance path.
+if activity_type in config.skip_activity_types:
+    return await super().execute_activity(input)
 ```
 
 ---

@@ -3,16 +3,96 @@
 Comprehensive pytest tests for the OpenBox SDK worker module.
 
 Tests cover:
-- create_openbox_worker() without OpenBox config
 - create_openbox_worker() with OpenBox config
 - Parameter passthrough to Worker
 - Configuration options for governance
+
+Bootstrap model under test (base-SDK instrumentation):
+  create_openbox_worker() validates the key, creates a TemporalGovernanceState,
+  builds+owns an openbox_core runtime via create_core_runtime(...), installs
+  instrumentation, then wires both interceptors with that shared state.
+  There is no WorkflowSpanProcessor / setup_opentelemetry_for_governance anymore.
 """
 
-import pytest
+import functools
 from datetime import timedelta
-from unittest.mock import Mock, MagicMock, patch, call
+from unittest.mock import Mock, MagicMock, patch
 from concurrent.futures import ThreadPoolExecutor
+
+from openbox.governance_state import TemporalGovernanceState
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared patch stack
+#
+# create_openbox_worker() imports these names differently:
+#   - Worker / validate_api_key / GovernanceConfig are imported at module top,
+#     so they are patched on openbox.worker.
+#   - create_core_runtime, the interceptors, and build_governance_activities are
+#     imported inside the function from their source modules, so they are patched
+#     at the source module.
+#
+# create_core_runtime is ALWAYS patched: the real one builds an openbox_core
+# runtime and install_instrumentation() patches HTTP/DB/file globally + can hit
+# the network. The mock's .install_instrumentation is a MagicMock so tests can
+# assert it was invoked exactly once (the observable "instrumentation installed"
+# behavior that replaced setup_opentelemetry_for_governance).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PATCH_TARGETS = [
+    ("mock_worker_class", "openbox.worker.Worker"),
+    ("mock_validate_api_key", "openbox.worker.validate_api_key"),
+    ("mock_governance_config", "openbox.worker.GovernanceConfig"),
+    ("mock_create_core_runtime", "openbox.core_adapter.create_core_runtime"),
+    ("mock_governance_interceptor", "openbox.workflow_interceptor.GovernanceInterceptor"),
+    (
+        "mock_activity_interceptor",
+        "openbox.activity_interceptor.ActivityGovernanceInterceptor",
+    ),
+    ("mock_build_activities", "openbox.activities.build_governance_activities"),
+]
+
+
+def with_worker_patches(func):
+    """Apply the standard worker patch stack and inject mocks as kwargs.
+
+    Injects one keyword argument per entry in _PATCH_TARGETS (by name), plus a
+    fresh MagicMock runtime returned by create_core_runtime whose
+    .install_instrumentation is assertable.
+    """
+
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        with_stack = []
+        try:
+            mocks = {}
+            for attr, target in _PATCH_TARGETS:
+                p = patch(target)
+                with_stack.append(p)
+                mocks[attr] = p.start()
+
+            # create_core_runtime returns a runtime the worker installs + owns.
+            runtime = MagicMock(name="core_runtime")
+            runtime.install_instrumentation = MagicMock(name="install_instrumentation")
+            mocks["mock_create_core_runtime"].return_value = runtime
+            mocks["mock_runtime"] = runtime
+
+            # The worker registers governance_activities.send_governance_event by
+            # object identity; the "is the governance activity registered?" checks
+            # match on __name__, so the default mock must model that attribute the
+            # way the real bound method carries it. Tests needing a distinct
+            # sentinel override .send_governance_event explicitly.
+            mocks[
+                "mock_build_activities"
+            ].return_value.send_governance_event.__name__ = "send_governance_event"
+
+            return func(self, *args, **{**mocks, **kwargs})
+        finally:
+            for p in reversed(with_stack):
+                p.stop()
+
+    return wrapper
+
 
 # ===============================================================================
 # With OpenBox Config Tests
@@ -22,38 +102,20 @@ from concurrent.futures import ThreadPoolExecutor
 class TestCreateOpenboxWorkerWithConfig:
     """Test create_openbox_worker() with OpenBox configuration."""
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_validates_api_key(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test validates API key when config is provided."""
+    @with_worker_patches
+    def test_validates_api_key(self, **m):
+        """Validates API key (initialize) with the provided credentials + timeout."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_timeout=45.0,
         )
 
-        # Verify validate_api_key (initialize) was called
-        mock_validate_api_key.assert_called_once_with(
+        m["mock_validate_api_key"].assert_called_once_with(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
             governance_timeout=45.0,
@@ -61,117 +123,66 @@ class TestCreateOpenboxWorkerWithConfig:
             agent_private_key=None,
         )
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_creates_workflow_span_processor_with_ignored_urls(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test creates WorkflowSpanProcessor with ignored URLs."""
+    @with_worker_patches
+    def test_builds_and_installs_core_runtime(self, **m):
+        """Builds an openbox_core runtime and installs instrumentation exactly once.
+
+        Replaces the old setup_opentelemetry_for_governance / WorkflowSpanProcessor
+        assertions: instrumentation setup now flows through create_core_runtime +
+        runtime.install_instrumentation().
+        """
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
+        create_openbox_worker(
+            client=Mock(),
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+            governance_timeout=30.0,
+            governance_policy="fail_open",
+            instrument_databases=True,
+            instrument_file_io=True,
+        )
+
+        m["mock_create_core_runtime"].assert_called_once()
+        call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
+        assert call_kwargs["api_url"] == "http://localhost:8086"
+        assert call_kwargs["api_key"] == "obx_test_key123"
+        assert call_kwargs["timeout_seconds"] == 30.0
+        assert call_kwargs["on_api_error"] == "fail_open"
+        assert call_kwargs["instrument_databases"] is True
+        assert call_kwargs["instrument_file_io"] is True
+        # The runtime lives for the worker process; install must run once.
+        m["mock_runtime"].install_instrumentation.assert_called_once_with()
+
+    @with_worker_patches
+    def test_core_runtime_receives_shared_state(self, **m):
+        """create_core_runtime and both interceptors receive the SAME state object."""
+        from openbox.worker import create_openbox_worker
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
         )
 
-        # Verify WorkflowSpanProcessor was created with ignored URL
-        mock_span_processor_class.assert_called_once_with(
-            ignored_url_prefixes=["http://localhost:8086"]
-        )
+        runtime_state = m["mock_create_core_runtime"].call_args.kwargs["state"]
+        assert isinstance(runtime_state, TemporalGovernanceState)
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_calls_setup_opentelemetry_with_correct_args(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test calls setup_opentelemetry_for_governance with correct args."""
+        wf_state = m["mock_governance_interceptor"].call_args.kwargs["state"]
+        act_state = m["mock_activity_interceptor"].call_args.kwargs["state"]
+        # One state instance shared across the runtime and both interceptors.
+        assert wf_state is runtime_state
+        assert act_state is runtime_state
+
+    @with_worker_patches
+    def test_creates_governance_config_with_correct_values(self, **m):
+        """Creates GovernanceConfig with correct values."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-        mock_span_processor = Mock()
-        mock_span_processor_class.return_value = mock_span_processor
-
         create_openbox_worker(
-            client=mock_client,
-            task_queue="test-queue",
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key123",
-            instrument_databases=True,
-            db_libraries={"psycopg2", "redis"},
-            instrument_file_io=True,
-        )
-
-        # Verify setup_opentelemetry_for_governance was called correctly
-        mock_setup_otel.assert_called_once_with(
-            mock_span_processor,
-            ignored_urls=["http://localhost:8086"],
-            instrument_databases=True,
-            db_libraries={"psycopg2", "redis"},
-            instrument_file_io=True,
-            sqlalchemy_engine=None,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            api_timeout=30.0,
-            on_api_error="fail_open",
-            max_body_size=65536,
-            agent_did=None,
-            signer=None,
-        )
-
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_creates_governance_config_with_correct_values(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test creates GovernanceConfig with correct values."""
-        from openbox.worker import create_openbox_worker
-
-        mock_client = Mock()
-
-        create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
@@ -185,8 +196,7 @@ class TestCreateOpenboxWorkerWithConfig:
             hitl_enabled=False,
         )
 
-        # Verify GovernanceConfig was created with correct values
-        mock_governance_config.assert_called_once_with(
+        m["mock_governance_config"].assert_called_once_with(
             on_api_error="fail_closed",
             api_timeout=60.0,
             send_start_event=False,
@@ -197,124 +207,66 @@ class TestCreateOpenboxWorkerWithConfig:
             hitl_enabled=False,
         )
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_creates_governance_interceptor_with_correct_args(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test creates GovernanceInterceptor with correct args."""
+    @with_worker_patches
+    def test_creates_governance_interceptor_with_correct_args(self, **m):
+        """Creates GovernanceInterceptor with api_url/api_key/state/config."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-        mock_span_processor = Mock()
         mock_config = Mock()
-        mock_span_processor_class.return_value = mock_span_processor
-        mock_governance_config.return_value = mock_config
+        m["mock_governance_config"].return_value = mock_config
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086/",  # With trailing slash
             openbox_api_key="obx_test_key123",
         )
 
-        # Verify GovernanceInterceptor was created with correct args
-        mock_governance_interceptor.assert_called_once_with(
-            api_url="http://localhost:8086/",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=mock_config,
-        )
+        m["mock_governance_interceptor"].assert_called_once()
+        call_kwargs = m["mock_governance_interceptor"].call_args.kwargs
+        assert call_kwargs["api_url"] == "http://localhost:8086/"
+        assert call_kwargs["api_key"] == "obx_test_key123"
+        assert call_kwargs["config"] == mock_config
+        # span_processor is gone — the interceptor is now state-backed.
+        assert "span_processor" not in call_kwargs
+        assert isinstance(call_kwargs["state"], TemporalGovernanceState)
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_creates_activity_interceptor_with_correct_args(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test creates ActivityGovernanceInterceptor with correct args."""
+    @with_worker_patches
+    def test_creates_activity_interceptor_with_correct_args(self, **m):
+        """Creates ActivityGovernanceInterceptor with api_url/api_key/state/config/client."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-        mock_span_processor = Mock()
         mock_config = Mock()
-        mock_span_processor_class.return_value = mock_span_processor
-        mock_governance_config.return_value = mock_config
+        m["mock_governance_config"].return_value = mock_config
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
         )
 
-        # Verify ActivityGovernanceInterceptor was created with correct args
-        call_kwargs = mock_activity_interceptor.call_args.kwargs
+        call_kwargs = m["mock_activity_interceptor"].call_args.kwargs
         assert call_kwargs["api_url"] == "http://localhost:8086"
         assert call_kwargs["api_key"] == "obx_test_key123"
-        assert call_kwargs["span_processor"] == mock_span_processor
         assert call_kwargs["config"] == mock_config
+        assert "span_processor" not in call_kwargs
+        assert isinstance(call_kwargs["state"], TemporalGovernanceState)
         assert "client" in call_kwargs  # GovernanceClient injected by worker
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.build_governance_activities")
-    def test_adds_send_governance_event_to_activities(
-        self,
-        mock_build_activities,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
+    @with_worker_patches
+    def test_adds_send_governance_event_to_activities(self, **m):
         """The class-based send_governance_event method is registered on the worker."""
         from openbox.worker import create_openbox_worker
 
         sentinel_method = Mock(name="send_governance_event_method")
-        mock_build_activities.return_value.send_governance_event = sentinel_method
-
-        mock_client = Mock()
+        m["mock_build_activities"].return_value.send_governance_event = sentinel_method
 
         def my_activity():
             pass
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             activities=[my_activity],
             openbox_url="http://localhost:8086",
@@ -322,58 +274,40 @@ class TestCreateOpenboxWorkerWithConfig:
             enable_trace_propagation=False,
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert my_activity in call_kwargs["activities"]
         assert sentinel_method in call_kwargs["activities"]
         # Credentials must be captured on the activity instance, not flowed via input
-        mock_build_activities.assert_called_once_with(
+        m["mock_build_activities"].assert_called_once_with(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
             agent_did=None,
             signer=None,
         )
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_interceptors_are_prepended(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test OpenBox interceptors are prepended (first) in interceptor list."""
+    @with_worker_patches
+    def test_interceptors_are_prepended(self, **m):
+        """OpenBox interceptors are prepended (first) in interceptor list."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         mock_custom_interceptor = Mock()
         mock_workflow_interceptor = Mock()
         mock_activity_interceptor_instance = Mock()
-        mock_governance_interceptor.return_value = mock_workflow_interceptor
-        mock_activity_interceptor.return_value = mock_activity_interceptor_instance
+        m["mock_governance_interceptor"].return_value = mock_workflow_interceptor
+        m["mock_activity_interceptor"].return_value = mock_activity_interceptor_instance
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             interceptors=[mock_custom_interceptor],
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
+            enable_trace_propagation=False,
         )
 
-        # Verify interceptors order: [workflow_interceptor, activity_interceptor, custom]
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         interceptors = call_kwargs["interceptors"]
         assert interceptors[0] == mock_workflow_interceptor
         assert interceptors[1] == mock_activity_interceptor_instance
@@ -388,24 +322,9 @@ class TestCreateOpenboxWorkerWithConfig:
 class TestParameterPassthrough:
     """Test that standard Worker options are passed through correctly."""
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_basic_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test basic parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_basic_parameters_passed_through(self, **m):
+        """Basic parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
         mock_client = Mock()
@@ -425,40 +344,24 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        args, kwargs = mock_worker_class.call_args
+        m["mock_worker_class"].assert_called_once()
+        args, kwargs = m["mock_worker_class"].call_args
         assert args[0] == mock_client
         assert kwargs["task_queue"] == "test-queue"
         assert kwargs["workflows"] == [MyWorkflow]
         assert my_activity in kwargs["activities"]
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_executor_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test executor parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_executor_parameters_passed_through(self, **m):
+        """Executor parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         mock_activity_executor = Mock()
         mock_workflow_executor = ThreadPoolExecutor(max_workers=4)
 
         try:
             create_openbox_worker(
-                client=mock_client,
+                client=Mock(),
                 task_queue="test-queue",
                 activity_executor=mock_activity_executor,
                 workflow_task_executor=mock_workflow_executor,
@@ -466,37 +369,20 @@ class TestParameterPassthrough:
                 openbox_api_key="obx_test_key123",
             )
 
-            mock_worker_class.assert_called_once()
-            call_kwargs = mock_worker_class.call_args[1]
+            m["mock_worker_class"].assert_called_once()
+            call_kwargs = m["mock_worker_class"].call_args[1]
             assert call_kwargs["activity_executor"] == mock_activity_executor
             assert call_kwargs["workflow_task_executor"] == mock_workflow_executor
         finally:
             mock_workflow_executor.shutdown(wait=False)
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_concurrency_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test concurrency parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_concurrency_parameters_passed_through(self, **m):
+        """Concurrency parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             max_cached_workflows=500,
             max_concurrent_workflow_tasks=10,
@@ -508,8 +394,8 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["max_cached_workflows"] == 500
         assert call_kwargs["max_concurrent_workflow_tasks"] == 10
         assert call_kwargs["max_concurrent_activities"] == 20
@@ -517,30 +403,13 @@ class TestParameterPassthrough:
         assert call_kwargs["max_concurrent_workflow_task_polls"] == 3
         assert call_kwargs["max_concurrent_activity_task_polls"] == 3
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_timeout_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test timeout parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_timeout_parameters_passed_through(self, **m):
+        """Timeout parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             sticky_queue_schedule_to_start_timeout=timedelta(seconds=20),
             max_heartbeat_throttle_interval=timedelta(seconds=120),
@@ -550,8 +419,8 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["sticky_queue_schedule_to_start_timeout"] == timedelta(
             seconds=20
         )
@@ -561,30 +430,13 @@ class TestParameterPassthrough:
         )
         assert call_kwargs["graceful_shutdown_timeout"] == timedelta(seconds=30)
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_rate_limit_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test rate limit parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_rate_limit_parameters_passed_through(self, **m):
+        """Rate limit parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             max_activities_per_second=10.0,
             max_task_queue_activities_per_second=50.0,
@@ -593,36 +445,19 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["max_activities_per_second"] == 10.0
         assert call_kwargs["max_task_queue_activities_per_second"] == 50.0
         assert call_kwargs["nonsticky_to_sticky_poll_ratio"] == 0.3
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_identity_and_build_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test identity and build parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_identity_and_build_parameters_passed_through(self, **m):
+        """Identity and build parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             build_id="v1.2.3",
             identity="worker-1",
@@ -630,35 +465,18 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["build_id"] == "v1.2.3"
         assert call_kwargs["identity"] == "worker-1"
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_boolean_flags_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test boolean flag parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_boolean_flags_passed_through(self, **m):
+        """Boolean flag parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             no_remote_activities=True,
             debug_mode=True,
@@ -669,35 +487,18 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["no_remote_activities"] is True
         assert call_kwargs["debug_mode"] is True
         assert call_kwargs["disable_eager_activity_execution"] is True
         assert call_kwargs["use_worker_versioning"] is True
         assert call_kwargs["disable_safe_workflow_eviction"] is True
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_callback_parameters_passed_through(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test callback parameters are passed through to Worker."""
+    @with_worker_patches
+    def test_callback_parameters_passed_through(self, **m):
+        """Callback parameters are passed through to Worker."""
         from openbox.worker import create_openbox_worker
-
-        mock_client = Mock()
 
         async def on_fatal_error(error):
             pass
@@ -705,7 +506,7 @@ class TestParameterPassthrough:
         mock_shared_state_manager = Mock()
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             on_fatal_error=on_fatal_error,
             shared_state_manager=mock_shared_state_manager,
@@ -713,43 +514,25 @@ class TestParameterPassthrough:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["on_fatal_error"] == on_fatal_error
         assert call_kwargs["shared_state_manager"] == mock_shared_state_manager
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_custom_interceptors_appended_after_openbox(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test custom interceptors are appended after OpenBox interceptors."""
+    @with_worker_patches
+    def test_custom_interceptors_appended_after_openbox(self, **m):
+        """Custom interceptors are appended after OpenBox interceptors."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         mock_custom_interceptor_1 = Mock(name="custom1")
         mock_custom_interceptor_2 = Mock(name="custom2")
         mock_workflow_interceptor = Mock(name="workflow")
         mock_activity_interceptor_instance = Mock(name="activity")
-        mock_governance_interceptor.return_value = mock_workflow_interceptor
-        mock_activity_interceptor.return_value = mock_activity_interceptor_instance
+        m["mock_governance_interceptor"].return_value = mock_workflow_interceptor
+        m["mock_activity_interceptor"].return_value = mock_activity_interceptor_instance
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             interceptors=[mock_custom_interceptor_1, mock_custom_interceptor_2],
             openbox_url="http://localhost:8086",
@@ -757,8 +540,8 @@ class TestParameterPassthrough:
             enable_trace_propagation=False,
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         interceptors = call_kwargs["interceptors"]
 
         # Order: [workflow_interceptor, activity_interceptor, custom1, custom2]
@@ -768,29 +551,10 @@ class TestParameterPassthrough:
         assert interceptors[2] == mock_custom_interceptor_1
         assert interceptors[3] == mock_custom_interceptor_2
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_custom_activities_preserved(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test custom activities are preserved when OpenBox is configured."""
+    @with_worker_patches
+    def test_custom_activities_preserved(self, **m):
+        """Custom activities are preserved when OpenBox is configured."""
         from openbox.worker import create_openbox_worker
-
-        mock_client = Mock()
 
         def activity_a():
             pass
@@ -799,15 +563,15 @@ class TestParameterPassthrough:
             pass
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             activities=[activity_a, activity_b],
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         activities = call_kwargs["activities"]
 
         # Custom activities should be first, then the class-based governance method.
@@ -826,698 +590,331 @@ class TestParameterPassthrough:
 class TestConfigurationOptions:
     """Test configuration options for governance."""
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_governance_timeout_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test governance_timeout is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_governance_timeout_passed_to_config(self, **m):
+        """governance_timeout is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_timeout=120.0,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["api_timeout"] == 120.0
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_governance_policy_fail_open_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test governance_policy='fail_open' is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_governance_policy_fail_open_passed_to_config(self, **m):
+        """governance_policy='fail_open' is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_policy="fail_open",
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["on_api_error"] == "fail_open"
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_governance_policy_fail_closed_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test governance_policy='fail_closed' is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_governance_policy_fail_closed_passed_to_config(self, **m):
+        """governance_policy='fail_closed' is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_policy="fail_closed",
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["on_api_error"] == "fail_closed"
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_send_start_event_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test send_start_event is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_send_start_event_passed_to_config(self, **m):
+        """send_start_event is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
-        # Test with False
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             send_start_event=False,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["send_start_event"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_send_activity_start_event_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test send_activity_start_event is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_send_activity_start_event_passed_to_config(self, **m):
+        """send_activity_start_event is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             send_activity_start_event=False,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["send_activity_start_event"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_workflow_types_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_workflow_types is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_skip_workflow_types_passed_to_config(self, **m):
+        """skip_workflow_types is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         skip_types = {"WorkflowA", "WorkflowB"}
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_workflow_types=skip_types,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["skip_workflow_types"] == skip_types
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_workflow_types_defaults_to_empty_set(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_workflow_types defaults to empty set when None."""
+    @with_worker_patches
+    def test_skip_workflow_types_defaults_to_empty_set(self, **m):
+        """skip_workflow_types defaults to empty set when None."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_workflow_types=None,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["skip_workflow_types"] == set()
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_activity_types_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_activity_types is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_skip_activity_types_passed_to_config(self, **m):
+        """skip_activity_types is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         skip_types = {"activity_a", "activity_b"}
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_activity_types=skip_types,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["skip_activity_types"] == skip_types
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_activity_types_default_includes_send_governance_event(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_activity_types defaults to {'send_governance_event'} when None."""
+    @with_worker_patches
+    def test_skip_activity_types_default_includes_send_governance_event(self, **m):
+        """skip_activity_types defaults to {'send_governance_event'} when None."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_activity_types=None,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert "send_governance_event" in call_kwargs["skip_activity_types"]
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_signals_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_signals is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_skip_signals_passed_to_config(self, **m):
+        """skip_signals is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         skip_signals = {"signal_a", "signal_b"}
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_signals=skip_signals,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["skip_signals"] == skip_signals
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_skip_signals_defaults_to_empty_set(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test skip_signals defaults to empty set when None."""
+    @with_worker_patches
+    def test_skip_signals_defaults_to_empty_set(self, **m):
+        """skip_signals defaults to empty set when None."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             skip_signals=None,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["skip_signals"] == set()
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_hitl_enabled_passed_to_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test hitl_enabled is passed to GovernanceConfig."""
+    @with_worker_patches
+    def test_hitl_enabled_passed_to_config(self, **m):
+        """hitl_enabled is passed to GovernanceConfig."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             hitl_enabled=False,
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["hitl_enabled"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_hitl_enabled_default_is_true(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test hitl_enabled defaults to True."""
+    @with_worker_patches
+    def test_hitl_enabled_default_is_true(self, **m):
+        """hitl_enabled defaults to True."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
         )
 
-        mock_governance_config.assert_called_once()
-        call_kwargs = mock_governance_config.call_args[1]
+        m["mock_governance_config"].assert_called_once()
+        call_kwargs = m["mock_governance_config"].call_args[1]
         assert call_kwargs["hitl_enabled"] is True
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_instrument_databases_passed_to_setup(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test instrument_databases is passed to setup_opentelemetry_for_governance."""
+    @with_worker_patches
+    def test_instrument_databases_passed_to_core_runtime(self, **m):
+        """instrument_databases is forwarded to create_core_runtime.
+
+        The base runtime owns DB instrumentation now, so the flag rides on
+        create_core_runtime instead of the removed setup_opentelemetry_for_governance.
+        """
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             instrument_databases=False,
         )
 
-        mock_setup_otel.assert_called_once()
-        call_kwargs = mock_setup_otel.call_args[1]
+        m["mock_create_core_runtime"].assert_called_once()
+        call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
         assert call_kwargs["instrument_databases"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_db_libraries_passed_to_setup(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test db_libraries is passed to setup_opentelemetry_for_governance."""
+    @with_worker_patches
+    def test_instrument_file_io_passed_to_core_runtime(self, **m):
+        """instrument_file_io is forwarded to create_core_runtime."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-        db_libs = {"psycopg2", "asyncpg", "redis"}
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
-            db_libraries=db_libs,
+            instrument_file_io=False,
         )
 
-        mock_setup_otel.assert_called_once()
-        call_kwargs = mock_setup_otel.call_args[1]
-        assert call_kwargs["db_libraries"] == db_libs
+        m["mock_create_core_runtime"].assert_called_once()
+        call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
+        assert call_kwargs["instrument_file_io"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_instrument_file_io_passed_to_setup(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test instrument_file_io is passed to setup_opentelemetry_for_governance."""
+    @with_worker_patches
+    def test_db_libraries_accepted_as_noop(self, **m):
+        """db_libraries is still accepted (API-compat) but no longer flows anywhere.
+
+        The base runtime installs every available DB instrumentor best-effort, so
+        db_libraries is a no-op: passing it must not break worker construction and
+        must not appear in the create_core_runtime call.
+        """
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
-        create_openbox_worker(
-            client=mock_client,
+        result = create_openbox_worker(
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
-            instrument_file_io=True,
+            db_libraries={"psycopg2", "asyncpg", "redis"},
         )
 
-        mock_setup_otel.assert_called_once()
-        call_kwargs = mock_setup_otel.call_args[1]
-        assert call_kwargs["instrument_file_io"] is True
+        assert result is m["mock_worker_class"].return_value
+        assert "db_libraries" not in m["mock_create_core_runtime"].call_args.kwargs
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_sqlalchemy_engine_passed_to_setup(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test sqlalchemy_engine is passed to setup_opentelemetry_for_governance."""
+    @with_worker_patches
+    def test_sqlalchemy_engine_accepted_as_noop(self, **m):
+        """sqlalchemy_engine is still accepted (API-compat) but no longer flows anywhere.
+
+        SQLAlchemy is governed via a global Engine listener in the base runtime, so
+        passing an engine must not break construction and must not reach
+        create_core_runtime.
+        """
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-        mock_engine = Mock()
-
-        create_openbox_worker(
-            client=mock_client,
+        result = create_openbox_worker(
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
-            sqlalchemy_engine=mock_engine,
+            sqlalchemy_engine=Mock(),
         )
 
-        mock_setup_otel.assert_called_once()
-        call_kwargs = mock_setup_otel.call_args[1]
-        assert call_kwargs["sqlalchemy_engine"] is mock_engine
-
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_sqlalchemy_engine_defaults_to_none(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test sqlalchemy_engine defaults to None when not provided."""
-        from openbox.worker import create_openbox_worker
-
-        mock_client = Mock()
-
-        create_openbox_worker(
-            client=mock_client,
-            task_queue="test-queue",
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key123",
-        )
-
-        mock_setup_otel.assert_called_once()
-        call_kwargs = mock_setup_otel.call_args[1]
-        assert call_kwargs["sqlalchemy_engine"] is None
+        assert result is m["mock_worker_class"].return_value
+        assert "sqlalchemy_engine" not in m["mock_create_core_runtime"].call_args.kwargs
 
 
 # ===============================================================================
-# Print Output Tests
+# Logging Output Tests
 # ===============================================================================
 
 
-class TestPrintOutput:
-    """Test print output messages."""
+class TestLogOutput:
+    """Test initialization status logging."""
 
+    @with_worker_patches
     @patch("builtins.print")
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_prints_initialization_messages(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-        mock_print,
-        caplog,
-    ):
+    def test_logs_initialization_messages(self, mock_print, caplog, **m):
         """Initialization status is logged via the module logger (not print())."""
         import logging
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         with caplog.at_level(logging.INFO, logger="openbox.worker"):
             create_openbox_worker(
-                client=mock_client,
+                client=Mock(),
                 task_queue="test-queue",
                 openbox_url="http://localhost:8086",
                 openbox_api_key="obx_test_key123",
@@ -1540,37 +937,16 @@ class TestPrintOutput:
         assert "file=enabled" in log_text
         assert "hitl=enabled" in log_text
 
+    @with_worker_patches
     @patch("builtins.print")
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_prints_disabled_status_messages(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-        mock_print,
-        caplog,
-    ):
+    def test_logs_disabled_status_messages(self, mock_print, caplog, **m):
         """Disabled-status values surface in the logger output."""
         import logging
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         with caplog.at_level(logging.INFO, logger="openbox.worker"):
             create_openbox_worker(
-                client=mock_client,
+                client=Mock(),
                 task_queue="test-queue",
                 openbox_url="http://localhost:8086",
                 openbox_api_key="obx_test_key123",
@@ -1595,69 +971,16 @@ class TestPrintOutput:
 class TestReturnValue:
     """Test return value of create_openbox_worker()."""
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_returns_worker_instance(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test returns Worker instance."""
+    @with_worker_patches
+    def test_returns_worker_instance(self, **m):
+        """Returns the Worker instance built by the factory."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         mock_worker = Mock()
-        mock_worker_class.return_value = mock_worker
+        m["mock_worker_class"].return_value = mock_worker
 
         result = create_openbox_worker(
-            client=mock_client,
-            task_queue="test-queue",
-            openbox_url="http://localhost:8086",
-            openbox_api_key="obx_test_key123",
-        )
-
-        assert result == mock_worker
-
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_returns_worker_instance_with_openbox_config(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test returns Worker instance when OpenBox is configured."""
-        from openbox.worker import create_openbox_worker
-
-        mock_client = Mock()
-        mock_worker = Mock()
-        mock_worker_class.return_value = mock_worker
-
-        result = create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
@@ -1674,32 +997,13 @@ class TestReturnValue:
 class TestEdgeCases:
     """Test edge cases and boundary conditions."""
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_empty_workflows_and_activities(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test with empty workflows and activities lists."""
+    @with_worker_patches
+    def test_empty_workflows_and_activities(self, **m):
+        """With empty workflows and activities lists."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             workflows=[],
             activities=[],
@@ -1707,8 +1011,8 @@ class TestEdgeCases:
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         assert call_kwargs["workflows"] == []
         # Activities will include the class-based send_governance_event method.
         assert any(
@@ -1716,39 +1020,20 @@ class TestEdgeCases:
             for a in call_kwargs["activities"]
         )
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_default_parameter_values(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test default parameter values are passed through."""
+    @with_worker_patches
+    def test_default_parameter_values(self, **m):
+        """Default parameter values are passed through."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
 
         # Check default values
         assert call_kwargs["max_cached_workflows"] == 1000
@@ -1769,32 +1054,13 @@ class TestEdgeCases:
         assert call_kwargs["use_worker_versioning"] is False
         assert call_kwargs["disable_safe_workflow_eviction"] is False
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_url_with_trailing_slash(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test URL with trailing slash is handled correctly."""
+    @with_worker_patches
+    def test_url_with_trailing_slash(self, **m):
+        """URL with trailing slash is passed as-is to components."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086/",
             openbox_api_key="obx_test_key123",
@@ -1802,109 +1068,53 @@ class TestEdgeCases:
 
         # Verify URL is passed as-is to components
         # (URL normalization happens in the interceptors)
-        mock_governance_interceptor.assert_called_once()
-        call_kwargs = mock_governance_interceptor.call_args[1]
+        m["mock_governance_interceptor"].assert_called_once()
+        call_kwargs = m["mock_governance_interceptor"].call_args[1]
         assert call_kwargs["api_url"] == "http://localhost:8086/"
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_large_timeout_value(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test large timeout value is handled correctly."""
+    @with_worker_patches
+    def test_large_timeout_value(self, **m):
+        """Large timeout value is handled correctly."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_timeout=3600.0,  # 1 hour
         )
 
-        mock_validate_api_key.assert_called_once()
-        call_kwargs = mock_validate_api_key.call_args[1]
+        m["mock_validate_api_key"].assert_called_once()
+        call_kwargs = m["mock_validate_api_key"].call_args[1]
         assert call_kwargs["governance_timeout"] == 3600.0
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_small_timeout_value(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test small timeout value is handled correctly."""
+    @with_worker_patches
+    def test_small_timeout_value(self, **m):
+        """Small timeout value is handled correctly."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
-
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             openbox_url="http://localhost:8086",
             openbox_api_key="obx_test_key123",
             governance_timeout=0.5,  # 500ms
         )
 
-        mock_validate_api_key.assert_called_once()
-        call_kwargs = mock_validate_api_key.call_args[1]
+        m["mock_validate_api_key"].assert_called_once()
+        call_kwargs = m["mock_validate_api_key"].call_args[1]
         assert call_kwargs["governance_timeout"] == 0.5
 
-    @patch("openbox.worker.Worker")
-    @patch("openbox.worker.validate_api_key")
-    @patch("openbox.worker.WorkflowSpanProcessor")
-    @patch("openbox.worker.GovernanceConfig")
-    @patch("openbox.otel_setup.setup_opentelemetry_for_governance")
-    @patch("openbox.workflow_interceptor.GovernanceInterceptor")
-    @patch("openbox.activity_interceptor.ActivityGovernanceInterceptor")
-    @patch("openbox.activities.send_governance_event")
-    def test_many_custom_interceptors(
-        self,
-        mock_send_governance_event,
-        mock_activity_interceptor,
-        mock_governance_interceptor,
-        mock_setup_otel,
-        mock_governance_config,
-        mock_span_processor_class,
-        mock_validate_api_key,
-        mock_worker_class,
-    ):
-        """Test with many custom interceptors."""
+    @with_worker_patches
+    def test_many_custom_interceptors(self, **m):
+        """With many custom interceptors."""
         from openbox.worker import create_openbox_worker
 
-        mock_client = Mock()
         custom_interceptors = [Mock(name=f"interceptor_{i}") for i in range(10)]
 
         create_openbox_worker(
-            client=mock_client,
+            client=Mock(),
             task_queue="test-queue",
             interceptors=custom_interceptors,
             openbox_url="http://localhost:8086",
@@ -1912,15 +1122,15 @@ class TestEdgeCases:
             enable_trace_propagation=False,
         )
 
-        mock_worker_class.assert_called_once()
-        call_kwargs = mock_worker_class.call_args[1]
+        m["mock_worker_class"].assert_called_once()
+        call_kwargs = m["mock_worker_class"].call_args[1]
         interceptors = call_kwargs["interceptors"]
 
         # 2 OpenBox interceptors + 10 custom = 12 total
         assert len(interceptors) == 12
         # First 2 are OpenBox interceptors
-        assert interceptors[0] == mock_governance_interceptor.return_value
-        assert interceptors[1] == mock_activity_interceptor.return_value
+        assert interceptors[0] == m["mock_governance_interceptor"].return_value
+        assert interceptors[1] == m["mock_activity_interceptor"].return_value
         # Rest are custom interceptors in order
         for i, interceptor in enumerate(custom_interceptors):
             assert interceptors[i + 2] == interceptor

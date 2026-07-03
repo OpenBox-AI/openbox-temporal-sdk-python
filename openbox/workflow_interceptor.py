@@ -217,7 +217,7 @@ class GovernanceInterceptor(Interceptor):
         self,
         api_url: str = "",
         api_key: str = "",
-        span_processor=None,  # Shared with activity interceptor for HTTP spans
+        state=None,  # TemporalGovernanceState — signal verdict bridge to activities
         config=None,  # Optional GovernanceConfig
     ):
         # api_url / api_key are accepted for backward compatibility but no longer
@@ -225,7 +225,7 @@ class GovernanceInterceptor(Interceptor):
         # Kept on self in case downstream callers introspect.
         self.api_url = api_url.rstrip("/") if api_url else ""
         self.api_key = api_key
-        self.span_processor = span_processor
+        self.state = state
         self.api_timeout = getattr(config, "api_timeout", 30.0) if config else 30.0
         self.on_api_error = (
             getattr(config, "on_api_error", "fail_open") if config else "fail_open"
@@ -242,7 +242,7 @@ class GovernanceInterceptor(Interceptor):
         self, input: WorkflowInterceptorClassInput
     ) -> Optional[Type[WorkflowInboundInterceptor]]:
         # Capture via closure
-        span_processor = self.span_processor
+        state = self.state
         timeout = self.api_timeout
         on_error = self.on_api_error
         send_start = self.send_start_event
@@ -382,12 +382,13 @@ class GovernanceInterceptor(Interceptor):
                         if result
                         else Verdict.ALLOW
                     )
-                    if verdict.should_stop() and span_processor:
-                        span_processor.set_verdict(
+                    if verdict.should_stop() and state:
+                        # Run-scoped: the next activity in THIS run enforces it.
+                        state.set_signal_verdict(
                             info.workflow_id,
+                            info.run_id,
                             verdict,
                             result.get("reason"),
-                            info.run_id,  # Include run_id to detect stale verdicts
                         )
 
                 await super().handle_signal(input)

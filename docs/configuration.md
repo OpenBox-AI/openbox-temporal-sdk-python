@@ -81,8 +81,9 @@ internally. Emit an explicit handoff from workflow code with
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `instrument_databases` | `bool` | `True` | Capture database queries (includes sqlite3) |
-| `db_libraries` | `set` | `None` | `"psycopg2"`, `"asyncpg"`, `"mysql"`, `"pymysql"`, `"pymongo"`, `"redis"`, `"sqlalchemy"`, `"sqlite3"` |
+| `instrument_databases` | `bool` | `True` | Capture database queries (the base runtime installs every available DB instrumentor, including sqlite3) |
+| `db_libraries` | `set` | `None` | Accepted for backward compatibility; no effect. The base runtime installs all available DB instrumentors regardless. |
+| `sqlalchemy_engine` | `Any` | `None` | Accepted for backward compatibility; no effect. SQLAlchemy is governed globally via an `Engine` event listener, so pre-existing engines are covered automatically. |
 | `instrument_file_io` | `bool` | `False` | Capture file operations |
 
 ## Example
@@ -108,7 +109,6 @@ worker = create_openbox_worker(
     hitl_enabled=True,
     skip_workflow_types={"InternalWorkflow"},
     instrument_databases=True,
-    db_libraries={"psycopg2", "redis"},
     instrument_file_io=False,
 )
 ```

@@ -7,6 +7,12 @@ operation runs; REQUIRE_APPROVAL surfaces as the retryable ``ApprovalPending``
 error powering Temporal's HITL retry loop; completed verdicts only mark
 future execution. This is the Phase 8 kit imported from an external repo —
 exactly what later framework migrations will do.
+
+Hook governance is owned by the base ``openbox_core`` runtime; the Temporal
+adapter maps base verdicts onto Temporal-native effects and records the small
+amount of Temporal state that must survive a base hook callback in a
+``TemporalGovernanceState`` (signal verdicts, HITL pending-approval markers,
+completed-hook stop bridge).
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ import requests
 from temporalio.exceptions import ApplicationError
 
 from openbox.core_adapter import TemporalFrameworkAdapter, build_core_activity_context
+from openbox.governance_state import TemporalGovernanceState
 from openbox_core.conformance.fake_core import FakeCore, assert_hook_wire_shape
 from openbox_core.conformance.instrumentation import (
     LocalCountingServer,
@@ -45,10 +52,22 @@ def temporal_context():
     return build_core_activity_context(_FakeActivityInfo(), activity_input=[1, 2])
 
 
+def _adapter(store, **kwargs):
+    """Temporal adapter bound to the SAME ContextStore the conformance runtime
+    installs, so its hook-context lookups and the runtime's halt/abort flags
+    share one store. A fresh TemporalGovernanceState is used per test."""
+    return TemporalFrameworkAdapter(
+        kwargs.pop("state", TemporalGovernanceState()),
+        context_store=store,
+        **kwargs,
+    )
+
+
 class TestTemporalAdapterConformance:
     def test_http_block_raises_governance_block_application_error(self, server):
         fake_core = FakeCore({"verdict": "block", "reason": "policy"})
-        adapter, store = TemporalFrameworkAdapter(), ContextStore()
+        store = ContextStore()
+        adapter = _adapter(store)
         with installed_conformance_runtime(fake_core, adapter, store):
             with activity_scope(temporal_context(), store=store):
                 before = server.hits
@@ -61,7 +80,8 @@ class TestTemporalAdapterConformance:
 
     def test_http_halt_raises_governance_halt_and_sets_halt_flag(self, server):
         fake_core = FakeCore({"verdict": "halt", "reason": "emergency"})
-        adapter, store = TemporalFrameworkAdapter(), ContextStore()
+        store = ContextStore()
+        adapter = _adapter(store)
         with installed_conformance_runtime(fake_core, adapter, store):
             with activity_scope(temporal_context(), store=store):
                 before = server.hits
@@ -78,7 +98,8 @@ class TestTemporalAdapterConformance:
         import httpx
 
         fake_core = FakeCore({"verdict": "require_approval", "approval_id": "app-1"})
-        adapter, store = TemporalFrameworkAdapter(), ContextStore()
+        store = ContextStore()
+        adapter = _adapter(store)
         with installed_conformance_runtime(fake_core, adapter, store):
             with activity_scope(temporal_context(), store=store):
                 before = server.hits
@@ -94,7 +115,8 @@ class TestTemporalAdapterConformance:
             {"verdict": "allow"},
             {"verdict": "block", "reason": "post-hoc"},
         )
-        adapter, store = TemporalFrameworkAdapter(), ContextStore()
+        store = ContextStore()
+        adapter = _adapter(store)
         ctx = temporal_context()
         with installed_conformance_runtime(fake_core, adapter, store):
             with activity_scope(ctx, store=store):
@@ -115,43 +137,28 @@ class TestTemporalAdapterConformance:
     def test_create_core_runtime_builds_wired_runtime(self):
         from openbox.core_adapter import create_core_runtime, get_core_context_store
 
-        runtime = create_core_runtime("https://core.test", "obx_test_x")
+        runtime = create_core_runtime(
+            api_url="https://core.test",
+            api_key="obx_test_x",
+            state=TemporalGovernanceState(),
+        )
         assert runtime.adapter.name == "temporal"
         assert runtime.context_store is get_core_context_store()
         runtime.close()
 
 
-class _FakeSpanProcessor:
-    """Minimal legacy span-processor stand-in: one buffer, keyed by workflow."""
+class TestApprovalArmsPendingMarker:
+    """Core REQUIRE_APPROVAL must arm the retry-poll loop: without a pending
+    marker in ``TemporalGovernanceState`` the next attempt re-evaluates from
+    scratch instead of polling approval status. The marker is keyed by
+    (workflow_id, run_id, activity_id) — the run-scoped identity of the activity
+    that hit the approval gate."""
 
-    def __init__(self, buffer):
-        self._buffer = buffer
-
-    def get_buffer(self, workflow_id):
-        return self._buffer if workflow_id == self._buffer.workflow_id else None
-
-
-def _legacy_buffer():
-    from openbox.types import WorkflowSpanBuffer
-
-    return WorkflowSpanBuffer(
-        workflow_id="wf-conf",
-        run_id="run-conf",
-        workflow_type="ConfWorkflow",
-        task_queue="conf-queue",
-    )
-
-
-class TestApprovalBridgesLegacyHitlBuffer:
-    """Core REQUIRE_APPROVAL must arm the legacy retry-poll loop: without
-    ``buffer.pending_approval`` the next attempt re-evaluates from scratch
-    instead of polling approval status."""
-
-    def test_sync_hook_approval_raises_retryable_pending_and_flags_buffer(self, server):
+    def test_sync_hook_approval_raises_retryable_pending_and_marks_state(self, server):
         fake_core = FakeCore({"verdict": "require_approval", "approval_id": "app-2"})
-        buffer = _legacy_buffer()
+        state = TemporalGovernanceState()
         store = ContextStore()
-        adapter = TemporalFrameworkAdapter(_FakeSpanProcessor(buffer), context_store=store)
+        adapter = TemporalFrameworkAdapter(state, context_store=store)
         with installed_conformance_runtime(fake_core, adapter, store):
             with activity_scope(temporal_context(), store=store):
                 before = server.hits
@@ -160,29 +167,32 @@ class TestApprovalBridgesLegacyHitlBuffer:
                 assert server.hits == before
         assert exc_info.value.type == "ApprovalPending"
         assert exc_info.value.non_retryable is False
-        assert buffer.pending_approval is True
+        assert state.has_pending_approval("wf-conf", "run-conf", "act-conf") is True
         # Temporal HITL is retry-driven: the core inline poller must not run.
         assert fake_core.approval_requests == []
 
-    async def test_async_approval_flags_buffer_too(self):
+    async def test_async_approval_marks_state_too(self):
         from openbox_core.contracts.results import EvaluationResult, Verdict
 
-        buffer = _legacy_buffer()
-        adapter = TemporalFrameworkAdapter(_FakeSpanProcessor(buffer))
-        store = adapter._store
+        state = TemporalGovernanceState()
+        store = ContextStore()
+        adapter = TemporalFrameworkAdapter(state, context_store=store)
         with activity_scope(temporal_context(), store=store):
             with pytest.raises(ApplicationError) as exc_info:
                 await adapter.handle_approval(
                     EvaluationResult(verdict=Verdict.REQUIRE_APPROVAL, approval_id="a")
                 )
         assert exc_info.value.type == "ApprovalPending"
-        assert buffer.pending_approval is True
+        assert state.has_pending_approval("wf-conf", "run-conf", "act-conf") is True
 
     def test_hitl_disabled_degrades_to_non_retryable_block(self):
         from openbox_core.contracts.results import EvaluationResult, Verdict
 
-        adapter = TemporalFrameworkAdapter(hitl_enabled=False)
-        with activity_scope(temporal_context(), store=adapter._store):
+        store = ContextStore()
+        adapter = TemporalFrameworkAdapter(
+            TemporalGovernanceState(), hitl_enabled=False, context_store=store
+        )
+        with activity_scope(temporal_context(), store=store):
             with pytest.raises(ApplicationError) as exc_info:
                 adapter.handle_approval_sync(
                     EvaluationResult(verdict=Verdict.REQUIRE_APPROVAL, approval_id="a")
@@ -193,10 +203,14 @@ class TestApprovalBridgesLegacyHitlBuffer:
     def test_skip_hitl_activity_type_degrades_to_block(self):
         from openbox_core.contracts.results import EvaluationResult, Verdict
 
+        store = ContextStore()
         adapter = TemporalFrameworkAdapter(
-            hitl_enabled=True, skip_hitl_activity_types={"conf_activity"}
+            TemporalGovernanceState(),
+            hitl_enabled=True,
+            skip_hitl_activity_types={"conf_activity"},
+            context_store=store,
         )
-        with activity_scope(temporal_context(), store=adapter._store):
+        with activity_scope(temporal_context(), store=store):
             with pytest.raises(ApplicationError) as exc_info:
                 adapter.handle_approval_sync(
                     EvaluationResult(verdict=Verdict.REQUIRE_APPROVAL, approval_id="a")
@@ -230,7 +244,7 @@ class TestFailClosedMapsToTemporalHalt:
         store = ContextStore()
         runtime = OpenBoxRuntime(
             OpenBoxConfig(api_url="https://core.test", api_key="obx_test_conformance"),
-            TemporalFrameworkAdapter(),
+            TemporalFrameworkAdapter(TemporalGovernanceState(), context_store=store),
             client=client,
             context_store=store,
         )

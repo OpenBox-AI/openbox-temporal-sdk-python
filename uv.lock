@@ -730,7 +730,7 @@ wheels = [
 
 [[package]]
 name = "openbox-sdk-python"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "../openbox-sdk-python" }
 dependencies = [
     { name = "cryptography" },
@@ -748,12 +748,17 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-asyncpg", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-dbapi", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-httpx", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-redis", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-requests", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-sqlalchemy", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-urllib", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-urllib3", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0,<1.40.0" },
+    { name = "pymongo", marker = "extra == 'db'", specifier = ">=4.6.0" },
+    { name = "redis", marker = "extra == 'db'", specifier = ">=5.0.0" },
     { name = "requests", marker = "extra == 'http'", specifier = ">=2.31.0" },
     { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2.0.0" },
+    { name = "wrapt", marker = "extra == 'db'", specifier = ">=1.16.0" },
 ]
 provides-extras = ["http", "db"]
 

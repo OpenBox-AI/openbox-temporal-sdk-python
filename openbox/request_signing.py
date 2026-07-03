@@ -61,39 +61,29 @@ def prepare_signed_request(
         ``(headers, body_bytes)``. Callers MUST send ``content=body_bytes`` —
         never ``json=`` — so the transmitted bytes match the hashed bytes.
     """
-    # Base auth headers (Authorization / User-Agent / SDK-Version) stay
-    # Temporal-branded — only the 5 AIP headers come from the base SDK.
-    from .hook_governance import build_auth_headers
-
-    body_bytes = serialize_body(payload)
-    headers = build_auth_headers(api_key)
+    # Fully delegated to the base SDK. Passing the Temporal package version as
+    # sdk_version keeps the Authorization/User-Agent/SDK-Version headers
+    # Temporal-branded; timestamp/nonce are generated HERE so the deterministic
+    # signing tests keep patching this module's datetime/secrets seams.
+    from . import __version__
 
     if signer is not None and agent_did:
-        # Generate timestamp/nonce HERE (patchable seams preserved); the base
-        # SDK builds the canonical string, signature, and AIP headers from
-        # these exact inputs.
+        identity = AgentIdentity(agent_did=agent_did, signer=signer)
         timestamp = datetime.now(timezone.utc).isoformat()
         nonce = secrets.token_urlsafe(24)
-        identity = AgentIdentity(agent_did=agent_did, signer=signer)
-        signed_headers, _ = _core_prepare_signed_request(
+        return _core_prepare_signed_request(
             method,
             path,
             payload,
             api_key=api_key,
             identity=identity,
+            sdk_version=__version__,
             _timestamp=timestamp,
             _nonce=nonce,
         )
-        for header_name in (
-            HEADER_DID,
-            HEADER_TIMESTAMP,
-            HEADER_NONCE,
-            HEADER_SIGNATURE,
-            HEADER_BODY_SHA256,
-        ):
-            headers[header_name] = signed_headers[header_name]
-
-    return headers, body_bytes
+    return _core_prepare_signed_request(
+        method, path, payload, api_key=api_key, identity=None, sdk_version=__version__
+    )
 
 
 def send_sync(client, url: str, headers: dict, body_bytes: bytes):

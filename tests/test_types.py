@@ -5,7 +5,6 @@ import pytest
 from openbox.types import (
     WorkflowEventType,
     Verdict,
-    WorkflowSpanBuffer,
     GuardrailsCheckResult,
     GovernanceVerdictResponse,
 )
@@ -276,102 +275,6 @@ class TestVerdict:
     def test_requires_approval_allow_returns_false(self):
         """Test ALLOW requires_approval returns False."""
         assert Verdict.ALLOW.requires_approval() is False
-
-
-class TestWorkflowSpanBuffer:
-    """Tests for WorkflowSpanBuffer dataclass."""
-
-    def test_creation_with_required_fields(self):
-        """Test creation with only required fields."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="wf-123",
-            run_id="run-456",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        assert buffer.workflow_id == "wf-123"
-        assert buffer.run_id == "run-456"
-        assert buffer.workflow_type == "TestWorkflow"
-        assert buffer.task_queue == "test-queue"
-
-    def test_default_values(self):
-        """Test that optional fields have correct default values."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="wf-123",
-            run_id="run-456",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        assert buffer.parent_workflow_id is None
-        assert buffer.spans == []
-        assert buffer.status is None
-        assert buffer.error is None
-        assert buffer.verdict is None
-        assert buffer.verdict_reason is None
-        assert buffer.pending_approval is False
-
-    def test_creation_with_all_fields(self):
-        """Test creation with all fields specified."""
-        error_data = {"type": "TestError", "message": "Something failed"}
-        spans_data = [{"name": "span1"}, {"name": "span2"}]
-
-        buffer = WorkflowSpanBuffer(
-            workflow_id="wf-123",
-            run_id="run-456",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-            parent_workflow_id="parent-wf-789",
-            spans=spans_data,
-            status="completed",
-            error=error_data,
-            verdict=Verdict.BLOCK,
-            verdict_reason="Policy violation",
-            pending_approval=True,
-        )
-
-        assert buffer.workflow_id == "wf-123"
-        assert buffer.run_id == "run-456"
-        assert buffer.workflow_type == "TestWorkflow"
-        assert buffer.task_queue == "test-queue"
-        assert buffer.parent_workflow_id == "parent-wf-789"
-        assert buffer.spans == spans_data
-        assert buffer.status == "completed"
-        assert buffer.error == error_data
-        assert buffer.verdict == Verdict.BLOCK
-        assert buffer.verdict_reason == "Policy violation"
-        assert buffer.pending_approval is True
-
-    def test_spans_default_factory_isolation(self):
-        """Test that spans default factory creates separate lists."""
-        buffer1 = WorkflowSpanBuffer(
-            workflow_id="wf-1",
-            run_id="run-1",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        buffer2 = WorkflowSpanBuffer(
-            workflow_id="wf-2",
-            run_id="run-2",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-
-        buffer1.spans.append({"name": "span1"})
-        assert len(buffer1.spans) == 1
-        assert len(buffer2.spans) == 0  # Should not be affected
-
-    def test_status_values(self):
-        """Test various status values."""
-        statuses = ["completed", "failed", "cancelled", "terminated"]
-        for status in statuses:
-            buffer = WorkflowSpanBuffer(
-                workflow_id="wf-123",
-                run_id="run-456",
-                workflow_type="TestWorkflow",
-                task_queue="test-queue",
-                status=status,
-            )
-            assert buffer.status == status
 
 
 class TestGuardrailsCheckResult:

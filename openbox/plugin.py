@@ -25,7 +25,6 @@ from temporalio.worker import WorkerConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from .config import initialize as validate_api_key, GovernanceConfig
-from .span_processor import WorkflowSpanProcessor
 from .client import GovernanceClient
 
 logger = logging.getLogger(__name__)
@@ -90,31 +89,40 @@ class OpenBoxPlugin(SimplePlugin):
 
         _signer = get_global_config().get_signer()
 
-        # 2. Create span processor
-        self._span_processor = WorkflowSpanProcessor(
-            ignored_url_prefixes=[openbox_url]
-        )
+        # 2. Temporal governance state (signal verdicts, HITL markers, completed-
+        #    hook stop bridge), shared by both interceptors.
+        from .governance_state import TemporalGovernanceState
 
-        # 3. Setup OTel instrumentation (HTTP, DB, File I/O)
-        from .otel_setup import setup_opentelemetry_for_governance
+        self._state = TemporalGovernanceState()
 
-        setup_opentelemetry_for_governance(
-            self._span_processor,
+        # 3. Build and OWN the base-SDK runtime; it installs all hook
+        #    instrumentation (HTTP/DB/file/function) and owns hook payload
+        #    building + evaluation + enforcement. db_libraries / sqlalchemy_engine
+        #    are accepted for compatibility but ignored (the base runtime installs
+        #    every available DB instrumentor and governs SQLAlchemy globally).
+        from .core_adapter import create_core_runtime
+
+        self._runtime = create_core_runtime(
             api_url=openbox_url,
             api_key=openbox_api_key,
-            ignored_urls=[openbox_url],
-            instrument_databases=instrument_databases,
-            db_libraries=db_libraries,
-            instrument_file_io=instrument_file_io,
-            sqlalchemy_engine=sqlalchemy_engine,
-            api_timeout=governance_timeout,
+            state=self._state,
+            timeout_seconds=governance_timeout,
             on_api_error=governance_policy,
-            max_body_size=65536,
             agent_did=agent_did,
-            signer=_signer,
+            agent_private_key=agent_private_key,
+            hitl_enabled=hitl_enabled,
+            skip_workflow_types=skip_workflow_types or set(),
+            skip_activity_types=skip_activity_types or {"send_governance_event"},
+            skip_signals=skip_signals or set(),
+            send_start_event=send_start_event,
+            send_activity_start_event=send_activity_start_event,
+            instrument_databases=instrument_databases,
+            instrument_file_io=instrument_file_io,
         )
+        # Process-lifetime install (idempotent).
+        self._runtime.install_instrumentation()
 
-        # 4. Create governance config
+        # 4. Create governance config (lifecycle-event path)
         config = GovernanceConfig(
             on_api_error=governance_policy,
             api_timeout=governance_timeout,
@@ -126,7 +134,7 @@ class OpenBoxPlugin(SimplePlugin):
             hitl_enabled=hitl_enabled,
         )
 
-        # 5. Create interceptors
+        # 5. Create interceptors (state-backed; base runtime owns hooks)
         from .workflow_interceptor import GovernanceInterceptor
         from .activity_interceptor import ActivityGovernanceInterceptor
 
@@ -143,13 +151,13 @@ class OpenBoxPlugin(SimplePlugin):
             GovernanceInterceptor(
                 api_url=openbox_url,
                 api_key=openbox_api_key,
-                span_processor=self._span_processor,
+                state=self._state,
                 config=config,
             ),
             ActivityGovernanceInterceptor(
                 api_url=openbox_url,
                 api_key=openbox_api_key,
-                span_processor=self._span_processor,
+                state=self._state,
                 config=config,
                 client=governance_client,
             ),
@@ -218,7 +226,7 @@ class OpenBoxPlugin(SimplePlugin):
         hitl_status = "enabled" if self._hitl_enabled else "disabled"
         logger.info(
             "OpenBox Plugin initialized: policy=%s timeout=%ss "
-            "db=%s file=%s hitl=%s hook_governance=enabled",
+            "db=%s file=%s hitl=%s instrumentation=openbox_core",
             self._governance_policy,
             self._governance_timeout,
             db_status,
