@@ -1,16 +1,18 @@
 # openbox/core_adapter.py
 """Temporal FrameworkAdapter + core ActivityContext binding for the base SDK.
 
-This is the Temporal side of the ``openbox_core`` adapter seam:
+This is the Temporal side of the ``openbox_core`` adapter seam. Governance is
+owned by the base runtime; this module maps base verdicts to Temporal-native
+effects and never builds hook payloads or evaluates hook events itself:
 
-- ``TemporalFrameworkAdapter`` maps base-SDK verdicts to Temporal-native
-  effects: BLOCK/HALT -> non-retryable ``ApplicationError`` with the existing
-  ``GovernanceBlock``/``GovernanceHalt`` types; REQUIRE_APPROVAL -> the
-  retryable ``ApprovalPending`` error driving Temporal's native HITL
-  retry loop; completed-hook verdicts -> abort state for FUTURE execution.
-- ``core_activity_scope`` binds the shared ``ActivityContext`` (and trace
-  registration) around activity execution with a GUARANTEED try/finally
-  reset — context can no longer leak when an activity raises.
+- ``TemporalFrameworkAdapter`` — BLOCK/HALT (started hook or lifecycle) ->
+  non-retryable ``ApplicationError``; REQUIRE_APPROVAL -> retryable
+  ``ApprovalPending`` (Temporal's native HITL retry loop) + a pending marker in
+  ``TemporalGovernanceState``; completed-hook BLOCK/HALT -> recorded in
+  ``TemporalGovernanceState`` (run-scoped) for the activity interceptor to
+  surface after user code returns.
+- ``core_activity_scope`` binds the shared ``ActivityContext`` around activity
+  execution with a GUARANTEED try/finally reset.
 
 NOT sandbox-safe — imports temporalio.exceptions and the base-SDK runtime
 modules. Do NOT import from workflow_interceptor.py or other workflow-context
@@ -31,6 +33,7 @@ from .errors import (
     GOVERNANCE_BLOCK_ERROR_TYPE,
     GOVERNANCE_HALT_ERROR_TYPE,
 )
+from .governance_state import TemporalGovernanceState
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,7 @@ __all__ = [
     "get_core_context_store",
     "build_core_activity_context",
     "core_activity_scope",
+    "create_core_runtime",
 ]
 
 # One process-wide store, mirroring the SDK's global-config model. The worker
@@ -54,45 +58,42 @@ class TemporalFrameworkAdapter:
     """Maps base-SDK governance outcomes onto Temporal-native behavior.
 
     Args:
-        span_processor: Legacy ``WorkflowSpanProcessor`` — when provided,
-            REQUIRE_APPROVAL marks ``buffer.pending_approval`` so the retry
-            attempt POLLS approval status instead of re-evaluating from
-            scratch (the legacy HITL loop keys off that flag).
-        hitl_enabled / skip_hitl_activity_types: mirror the legacy config;
-            REQUIRE_APPROVAL with HITL unavailable degrades to a
-            non-retryable block (fail safe), matching the legacy hook path.
+        state: ``TemporalGovernanceState`` — REQUIRE_APPROVAL marks a pending
+            approval so the retry attempt polls status; completed-hook BLOCK/HALT
+            is recorded run-scoped for the activity interceptor.
+        hitl_enabled / skip_hitl_activity_types: mirror the config; a
+            REQUIRE_APPROVAL where HITL is unavailable degrades to a non-retryable
+            block (fail safe).
     """
 
     name = "temporal"
 
     def __init__(
         self,
-        span_processor: Any = None,
+        state: TemporalGovernanceState,
         *,
         hitl_enabled: bool = True,
         skip_hitl_activity_types: Optional[set] = None,
         context_store: Optional[ContextStore] = None,
     ):
-        self._span_processor = span_processor
+        self._state = state
         self._hitl_enabled = hitl_enabled
         self._skip_hitl_activity_types = skip_hitl_activity_types or set()
         self._store = context_store if context_store is not None else _core_context_store
 
     async def handle_approval(self, result: EvaluationResult) -> None:
-        """REQUIRE_APPROVAL -> Temporal's retry-based HITL loop.
+        """Async hook REQUIRE_APPROVAL -> Temporal's retry-based HITL loop.
 
-        Temporal drives approval by failing the activity with a RETRYABLE
-        ``ApprovalPending`` error; the interceptor polls approval status on
-        the next attempt. The base runtime treats a raise here as
-        \"not approved yet\" — exactly the Temporal semantics.
-        """
+        Runs in the activity's own task, so the ambient ContextVar resolves the
+        activity context. Raises the retryable pending error; the interceptor
+        polls approval status on the next attempt."""
         self._pending_approval_or_block(result)
 
     def handle_approval_sync(
         self, result: EvaluationResult, context: Optional[ActivityContext] = None
     ) -> None:
-        """Sync hook seam — same retry-based flow (never polls inline; an
-        inline wait would wedge the activity thread Temporal is retrying)."""
+        """Sync hook seam — same retry-based flow with the span-resolved context
+        (ambient lookup can miss in user-spawned threads)."""
         self._pending_approval_or_block(result, context)
 
     def _pending_approval_or_block(
@@ -100,39 +101,27 @@ class TemporalFrameworkAdapter:
     ) -> None:
         from .hitl import raise_approval_pending, should_skip_hitl
 
-        # Span-resolved context from the hook runtime wins; ambient ContextVar
-        # lookup is the fallback (it can miss in user-spawned threads).
         ctx = context if context is not None else self._store.current_activity_context()
-        activity_type = ctx.activity_type if ctx else ""
+        activity_type = (ctx.activity_type or "") if ctx else ""
         if should_skip_hitl(
             activity_type,
             hitl_enabled=self._hitl_enabled,
             skip_types=self._skip_hitl_activity_types,
         ):
-            # HITL unavailable for this activity: approval can never resolve,
-            # so degrade to a non-retryable block (legacy hook behavior).
+            # HITL unavailable for this activity: approval can never resolve, so
+            # degrade to a non-retryable block (fail safe).
             self._raise_application_error(result)
-        # Flag the legacy buffer BEFORE raising: the retry attempt only polls
-        # approval status when ``pending_approval`` is set — without it every
-        # retry re-runs started-hook evaluation from scratch.
-        buffer = (
-            self._span_processor.get_buffer(ctx.workflow_id)
-            if self._span_processor is not None and ctx is not None
-            else None
-        )
-        if buffer is not None:
-            buffer.pending_approval = True
+        if ctx is not None:
+            # Mark BEFORE raising: the retry attempt only POLLS approval status
+            # when the marker is set; otherwise it would re-evaluate from scratch.
+            # Bound activity contexts always carry these keys; coerce for typing.
+            self._state.mark_pending_approval(
+                ctx.workflow_id or "", ctx.run_id or "", ctx.activity_id or ""
+            )
         else:
-            # Without the buffer flag the retry attempt RE-EVALUATES instead
-            # of polling approval status — approval still blocks (safe) but
-            # the HITL loop degrades. Loud so the wiring gap is visible.
             logger.warning(
-                "core REQUIRE_APPROVAL without a legacy span-processor buffer "
-                "(span_processor=%s, ctx=%s): retry will re-evaluate instead "
-                "of polling approval status — pass span_processor to "
-                "create_core_runtime()",
-                "set" if self._span_processor is not None else "None",
-                "bound" if ctx is not None else "missing",
+                "core REQUIRE_APPROVAL without a resolved activity context: the "
+                "retry attempt will re-evaluate instead of polling approval status"
             )
         raise_approval_pending(result.reason or "Approval required")
 
@@ -142,12 +131,23 @@ class TemporalFrameworkAdapter:
     def raise_hook_blocked(self, result: EvaluationResult) -> NoReturn:
         self._raise_application_error(result)
 
-    def on_completed_hook_result(self, result: EvaluationResult) -> None:
-        """Completed verdicts affect FUTURE execution only (the operation
-        already ran). The hook runtime has already marked the abort/halt flags
-        in the core ContextStore; nothing Temporal-specific remains to do
-        until the legacy span-processor abort state is retired."""
-        return None
+    def on_completed_hook_result(
+        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+    ) -> None:
+        """Completed verdicts affect FUTURE execution only (the operation already
+        ran). Record a BLOCK/HALT run-scoped so the activity interceptor can skip
+        a duplicate completed event (BLOCK) or reach the terminate path (HALT)
+        after user code returns. Without a resolved context there is no run to key
+        on — the base ContextStore still carries the within-activity abort flag."""
+        if not result.verdict.should_stop() or context is None:
+            return
+        self._state.record_completed_stop(
+            context.workflow_id or "",
+            context.run_id or "",
+            context.activity_id or "",
+            result.verdict,
+            result.reason,
+        )
 
     @staticmethod
     def _raise_application_error(result: EvaluationResult) -> NoReturn:
@@ -200,8 +200,9 @@ def core_activity_scope(
 ) -> Iterator[ActivityContext]:
     """Bind the shared context around activity execution (try/finally reset).
 
-    Fixes the historical leak where context reset lived in
-    ``_handle_completion()`` and was skipped when the activity raised.
+    The ONLY hook-context bridge: base instrumentation resolves the activity
+    context from the store this binds into (ambient ContextVar, or the trace map
+    for hook code running where ContextVars do not propagate).
     """
     ctx = build_core_activity_context(info, activity_input, multi_agent_session_id)
     with activity_scope(ctx, trace_id=trace_id, store=_core_context_store) as bound:
@@ -209,32 +210,40 @@ def core_activity_scope(
 
 
 def create_core_runtime(
+    *,
     api_url: str,
     api_key: str,
-    *,
+    state: TemporalGovernanceState,
     timeout_seconds: float = 30.0,
     on_api_error: str = "fail_open",
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
-    span_processor: Any = None,
     hitl_enabled: bool = True,
     skip_hitl_activity_types: Optional[set] = None,
-    **instrumentation_toggles: Any,
-):
-    """Build an ``OpenBoxRuntime`` wired for Temporal (OPT-IN, worker scope).
+    skip_workflow_types: Optional[set] = None,
+    skip_activity_types: Optional[set] = None,
+    skip_signals: Optional[set] = None,
+    send_start_event: bool = True,
+    send_activity_start_event: bool = True,
+    instrument_databases: bool = True,
+    instrument_file_io: bool = True,
+    max_body_size: int = 65536,
+) -> Any:
+    """Build the ``OpenBoxRuntime`` that OWNS all hook instrumentation for a
+    Temporal worker/plugin. Call from worker/plugin init — NEVER from workflow
+    sandbox paths. The caller stores the returned runtime and calls
+    ``runtime.install_instrumentation()`` / ``uninstall_instrumentation()``.
 
-    Constructs the base-SDK runtime with the ``TemporalFrameworkAdapter`` and
-    the shared context store. Call from worker/plugin initialization — NEVER
-    from workflow sandbox paths.
-
-    NOTE: the legacy in-repo hook instrumentation remains the default on this
-    branch. Installing core instrumentation (``runtime.install_instrumentation()``)
-    while legacy hooks are active would double-govern operations — the flip
-    happens per operation type once hook-payload parity is proven (HTTP first,
-    then DB/file/function; Redis/Mongo stay on legacy hooks until the base SDK
-    scopes them).
+    The base InstrumentationManager always ignores ``config.api_url`` so the
+    evaluate call never governs itself.
     """
-    from openbox_core.config import InstrumentationConfig, OpenBoxConfig
+    from openbox_core.config import (
+        GateConfig,
+        HitlConfig,
+        InstrumentationConfig,
+        OpenBoxConfig,
+        PrivacyConfig,
+    )
     from openbox_core.runtime import OpenBoxRuntime
 
     config = OpenBoxConfig(
@@ -244,15 +253,28 @@ def create_core_runtime(
         on_api_error=on_api_error,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
-        instrumentation=InstrumentationConfig(**instrumentation_toggles),
-    ).normalized()
-    return OpenBoxRuntime(
-        config,
-        TemporalFrameworkAdapter(
-            span_processor,
-            hitl_enabled=hitl_enabled,
-            skip_hitl_activity_types=skip_hitl_activity_types,
-            context_store=_core_context_store,
+        hitl=HitlConfig(
+            enabled=hitl_enabled,
+            skip_activity_types=(skip_hitl_activity_types or {"send_governance_event"}),
         ),
+        gate=GateConfig(
+            skip_workflow_types=skip_workflow_types or set(),
+            skip_activity_types=(skip_activity_types or {"send_governance_event"}),
+            skip_signals=skip_signals or set(),
+            send_start_event=send_start_event,
+            send_activity_start_event=send_activity_start_event,
+        ),
+        instrumentation=InstrumentationConfig(
+            db_enabled=instrument_databases,
+            file_enabled=instrument_file_io,
+        ),
+        privacy=PrivacyConfig(max_body_size=max_body_size),
+    ).normalized()
+
+    adapter = TemporalFrameworkAdapter(
+        state,
+        hitl_enabled=hitl_enabled,
+        skip_hitl_activity_types=skip_hitl_activity_types,
         context_store=_core_context_store,
     )
+    return OpenBoxRuntime(config, adapter, context_store=_core_context_store)

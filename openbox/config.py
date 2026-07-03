@@ -24,13 +24,6 @@ def _get_logger():
     return logging.getLogger(__name__)
 
 
-def _build_auth_headers(api_key: str) -> dict:
-    """Build auth headers reusing hook_governance's centralized builder."""
-    from .hook_governance import build_auth_headers
-
-    return build_auth_headers(api_key)
-
-
 # API key format pattern (obx_live_... or obx_test_...)
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_\w+$")
 
@@ -421,34 +414,23 @@ def initialize(
         OpenBoxConfigError: Invalid DID / private key, or only one of the pair set
         OpenBoxNetworkError: Cannot reach OpenBox Core
 
+    Note:
+        Most users do not call ``initialize()`` directly — use
+        ``create_openbox_worker(...)`` or ``OpenBoxPlugin(...)``, which validate
+        the key, build and own the base ``OpenBoxRuntime`` (installing all
+        HTTP/DB/file/function hook instrumentation), and wire the interceptors.
+
     Example:
-        from openbox import (
-            initialize,
-            setup_opentelemetry_for_governance,
-            WorkflowSpanProcessor,
-            GovernanceInterceptor,
-            ActivityGovernanceInterceptor,
-            OpenBoxClient,
-            GovernanceConfig,
+        from openbox import create_openbox_worker
+
+        worker = create_openbox_worker(
+            client=client,
+            task_queue="my-queue",
+            workflows=[MyWorkflow],
+            activities=[my_activity],
+            openbox_url="https://api.openbox.ai",
+            openbox_api_key="obx_live_...",
         )
-
-        # 1. Initialize SDK (use HTTPS for production, HTTP allowed for localhost only)
-        initialize(api_url="https://api.openbox.ai", api_key="obx_live_...")
-
-        # 2. Setup OTel and span processor
-        span_processor = WorkflowSpanProcessor()
-        setup_opentelemetry_for_governance(span_processor)
-
-        # 3. Create client and config
-        client = OpenBoxClient(api_url="...", api_key="...")
-        config = GovernanceConfig()
-
-        # 4. Create interceptors (BOTH workflow and activity)
-        workflow_interceptor = GovernanceInterceptor(client, span_processor, config)
-        activity_interceptor = ActivityGovernanceInterceptor(api_url, api_key, span_processor, config)
-
-        # 5. Add to Temporal worker
-        worker = Worker(..., interceptors=[workflow_interceptor, activity_interceptor])
     """
     # Validate URL security (HTTPS required for non-localhost)
     _validate_url_security(api_url)

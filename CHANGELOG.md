@@ -6,10 +6,15 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ### Changed
 
-- **Depends on `openbox-sdk-python>=0.1.0`** (import package `openbox_core`) — the shared
+- **Depends on `openbox-sdk-python>=0.2.0`** (import package `openbox_core`) — the shared
   base SDK owning contracts, the always-strict gate, identity/signing, the evaluate
   client, context runtime, Core `SpanData` wire serialization, generic instrumentation,
-  and the conformance kit.
+  and the conformance kit. The `0.2.0` floor adds Redis/MongoDB/urllib3/urllib
+  instrumentation in the base runtime so no hook coverage is lost in the flip.
+- **Hook governance is now owned entirely by the base runtime.** The worker/plugin
+  build and own an `openbox_core` runtime and call `install_instrumentation()`;
+  HTTP/DB/file/function hooks, payload shape, evaluation, and enforcement all live in
+  `openbox_core`. LangGraph and Temporal now emit one identical flat hook interface.
 - `request_signing` now shims over `openbox_core.identity`. Signed request bytes are
   UNCHANGED — gated byte-for-byte by a golden fixture generated from the pre-migration
   signer (`tests/test_base_sdk_signing_parity.py`).
@@ -45,16 +50,35 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ### Added
 
+- `openbox.governance_state.TemporalGovernanceState` — run-scoped state carrying the
+  Temporal effects that must survive past a base hook callback: signal BLOCK/HALT
+  verdicts that fail the next activity, HITL pending-approval retry markers, and the
+  completed-hook stop bridge (completed BLOCK skips the duplicate completed event;
+  completed HALT reaches the terminate path). Consumed on every activity exit path.
 - `openbox.core_adapter` — `TemporalFrameworkAdapter` (maps base-SDK verdicts to
-  native `ApplicationError` types and the HITL retry loop; bridges core
-  REQUIRE_APPROVAL into the legacy `pending_approval` retry-poll buffer and
-  degrades approval to non-retryable block when HITL is disabled/skipped),
-  `create_core_runtime` (opt-in core runtime at worker scope; accepts
-  `span_processor`/`hitl_enabled`/`skip_hitl_activity_types`), shared
-  context-store helpers. Core activity binding carries `activity_input` +
-  `multi_agent_session_id` so core hook payloads match legacy policy context.
+  native `ApplicationError` types and the retry-based HITL loop; REQUIRE_APPROVAL marks
+  the pending-approval retry marker and degrades to a non-retryable block when HITL is
+  disabled/skipped; completed BLOCK/HALT records run-scoped stop state with the resolved
+  `ActivityContext`), and `create_core_runtime(...)` which builds and owns the base
+  runtime the worker/plugin install. `core_activity_scope` is the sole hook-context
+  bridge (guaranteed try/finally reset + trace registration).
+- Redis, MongoDB, urllib3, and urllib governance now flow through the base runtime.
 - Gates: workflow-sandbox import-safety, base-SDK conformance suite driven by the
-  Temporal adapter, public-API compatibility suite.
+  Temporal adapter, public-API compatibility suite, and a deterministic
+  `llm_completion` hook-parity test (flat interface via the Temporal runtime, no live
+  OpenAI credentials).
+
+### Removed
+
+- `WorkflowSpanProcessor`, `WorkflowSpanBuffer`, and the `setup_opentelemetry_for_governance`
+  entry point (public exports). Governance instrumentation is installed by the base
+  runtime; there is no Temporal-local OpenTelemetry setup to call.
+- Temporal-local hook modules `otel_setup`, `hook_governance`, `http_governance_hooks`,
+  `db_governance_hooks`, `file_governance_hooks`, `span_processor`, and the dead
+  `context_propagation` helper (its ContextVar-to-executor propagation lives in the base
+  runtime). Their payload-shape/instrumentation coverage moved to the base SDK suite.
+- `openbox.tracing.traced` now wraps `openbox_core.instrumentation.function.governed`;
+  `create_span` remains a plain span helper.
 
 ### Fixed (legacy file instrumentation — pre-existing upstream)
 
@@ -81,16 +105,16 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ### Migration status
 
-- Legacy in-repo hook instrumentation remains the DEFAULT. The per-operation flip to
-  core instrumentation (HTTP first, then DB/file/function) is gated on hook-payload
-  parity; Redis/Mongo/psycopg2-direct stay on legacy hooks until the base SDK scopes
-  them. Duplicated modules are removed only after parity.
-- Flip checklist (must land WITH the flip): worker init passes its
-  `WorkflowSpanProcessor` + HITL config into `create_core_runtime(...)` (without it
-  core REQUIRE_APPROVAL logs a warning and the retry re-evaluates instead of
-  polling); decide the consumer/reset story for the core store's process-global
-  halt flag and the abort-set growth on long-lived workers before anything
-  consumes them.
+- The flip is COMPLETE: base-runtime instrumentation is the sole hook governance path
+  and the legacy in-repo hook stack is removed. Approval-retry, signal BLOCK/HALT, and
+  completed-hook BLOCK/HALT behavior are preserved (run-scoped, cleaned after use).
+- Dropped coverage vs the legacy stack: direct raw-driver DB queries (psycopg2/mysql/
+  pymysql/sqlite3 used WITHOUT SQLAlchemy). The base runtime governs SQLAlchemy (all
+  backends), asyncpg, Redis, and MongoDB; activating raw dbapi driver instrumentors
+  interferes with SQLAlchemy's own dialect queries, so raw-driver-only governance is a
+  base-SDK follow-up.
+- Release gate: the base SDK `0.2.0` must be published before a clean install (without
+  the local editable checkout) can resolve the dependency floor.
 
 ## [1.1.2] - 2026-04-22
 

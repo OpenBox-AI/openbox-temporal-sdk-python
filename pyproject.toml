@@ -52,7 +52,7 @@ dependencies = [
     "cryptography>=43,<47",
     # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
     # client, context runtime, generic instrumentation, conformance kit.
-    "openbox-sdk-python>=0.1.0",
+    "openbox-sdk-python>=0.2.0",
 ]
 
 # Local path dep during migration development; swapped for the published

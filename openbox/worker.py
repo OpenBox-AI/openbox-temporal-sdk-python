@@ -35,7 +35,6 @@ from temporalio.client import Client
 from temporalio.worker import Worker, Interceptor
 
 from .config import initialize as validate_api_key, GovernanceConfig
-from .span_processor import WorkflowSpanProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -189,29 +188,43 @@ def create_openbox_worker(
 
     _signer = get_global_config().get_signer()
 
-    # 2. Create span processor
-    span_processor = WorkflowSpanProcessor(ignored_url_prefixes=[openbox_url])
+    # 2. Temporal governance state: signal verdicts, HITL pending markers, and the
+    #    completed-hook stop bridge — shared by both interceptors.
+    from .governance_state import TemporalGovernanceState
 
-    # 3. Setup OTel HTTP, database, and file I/O instrumentation
-    from .otel_setup import setup_opentelemetry_for_governance
+    state = TemporalGovernanceState()
 
-    setup_opentelemetry_for_governance(
-        span_processor,
+    # 3. Build and OWN the base-SDK runtime. It installs all hook instrumentation
+    #    (HTTP/DB/file/function) and owns hook payload building + evaluation +
+    #    enforcement. db_libraries / sqlalchemy_engine are no longer needed: the
+    #    base runtime installs every available DB instrumentor best-effort and
+    #    governs SQLAlchemy via a global Engine listener (covers pre-existing
+    #    engines), so those legacy knobs are accepted but ignored.
+    from .core_adapter import create_core_runtime
+
+    runtime = create_core_runtime(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        ignored_urls=[openbox_url],
-        instrument_databases=instrument_databases,
-        db_libraries=db_libraries,
-        instrument_file_io=instrument_file_io,
-        sqlalchemy_engine=sqlalchemy_engine,
-        api_timeout=governance_timeout,
+        state=state,
+        timeout_seconds=governance_timeout,
         on_api_error=governance_policy,
-        max_body_size=65536,
         agent_did=agent_did,
-        signer=_signer,
+        agent_private_key=agent_private_key,
+        hitl_enabled=hitl_enabled,
+        skip_workflow_types=skip_workflow_types or set(),
+        skip_activity_types=skip_activity_types or {"send_governance_event"},
+        skip_signals=skip_signals or set(),
+        send_start_event=send_start_event,
+        send_activity_start_event=send_activity_start_event,
+        instrument_databases=instrument_databases,
+        instrument_file_io=instrument_file_io,
     )
+    # Process-lifetime install (idempotent). create_openbox_worker exposes no
+    # shutdown hook, so the runtime lives for the worker process — matching the
+    # global OTel setup it replaces. Call runtime.close() for explicit teardown.
+    runtime.install_instrumentation()
 
-    # 4. Create governance config
+    # 4. Create governance config (activity/workflow lifecycle-event path)
     config = GovernanceConfig(
         on_api_error=governance_policy,
         api_timeout=governance_timeout,
@@ -223,7 +236,7 @@ def create_openbox_worker(
         hitl_enabled=hitl_enabled,
     )
 
-    # 5. Create interceptors
+    # 5. Create interceptors (state-backed; base runtime owns hooks)
     from .workflow_interceptor import GovernanceInterceptor
     from .activity_interceptor import ActivityGovernanceInterceptor
     from .client import GovernanceClient
@@ -231,11 +244,12 @@ def create_openbox_worker(
     workflow_interceptor = GovernanceInterceptor(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        span_processor=span_processor,
+        state=state,
         config=config,
     )
 
-    # Shared GovernanceClient: persistent auth headers, single config source
+    # Shared GovernanceClient: activity/workflow lifecycle-event transport
+    # (hook transport is owned by the base runtime's EvaluationClient).
     governance_client = GovernanceClient(
         api_url=openbox_url,
         api_key=openbox_api_key,
@@ -248,7 +262,7 @@ def create_openbox_worker(
     activity_interceptor = ActivityGovernanceInterceptor(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        span_processor=span_processor,
+        state=state,
         config=config,
         client=governance_client,
     )
@@ -277,7 +291,7 @@ def create_openbox_worker(
 
     logger.info(
         "OpenBox SDK initialized: policy=%s timeout=%ss db=%s file=%s hitl=%s "
-        "hook_governance=enabled events=WorkflowStarted,WorkflowCompleted,"
+        "instrumentation=openbox_core events=WorkflowStarted,WorkflowCompleted,"
         "WorkflowFailed,SignalReceived,ActivityStarted,ActivityCompleted",
         governance_policy,
         governance_timeout,

@@ -1,9 +1,15 @@
 """Public API compatibility gate for the base-SDK migration branch.
 
-Pins the pre-migration public surface: every export, the
-``create_openbox_worker``/``OpenBoxPlugin`` kwargs, and the shim types'
-behavioral identity. Any rename/removal fails here first — the migration
-must preserve the public API for at least one minor release.
+Pins the post-migration public surface: every export, the
+``create_openbox_worker``/``OpenBoxPlugin`` kwargs, and the shared shim types'
+(Verdict / EvaluationResult / WorkflowEventType) behavioral identity. Any
+accidental rename/removal fails here first.
+
+Note: ``WorkflowSpanProcessor`` and ``WorkflowSpanBuffer`` were INTENTIONALLY
+removed — hook instrumentation now lives entirely in the base SDK
+(``openbox_core``) and the worker builds+owns an ``OpenBoxRuntime`` instead of a
+Temporal-local span processor. Their absence is asserted below so they are not
+silently re-added.
 """
 
 from __future__ import annotations
@@ -12,7 +18,9 @@ import inspect
 
 import openbox
 
-# Exact pre-migration export list (captured from origin/main before shimming).
+# Post-migration export list. WorkflowSpanProcessor / WorkflowSpanBuffer are
+# deliberately absent (see module docstring); every other pre-migration name
+# is preserved for backward compatibility.
 EXPECTED_EXPORTS = {
     "ApprovalExpiredError",
     "ApprovalRejectedError",
@@ -36,8 +44,6 @@ EXPECTED_EXPORTS = {
     "Verdict",
     "VerdictEnforcementResult",
     "WorkflowEventType",
-    "WorkflowSpanBuffer",
-    "WorkflowSpanProcessor",
     "create_openbox_worker",
     "enforce_verdict",
     "extract_governance_error",
@@ -47,6 +53,14 @@ EXPECTED_EXPORTS = {
     "map_signing_error",
     "raise_approval_pending",
     "should_skip_hitl",
+    # emit_handoff — multi-agent primitive kept in the public surface.
+    "emit_handoff",
+}
+
+# Symbols removed by the migration; instrumentation is base-SDK-owned now.
+REMOVED_EXPORTS = {
+    "WorkflowSpanProcessor",
+    "WorkflowSpanBuffer",
 }
 
 WORKER_KWARGS = {
@@ -88,13 +102,24 @@ PLUGIN_KWARGS = {
 
 
 class TestExports:
-    def test_all_pre_migration_exports_present(self):
+    def test_all_expected_exports_present(self):
         missing = EXPECTED_EXPORTS - set(openbox.__all__)
-        assert not missing, f"public exports removed by migration: {sorted(missing)}"
+        assert not missing, f"public exports removed: {sorted(missing)}"
 
     def test_exports_resolve(self):
         for name in EXPECTED_EXPORTS:
             assert getattr(openbox, name, None) is not None, name
+
+    def test_public_surface_is_exactly_expected(self):
+        # __all__ is the whole public surface — nothing beyond the expected set.
+        assert set(openbox.__all__) == EXPECTED_EXPORTS
+        assert len(openbox.__all__) == 32
+
+    def test_removed_exports_absent(self):
+        # Instrumentation shims are base-SDK-owned now; they must NOT reappear.
+        for name in REMOVED_EXPORTS:
+            assert name not in openbox.__all__, f"{name} unexpectedly re-exported"
+            assert not hasattr(openbox, name), f"{name} unexpectedly present on module"
 
 
 class TestEntrypointSignatures:

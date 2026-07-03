@@ -76,20 +76,18 @@ from temporalio.worker import (
 )
 from opentelemetry import trace
 
-from .span_processor import WorkflowSpanProcessor
 from .config import GovernanceConfig
+from .core_adapter import core_activity_scope, get_core_context_store
+from .governance_state import TemporalGovernanceState
 from .types import (
     WorkflowEventType,
-    WorkflowSpanBuffer,
     GovernanceVerdictResponse,
     Verdict,
-    GovernanceBlockedError,
 )
-from .hook_governance import build_auth_headers
 from .multi_agent import read_session_from_header
 from .activities import _terminate_workflow_for_halt
 from .verdict_handler import enforce_verdict
-from .errors import GovernanceHaltError, GuardrailsValidationError
+from .errors import GovernanceBlockedError, GovernanceHaltError, GuardrailsValidationError
 from .client import GovernanceClient
 
 
@@ -147,13 +145,13 @@ class ActivityGovernanceInterceptor(Interceptor):
         self,
         api_url: str,
         api_key: str,
-        span_processor: WorkflowSpanProcessor,
+        state: TemporalGovernanceState,
         config: Optional[GovernanceConfig] = None,
         client: Optional[GovernanceClient] = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
-        self.span_processor = span_processor
+        self.state = state
         self.config = config or GovernanceConfig()
         self._client = client or GovernanceClient(
             api_url=api_url,
@@ -169,7 +167,7 @@ class ActivityGovernanceInterceptor(Interceptor):
             next_interceptor,
             self.api_url,
             self.api_key,
-            self.span_processor,
+            self.state,
             self.config,
             self._client,
         )
@@ -181,14 +179,14 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         next_interceptor: ActivityInboundInterceptor,
         api_url: str,
         api_key: str,
-        span_processor: WorkflowSpanProcessor,
+        state: TemporalGovernanceState,
         config: GovernanceConfig,
         client: Optional[GovernanceClient] = None,
     ):
         super().__init__(next_interceptor)
         self._api_url = api_url
         self._api_key = api_key
-        self._span_processor = span_processor
+        self._state = state
         self._config = config
         self._client = client or GovernanceClient(
             api_url=api_url,
@@ -212,26 +210,23 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             input.headers, activity.payload_converter()
         )
 
-        # Check for blocking verdicts from prior governance (signal or buffer)
+        # Check for blocking verdicts from prior governance (signal verdict)
         await self._check_pending_verdicts(info)
 
         # Check for pending approval on retry (HITL polling)
         await self._check_pending_approval(info)
 
-        # Clear stale state and register fresh buffer
-        self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
-        buffer = WorkflowSpanBuffer(
-            workflow_id=info.workflow_id,
-            run_id=info.workflow_run_id,
-            workflow_type=info.workflow_type,
-            task_queue=info.task_queue,
+        # Clear any stale within-activity abort flag from a prior run reusing the
+        # same activity key (base ContextStore abort is not run-scoped).
+        get_core_context_store().clear_activity_aborted(
+            info.workflow_id, info.activity_id
         )
-        self._span_processor.register_workflow(info.workflow_id, buffer)
 
         # Serialize activity input
         activity_input = self._serialize_input(input, info)
 
-        # Send ActivityStarted event (optional)
+        # Send ActivityStarted event (optional). Hook context/payloads are owned
+        # by the base runtime via core_activity_scope — no local context buffer.
         governance_verdict: Optional[GovernanceVerdictResponse] = None
         if self._config.send_activity_start_event:
             governance_verdict = await self._send_activity_event(
@@ -240,28 +235,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 multi_agent_session_id=session_id,
                 activity_input=activity_input,
             )
-
-        # Buffer activity context for hook-level governance
-        self._span_processor.set_activity_context(
-            info.workflow_id,
-            info.activity_id,
-            {
-                "source": "workflow-telemetry",
-                "event_type": WorkflowEventType.ACTIVITY_STARTED.value,
-                "workflow_id": info.workflow_id,
-                "run_id": info.workflow_run_id,
-                "workflow_type": info.workflow_type,
-                "activity_id": info.activity_id,
-                "activity_type": info.activity_type,
-                "task_queue": info.task_queue,
-                "attempt": info.attempt,
-                "activity_input": activity_input,
-                "activity_output": None,
-                # Hook events copy this context dict, so HTTP/DB/file events
-                # inherit the session id for free (omitempty).
-                **({"multi_agent_session_id": session_id} if session_id else {}),
-            },
-        )
 
         # Enforce ActivityStarted verdict (HITL, BLOCK, HALT, guardrails)
         if governance_verdict:
@@ -273,9 +246,18 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         )
 
         # Execute the actual activity
-        result, status, error, activity_output, end_time = await self._run_activity(
-            input, info, activity_input=activity_input, session_id=session_id
-        )
+        try:
+            result, status, error, activity_output, end_time = await self._run_activity(
+                input, info, activity_input=activity_input, session_id=session_id
+            )
+        except Exception:
+            # The activity (or a hook) raised, so _handle_completion is skipped. A
+            # completed-hook HALT recorded during user code is a kill-switch and
+            # must STILL reach the terminate path — failing the activity does not
+            # halt the workflow. Consume the completed-stop here too (also clears
+            # it, so it can never strand/leak on the exception path).
+            await self._consume_completed_halt(info)
+            raise
 
         # Send ActivityCompleted + enforce verdict + apply output redaction
         result = await self._handle_completion(
@@ -286,48 +268,35 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         return result
 
+    async def _consume_completed_halt(self, info) -> None:
+        """Exception-path safety net: a completed-hook HALT recorded during user
+        code must terminate the workflow even when the activity itself raised.
+        Clears the completed-stop and the base abort flag so nothing strands."""
+        stop = self._state.take_completed_stop(
+            info.workflow_id, info.workflow_run_id, info.activity_id
+        )
+        get_core_context_store().clear_activity_aborted(
+            info.workflow_id, info.activity_id
+        )
+        if stop is not None and stop[0] is Verdict.HALT:
+            await _terminate_workflow_for_halt(
+                info.workflow_id, stop[1] or "Governance halt"
+            )
+
     # ─── Verdict checks ───────────────────────────────────────────────────
 
     async def _check_pending_verdicts(self, info) -> None:
-        """Check for blocking verdicts from prior signal governance or buffer."""
-        buffer = self._span_processor.get_buffer(info.workflow_id)
-
-        # Clear stale buffer from previous workflow run
-        if buffer and buffer.run_id != info.workflow_run_id:
-            activity.logger.info(
-                f"Clearing stale buffer for workflow {info.workflow_id}"
-            )
-            self._span_processor.unregister_workflow(info.workflow_id)
-            buffer = None
-
-        # Check pending verdict (stored by workflow interceptor for SignalReceived stop)
-        pending_verdict = self._span_processor.get_verdict(info.workflow_id)
-        if pending_verdict and pending_verdict.get("run_id") != info.workflow_run_id:
-            self._span_processor.clear_verdict(info.workflow_id)
-            pending_verdict = None
-
-        activity.logger.info(
-            f"Checking verdict for workflow {info.workflow_id}: "
-            f"buffer={buffer is not None}, "
-            f"buffer.verdict={buffer.verdict if buffer else None}, "
-            f"pending_verdict={pending_verdict}"
-        )
-
-        # Enforce pending verdict from signal governance
-        if pending_verdict:
-            verdict_str = pending_verdict.get("verdict")
-            if verdict_str and Verdict.from_string(verdict_str).should_stop():
-                await self._enforce_stop_verdict(
-                    Verdict.from_string(verdict_str),
-                    pending_verdict.get("reason") or "Workflow blocked by governance",
-                    info.workflow_id,
-                )
-
-        # Enforce buffer verdict
-        if buffer and buffer.verdict and buffer.verdict.should_stop():
+        """Enforce a SignalReceived BLOCK/HALT recorded for this run by the
+        workflow interceptor. Run-scoped: a stale verdict from a prior run with
+        the same workflow_id is ignored and cleared inside the state lookup."""
+        entry = self._state.get_signal_verdict(info.workflow_id, info.workflow_run_id)
+        if entry is None:
+            return
+        verdict, reason = entry
+        if verdict.should_stop():
             await self._enforce_stop_verdict(
-                buffer.verdict,
-                buffer.verdict_reason or "Workflow blocked by governance",
+                verdict,
+                reason or "Workflow blocked by governance",
                 info.workflow_id,
             )
 
@@ -359,8 +328,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             return False
 
-        buffer = self._span_processor.get_buffer(info.workflow_id)
-        if not (buffer and buffer.pending_approval):
+        if not self._state.has_pending_approval(
+            info.workflow_id, info.workflow_run_id, info.activity_id
+        ):
             return False
 
         activity.logger.info(
@@ -381,7 +351,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             activity.logger.info(
                 f"Approval granted for workflow_id={info.workflow_id}"
             )
-            buffer.pending_approval = False
+            self._state.clear_pending_approval(
+                info.workflow_id, info.workflow_run_id, info.activity_id
+            )
             return True
         return False
 
@@ -422,12 +394,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 hitl_enabled=self._config.hitl_enabled,
                 skip_types=self._config.skip_hitl_activity_types,
             ):
-                buffer = self._span_processor.get_buffer(info.workflow_id)
-                if buffer:
-                    buffer.pending_approval = True
-                    activity.logger.info(
-                        f"Pending approval stored: workflow_id={info.workflow_id}"
-                    )
+                self._state.mark_pending_approval(
+                    info.workflow_id, info.workflow_run_id, info.activity_id
+                )
+                activity.logger.info(
+                    f"Pending approval stored: workflow_id={info.workflow_id}"
+                )
                 raise_approval_pending(
                     f"Approval required: {verdict_response.reason or 'Activity requires human approval'}"
                 )
@@ -526,9 +498,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input=None,
         session_id=None,
     ):
-        """Execute the activity and handle hook-level governance errors."""
-        from .hitl import should_skip_hitl, raise_approval_pending
+        """Execute the activity inside the base-SDK hook context.
 
+        Base instrumentation fires hooks during user code; a BLOCK/HALT/approval
+        verdict is raised as a Temporal-native ApplicationError/ApprovalPending
+        BY THE ADAPTER, so it propagates here and fails/retries the activity —
+        this interceptor never interprets hook verdicts itself.
+        """
         tracer = trace.get_tracer(__name__)
         status = "completed"
         error = None
@@ -543,22 +519,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             },
         ) as span:
             trace_id = span.get_span_context().trace_id
-            self._span_processor.register_trace(
-                trace_id,
-                info.workflow_id,
-                info.activity_id,
-            )
 
-            # Bind the SHARED base-SDK ActivityContext (and trace correlation)
-            # for the duration of the activity. The context-manager reset runs
-            # in a finally, so context can no longer leak when the activity
-            # raises (the legacy span-processor registration above stays until
-            # instrumentation parity retires it).
-            from .core_adapter import core_activity_scope
-
-            # Pass the SAME policy context legacy stores on the span-processor
-            # buffer — core hook payloads read these via ctx.to_payload_fields();
-            # omitting them would send weaker policy context than legacy hooks.
+            # The ONLY hook-context bridge: binds the shared ActivityContext and
+            # registers the trace (try/finally reset) so base hooks resolve
+            # context even from executor threads where ContextVars don't flow.
             with core_activity_scope(
                 info,
                 activity_input,
@@ -568,15 +532,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 try:
                     result = await self.next.execute_activity(input)
                     activity_output = _serialize_value(result)
-                except GovernanceBlockedError as e:
-                    status = "failed"
-                    error = {
-                        "type": "GovernanceBlockedError",
-                        "message": str(e),
-                        "verdict": e.verdict,
-                        "url": e.url,
-                    }
-                    self._handle_hook_governance_error(e, info)
                 except Exception as e:
                     status = "failed"
                     error = {"type": type(e).__name__, "message": str(e)}
@@ -585,36 +540,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         end_time = time.time()
         return result, status, error, activity_output, end_time
 
-    def _handle_hook_governance_error(self, e: GovernanceBlockedError, info) -> None:
-        """Handle GovernanceBlockedError from hook-level governance."""
-        from .hitl import should_skip_hitl, raise_approval_pending
-        from temporalio.exceptions import ApplicationError
-
-        # REQUIRE_APPROVAL → retryable
-        if e.verdict.requires_approval() and not should_skip_hitl(
-            info.activity_type,
-            hitl_enabled=self._config.hitl_enabled,
-            skip_types=self._config.skip_hitl_activity_types,
-        ):
-            buffer = self._span_processor.get_buffer(info.workflow_id)
-            if buffer:
-                buffer.pending_approval = True
-                activity.logger.info(
-                    f"Hook REQUIRE_APPROVAL: pending approval for {info.activity_type} "
-                    f"(resource: {e.url})"
-                )
-            raise_approval_pending(f"Approval required: {e.reason}")
-
-        # BLOCK/HALT → non-retryable
-        error_type = (
-            "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
-        )
-        raise ApplicationError(
-            f"Hook governance {e.verdict.value}: {e.reason}",
-            type=error_type,
-            non_retryable=True,
-        )
-
     # ─── Post-execution handling ──────────────────────────────────────────
 
     async def _handle_completion(
@@ -622,35 +547,30 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input, activity_output, result, multi_agent_session_id=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
-        # Check abort/halt flags
-        was_aborted = (
-            self._span_processor.get_activity_abort(
-                info.workflow_id, info.activity_id
-            )
-            is not None
-        )
-        halt_reason = self._span_processor.get_halt_requested(
-            info.workflow_id, info.activity_id
-        )
-        if halt_reason:
-            self._span_processor.clear_halt_requested(
-                info.workflow_id, info.activity_id
-            )
-            await _terminate_workflow_for_halt(info.workflow_id, halt_reason)
+        store = get_core_context_store()
 
-        # Cleanup
-        self._span_processor.clear_activity_abort(
-            info.workflow_id, info.activity_id
+        # Completed-hook stop recorded run-scoped by the adapter (BLOCK/HALT), plus
+        # the base within-activity abort flag (a started-hook BLOCK the user code
+        # swallowed). Either means the operation was governed-stopped.
+        completed_stop = self._state.take_completed_stop(
+            info.workflow_id, info.workflow_run_id, info.activity_id
         )
-        self._span_processor.clear_activity_context(
-            info.workflow_id, info.activity_id
-        )
+        base_aborted = store.is_activity_aborted(info.workflow_id, info.activity_id)
+        store.clear_activity_aborted(info.workflow_id, info.activity_id)
+
+        # Completed HALT reaches Temporal's terminate path with the recorded reason.
+        if completed_stop is not None and completed_stop[0] is Verdict.HALT:
+            await _terminate_workflow_for_halt(
+                info.workflow_id, completed_stop[1] or "Governance halt"
+            )
+
+        was_aborted = base_aborted or completed_stop is not None
 
         # Send ActivityCompleted event (unless aborted by hook governance)
         completed_verdict = None
         if was_aborted:
             activity.logger.info(
-                "Skipping ActivityCompleted event — activity aborted by hook governance"
+                "Skipping ActivityCompleted event — operation aborted by hook governance"
             )
         else:
             completed_verdict = await self._send_activity_event(

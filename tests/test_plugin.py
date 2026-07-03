@@ -6,20 +6,25 @@ Tests the plugin class in isolation with mocked dependencies.
 Mirrors test patterns from test_worker.py.
 """
 
-import dataclasses
 import pytest
-from unittest.mock import Mock, MagicMock, patch, call
+from unittest.mock import Mock, MagicMock, patch
 
 from temporalio.plugin import SimplePlugin
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 
-# All tests mock external calls — no real API or OTel needed.
+# All tests mock external calls — no real API or instrumentation install needed.
 PATCH_BASE = "openbox.plugin"
 
 
 def _make_plugin(**overrides):
-    """Create OpenBoxPlugin with all heavy dependencies mocked."""
+    """Create OpenBoxPlugin with all heavy dependencies mocked.
+
+    The plugin now builds a base-SDK runtime via create_core_runtime() and calls
+    runtime.install_instrumentation(); both are stubbed so no network / real
+    instrumentation happens. A real TemporalGovernanceState is used (cheap,
+    no I/O) so tests can assert the same instance flows to both interceptors.
+    """
     defaults = dict(
         openbox_url="http://localhost:8086",
         openbox_api_key="obx_test_key_123",
@@ -29,10 +34,13 @@ def _make_plugin(**overrides):
     )
     defaults.update(overrides)
 
+    mock_runtime = MagicMock(name="core_runtime")
+
     with (
         patch(f"{PATCH_BASE}.validate_api_key") as mock_validate,
-        patch(f"{PATCH_BASE}.WorkflowSpanProcessor") as mock_sp_cls,
-        patch("openbox.otel_setup.setup_opentelemetry_for_governance") as mock_otel,
+        patch(
+            "openbox.core_adapter.create_core_runtime", return_value=mock_runtime
+        ) as mock_create_runtime,
         patch("openbox.workflow_interceptor.GovernanceInterceptor") as mock_wi,
         patch(
             "openbox.activity_interceptor.ActivityGovernanceInterceptor"
@@ -44,8 +52,8 @@ def _make_plugin(**overrides):
         plugin = OpenBoxPlugin(**defaults)
         mocks = {
             "validate_api_key": mock_validate,
-            "span_processor_cls": mock_sp_cls,
-            "setup_otel": mock_otel,
+            "create_core_runtime": mock_create_runtime,
+            "runtime": mock_runtime,
             "workflow_interceptor": mock_wi,
             "activity_interceptor": mock_ai,
             "governance_client": mock_gc,
@@ -71,25 +79,52 @@ class TestPluginInit:
             agent_private_key=None,
         )
 
-    def test_creates_span_processor(self):
-        plugin, mocks = _make_plugin()
-        mocks["span_processor_cls"].assert_called_once_with(
-            ignored_url_prefixes=["http://localhost:8086"]
-        )
+    def test_builds_core_runtime_and_installs_instrumentation(self):
+        """Plugin builds the base-SDK runtime and installs hook instrumentation.
 
-    def test_sets_up_otel(self):
+        Replaces the old WorkflowSpanProcessor construction: hook governance now
+        lives in openbox_core, installed once via runtime.install_instrumentation().
+        """
+        plugin, mocks = _make_plugin()
+
+        mocks["create_core_runtime"].assert_called_once()
+        # State passed to the runtime is the plugin's TemporalGovernanceState.
+        from openbox.governance_state import TemporalGovernanceState
+
+        kw = mocks["create_core_runtime"].call_args.kwargs
+        assert kw["api_url"] == "http://localhost:8086"
+        assert kw["api_key"] == "obx_test_key_123"
+        assert isinstance(kw["state"], TemporalGovernanceState)
+        assert kw["state"] is plugin._state
+
+        # Instrumentation installed exactly once on the returned runtime.
+        mocks["runtime"].install_instrumentation.assert_called_once_with()
+        assert plugin._runtime is mocks["runtime"]
+
+    def test_core_runtime_receives_instrumentation_flags(self):
+        """instrument_databases / instrument_file_io / policy / timeout flow to
+        the base runtime builder (previously passed to setup_opentelemetry)."""
         plugin, mocks = _make_plugin(
             instrument_databases=False,
             instrument_file_io=False,
             governance_timeout=15.0,
             governance_policy="fail_closed",
         )
-        mocks["setup_otel"].assert_called_once()
-        kw = mocks["setup_otel"].call_args
-        assert kw[1]["instrument_databases"] is False
-        assert kw[1]["instrument_file_io"] is False
-        assert kw[1]["api_timeout"] == 15.0
-        assert kw[1]["on_api_error"] == "fail_closed"
+        kw = mocks["create_core_runtime"].call_args.kwargs
+        assert kw["instrument_databases"] is False
+        assert kw["instrument_file_io"] is False
+        assert kw["timeout_seconds"] == 15.0
+        assert kw["on_api_error"] == "fail_closed"
+
+    def test_shared_state_flows_to_both_interceptors(self):
+        """The SAME TemporalGovernanceState is handed to both interceptors —
+        the signal-verdict bridge (workflow records → activity enforces)."""
+        plugin, mocks = _make_plugin()
+
+        wi_state = mocks["workflow_interceptor"].call_args.kwargs["state"]
+        ai_state = mocks["activity_interceptor"].call_args.kwargs["state"]
+        assert wi_state is plugin._state
+        assert ai_state is plugin._state
 
     def test_creates_governance_interceptor(self):
         plugin, mocks = _make_plugin()
@@ -146,8 +181,10 @@ class TestPluginInit:
         """Verify skip_workflow_types reaches GovernanceConfig."""
         with (
             patch(f"{PATCH_BASE}.validate_api_key"),
-            patch(f"{PATCH_BASE}.WorkflowSpanProcessor"),
-            patch("openbox.otel_setup.setup_opentelemetry_for_governance"),
+            patch(
+                "openbox.core_adapter.create_core_runtime",
+                return_value=MagicMock(),
+            ),
             patch("openbox.workflow_interceptor.GovernanceInterceptor") as mock_wi,
             patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
             patch(f"{PATCH_BASE}.GovernanceClient"),
@@ -158,8 +195,9 @@ class TestPluginInit:
                 openbox_url="http://localhost:8086",
                 openbox_api_key="obx_test_key_123",
                 skip_workflow_types={"InternalWorkflow"},
+                enable_trace_propagation=False,
             )
-            config_arg = mock_wi.call_args[1]["config"]
+            config_arg = mock_wi.call_args.kwargs["config"]
             assert "InternalWorkflow" in config_arg.skip_workflow_types
 
     def test_invalid_api_key_raises(self):
@@ -167,10 +205,12 @@ class TestPluginInit:
         from openbox.errors import OpenBoxAuthError
 
         with pytest.raises(OpenBoxAuthError):
-            # No mocking of validate_api_key — let real validation run
+            # No mocking of validate_api_key — let real validation run.
             with (
-                patch(f"{PATCH_BASE}.WorkflowSpanProcessor"),
-                patch("openbox.otel_setup.setup_opentelemetry_for_governance"),
+                patch(
+                    "openbox.core_adapter.create_core_runtime",
+                    return_value=MagicMock(),
+                ),
                 patch("openbox.workflow_interceptor.GovernanceInterceptor"),
                 patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
                 patch(f"{PATCH_BASE}.GovernanceClient"),
@@ -180,6 +220,7 @@ class TestPluginInit:
                 OpenBoxPlugin(
                     openbox_url="http://localhost:8086",
                     openbox_api_key="bad_key_format",
+                    enable_trace_propagation=False,
                 )
 
 
@@ -221,11 +262,7 @@ class TestPluginConfigureWorker:
     def test_client_none_does_not_set(self):
         """If config client is None, set_temporal_client is not called."""
         plugin, _ = _make_plugin()
-        mock_client = Mock()
-        mock_client.config.return_value = {}
-        config = {"client": mock_client, "task_queue": "q"}
-        # Temporarily set config client to None after creating valid config
-        config["client"] = None
+        config = {"client": None, "task_queue": "q"}
 
         with patch("openbox.activities.set_temporal_client") as mock_set:
             # SimplePlugin.configure_worker needs client, so we patch super

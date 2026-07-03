@@ -1,16 +1,13 @@
-"""Guards against re-entrant imports/file-reads inside governed open() paths.
+"""Guards package ``__version__`` against re-entrant file reads.
 
-Two invariants, both learned from a live worker crash + a runaway recursion:
+``__version__`` must be a static assignment — an ``importlib.metadata`` lookup
+OPENS A FILE, and with the base file instrumentation patching
+``builtins.open``/``io.open`` that read re-enters governance (circular import
+inside the workflow sandbox when eager; unbounded recursion when lazy).
 
-1. Package ``__version__`` must be a static assignment — an
-   ``importlib.metadata`` lookup OPENS A FILE, and with traced_open patching
-   ``builtins.open``/``io.open`` that read re-enters governance (circular
-   import inside the workflow sandbox when eager; unbounded recursion from
-   ``build_auth_headers`` when lazy).
-2. ``file_governance_hooks`` must not run import machinery inside functions
-   that execute during arbitrary ``open()`` calls — a function-local
-   ``from .types import …`` re-imports a partially initialized package when
-   the triggering open() happens mid-package-import.
+The companion invariant — file-hook code must not run import machinery inside a
+governed ``open()`` — now lives in the base SDK's file instrumentation and is
+covered by its own tests.
 """
 
 import ast
@@ -74,20 +71,6 @@ class TestStaticVersion:
             )
 
 
-class TestNoFunctionLocalImportsInFileHooks:
-    def test_no_relative_imports_inside_functions(self):
-        tree = _module_ast(OPENBOX_PKG / "file_governance_hooks.py")
-        offenders = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for inner in ast.walk(node):
-                    if isinstance(inner, ast.ImportFrom) and inner.level > 0:
-                        offenders.append(
-                            f"line {inner.lineno}: from {'.' * inner.level}"
-                            f"{inner.module or ''} import …"
-                        )
-        assert not offenders, (
-            "function-local relative imports in file_governance_hooks run "
-            "import machinery inside governed open() calls (re-entrancy bomb "
-            "when the open happens mid-package-import): " + "; ".join(offenders)
-        )
+# NOTE: the file-hook re-entrancy guard (no import machinery inside a governed
+# open()) now lives in the base SDK's file instrumentation and is covered by its
+# own tests — the Temporal-local file_governance_hooks module was removed.

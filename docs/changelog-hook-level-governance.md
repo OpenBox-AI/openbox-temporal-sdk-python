@@ -1,5 +1,14 @@
 # v1.1.0 — Hook-Level Governance
 
+> **Note (current architecture):** Since this release, hook governance
+> (HTTP/DB/file/function instrumentation, payload shape, evaluation, and
+> enforcement) has moved into the base SDK (`openbox_core`). The Temporal
+> worker/plugin now build and own an `openbox_core` runtime that installs all
+> instrumentation automatically. The capabilities below still apply, but the hook
+> internals described here are now owned by the base SDK, and `@traced` wraps the
+> base SDK's `governed()` decorator. See `system-architecture.md` and
+> `codebase-summary.md` for the current design.
+
 Real-time, per-operation governance for every HTTP request, database query, file operation, and traced function call during activity execution.
 
 ## What's New
