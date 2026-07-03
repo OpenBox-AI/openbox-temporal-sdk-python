@@ -38,29 +38,6 @@ def rfc3339_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-@dataclass
-class WorkflowSpanBuffer:
-    """Buffer for workflow governance state (verdicts, approvals, abort flags)."""
-
-    workflow_id: str
-    run_id: str
-    workflow_type: str
-    task_queue: str
-    parent_workflow_id: Optional[str] = None
-    spans: List[dict] = field(
-        default_factory=list
-    )  # kept for backward compat, always empty
-    status: Optional[str] = None  # "completed", "failed", "cancelled", "terminated"
-    error: Optional[Dict[str, Any]] = None
-
-    # Governance verdict (set by workflow interceptor, checked by activity interceptor)
-    verdict: Optional[Verdict] = None
-    verdict_reason: Optional[str] = None
-
-    # Pending approval: True when activity is waiting for human approval
-    pending_approval: bool = False
-
-
 class GovernanceVerdictResponse(EvaluationResult):
     """Response from governance API evaluation.
 

@@ -24,6 +24,7 @@ from openbox.workflow_interceptor import (
 )
 from openbox.types import Verdict
 from openbox.config import GovernanceConfig
+from openbox.governance_state import TemporalGovernanceState
 
 # =============================================================================
 # Tests for _serialize_value()
@@ -444,7 +445,7 @@ class TestGovernanceInterceptor:
 
     def test_initialization_with_all_parameters(self):
         """Test initialization with all parameters."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         config = GovernanceConfig(
             api_timeout=60.0,
             on_api_error="fail_closed",
@@ -456,13 +457,13 @@ class TestGovernanceInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-api-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
         assert interceptor.api_url == "https://api.openbox.ai"
         assert interceptor.api_key == "test-api-key"
-        assert interceptor.span_processor is mock_span_processor
+        assert interceptor.state is state
         assert interceptor.api_timeout == 60.0
         assert interceptor.on_api_error == "fail_closed"
         assert interceptor.send_start_event is False
@@ -488,7 +489,7 @@ class TestGovernanceInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=None,
+            state=None,
             config=None,
         )
 
@@ -497,7 +498,7 @@ class TestGovernanceInterceptor:
         assert interceptor.send_start_event is True
         assert interceptor.skip_workflow_types == set()
         assert interceptor.skip_signals == set()
-        assert interceptor.span_processor is None
+        assert interceptor.state is None
 
     def test_default_values_from_config(self):
         """Test default values are read from config."""
@@ -568,7 +569,7 @@ class TestInboundInterceptor:
         return GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=MagicMock(),
+            state=TemporalGovernanceState(),
             config=GovernanceConfig(),
         )
 
@@ -977,11 +978,11 @@ class TestInboundInterceptor:
         mock_next.handle_signal.assert_called_once_with(signal_input)
 
     @pytest.mark.asyncio
-    async def test_handle_signal_stores_verdict_in_span_processor_if_block(
+    async def test_handle_signal_stores_verdict_in_state_if_block(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal stores verdict in span_processor if BLOCK verdict."""
-        mock_span_processor = MagicMock()
+        """Test handle_signal records a run-scoped signal verdict on BLOCK."""
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "block",
@@ -992,7 +993,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1009,20 +1010,18 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # Check that set_verdict was called on span_processor
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        # The next activity in THIS run enforces the recorded verdict.
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.BLOCK,
             "High risk signal",
-            "run-456",  # run_id
         )
 
     @pytest.mark.asyncio
-    async def test_handle_signal_stores_verdict_in_span_processor_if_halt(
+    async def test_handle_signal_stores_verdict_in_state_if_halt(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal stores verdict in span_processor if HALT verdict."""
-        mock_span_processor = MagicMock()
+        """Test handle_signal records a run-scoped signal verdict on HALT."""
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "halt",
@@ -1033,7 +1032,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1050,11 +1049,9 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.HALT,
             "Critical alert",
-            "run-456",
         )
 
     @pytest.mark.asyncio
@@ -1062,7 +1059,7 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal does not store verdict if ALLOW verdict."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "allow",
@@ -1073,7 +1070,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1090,14 +1087,14 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # set_verdict should NOT be called for ALLOW
-        mock_span_processor.set_verdict.assert_not_called()
+        # No verdict should be recorded for ALLOW.
+        assert state.get_signal_verdict("wf-123", "run-456") is None
 
     @pytest.mark.asyncio
-    async def test_handle_signal_does_not_store_verdict_if_no_span_processor(
+    async def test_handle_signal_does_not_fail_if_no_state(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal does not fail if no span_processor."""
+        """Test handle_signal does not fail if state is None."""
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "block",
@@ -1108,7 +1105,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=None,  # No span processor
+            state=None,  # No governance state
             config=GovernanceConfig(),
         )
 
@@ -1123,7 +1120,7 @@ class TestInboundInterceptor:
         signal_input.signal = "test_signal"
         signal_input.args = []
 
-        # Should not raise even though verdict is BLOCK and no span_processor
+        # Should not raise even though verdict is BLOCK and there is no state.
         await inbound.handle_signal(signal_input)
 
         mock_next.handle_signal.assert_called_once()
@@ -1133,7 +1130,7 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal uses action field if verdict not present (v1.0 compat)."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "action": "stop",  # v1.0 style
@@ -1144,7 +1141,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1162,11 +1159,9 @@ class TestInboundInterceptor:
         await inbound.handle_signal(signal_input)
 
         # "stop" should map to HALT
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.HALT,
             "Blocked by v1 policy",
-            "run-456",
         )
 
     @pytest.mark.asyncio
@@ -1174,13 +1169,13 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal defaults to ALLOW if result is None."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(return_value=None)
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1197,8 +1192,8 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # Should not store verdict since default is ALLOW
-        mock_span_processor.set_verdict.assert_not_called()
+        # Should not store verdict since default is ALLOW.
+        assert state.get_signal_verdict("wf-123", "run-456") is None
 
 
 # =============================================================================
@@ -1405,7 +1400,7 @@ class TestMultiAgentSessionPropagation:
         return GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=MagicMock(),
+            state=TemporalGovernanceState(),
             config=GovernanceConfig(),
         )
 

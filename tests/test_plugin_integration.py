@@ -71,7 +71,15 @@ class SignalWorkflow:
 
 
 def _create_mock_plugin(**overrides):
-    """Create OpenBoxPlugin with __init__ dependencies mocked."""
+    """Create OpenBoxPlugin with __init__ dependencies mocked.
+
+    These E2E tests exercise the plugin LIFECYCLE and composition (worker starts,
+    runs a workflow, stops cleanly; replay is deterministic), not governance
+    interceptor logic — so the governance interceptors are mocked out, exactly as
+    before. Network + base-SDK instrumentation install are also stubbed:
+    validate_api_key is a no-op and create_core_runtime returns a MagicMock
+    runtime whose install_instrumentation does nothing.
+    """
     defaults = dict(
         openbox_url="http://localhost:8086",
         openbox_api_key="obx_test_key_123",
@@ -80,8 +88,9 @@ def _create_mock_plugin(**overrides):
 
     with (
         patch(f"{PATCH_BASE}.validate_api_key"),
-        patch(f"{PATCH_BASE}.WorkflowSpanProcessor"),
-        patch("openbox.otel_setup.setup_opentelemetry_for_governance"),
+        patch(
+            "openbox.core_adapter.create_core_runtime", return_value=MagicMock()
+        ),
         patch("openbox.workflow_interceptor.GovernanceInterceptor"),
         patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
         patch(f"{PATCH_BASE}.GovernanceClient"),

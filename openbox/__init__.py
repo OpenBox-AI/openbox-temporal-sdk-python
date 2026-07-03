@@ -53,7 +53,6 @@ from .errors import (
 from .types import (
     Verdict,
     WorkflowEventType,
-    WorkflowSpanBuffer,
     GovernanceVerdictResponse,
     GuardrailsCheckResult,
 )
@@ -61,12 +60,6 @@ from .types import (
 # Multi-agent primitives (sandbox-safe — only imports temporalio.workflow eagerly;
 # signing/HTTP routed lazily through the governance activity).
 from .multi_agent import emit_handoff
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Span Processor
-# ═══════════════════════════════════════════════════════════════════════════════
-
-from .span_processor import WorkflowSpanProcessor
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Interceptors
@@ -119,24 +112,19 @@ from .client import GovernanceClient
 #   from openbox.activities import send_governance_event
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OTel Setup - NOT imported here to avoid sandbox issues!
+# Instrumentation — owned by the openbox_core base runtime
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# IMPORTANT: Do NOT import otel_setup here!
-# otel_setup imports OpenTelemetry which uses importlib_metadata -> os.stat
-# This triggers Temporal sandbox restrictions.
+# HTTP/DB/file/function hook instrumentation is installed by the base runtime
+# (create_openbox_worker / OpenBoxPlugin call runtime.install_instrumentation()).
+# There is no Temporal-local OpenTelemetry setup to import.
 #
-# Users must import directly: from openbox.otel_setup import setup_opentelemetry_for_governance
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tracing Decorators - NOT imported here to avoid sandbox issues!
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# Use the @traced decorator to capture internal function calls as spans.
-# Import directly: from openbox.tracing import traced, create_span
-#
-# Example:
-#     from openbox.tracing import traced
+# @traced wraps the base SDK's governed() decorator. Import directly:
+#     from openbox.tracing import traced, create_span
 #
 #     @traced
 #     def my_function(data):
@@ -171,13 +159,10 @@ __all__ = [
     # Types
     "Verdict",
     "WorkflowEventType",
-    "WorkflowSpanBuffer",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
     # Multi-agent
     "emit_handoff",
-    # Span Processor
-    "WorkflowSpanProcessor",
     # Interceptors
     "GovernanceInterceptor",
     # Verdict handler
