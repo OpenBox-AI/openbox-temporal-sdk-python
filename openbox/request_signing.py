@@ -61,11 +61,13 @@ def prepare_signed_request(
         ``(headers, body_bytes)``. Callers MUST send ``content=body_bytes`` —
         never ``json=`` — so the transmitted bytes match the hashed bytes.
     """
-    # Fully delegated to the base SDK. Passing the Temporal package version as
-    # sdk_version keeps the Authorization/User-Agent/SDK-Version headers
-    # Temporal-branded; timestamp/nonce are generated HERE so the deterministic
+    # Fully delegated to the base SDK. Passing the Temporal-branded SDK
+    # identifier keeps Authorization/User-Agent/SDK-Version headers specific to
+    # this framework; timestamp/nonce are generated HERE so the deterministic
     # signing tests keep patching this module's datetime/secrets seams.
     from . import __version__
+
+    sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"
 
     if signer is not None and agent_did:
         identity = AgentIdentity(agent_did=agent_did, signer=signer)
@@ -77,12 +79,12 @@ def prepare_signed_request(
             payload,
             api_key=api_key,
             identity=identity,
-            sdk_version=__version__,
+            sdk_version=sdk_identifier,
             _timestamp=timestamp,
             _nonce=nonce,
         )
     return _core_prepare_signed_request(
-        method, path, payload, api_key=api_key, identity=None, sdk_version=__version__
+        method, path, payload, api_key=api_key, identity=None, sdk_version=sdk_identifier
     )
 
 

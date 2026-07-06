@@ -165,6 +165,7 @@ def test_base_auth_headers_always_present(signer):
     )
     assert headers["Authorization"] == "Bearer obx_test_k"
     assert "User-Agent" in headers and "X-OpenBox-SDK-Version" in headers
+    assert headers["X-OpenBox-SDK-Version"].startswith("openbox-temporal-python-v")
 
 
 def test_body_sha_is_lowercase_hex(signer):
