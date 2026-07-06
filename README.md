@@ -152,8 +152,6 @@ worker = create_openbox_worker(
 
     # Database instrumentation
     instrument_databases=True,
-    db_libraries={"psycopg2", "sqlalchemy"},  # None = all available
-    sqlalchemy_engine=engine,  # pass pre-existing engine for query capture
 
     # File I/O instrumentation
     instrument_file_io=False,  # disabled by default
