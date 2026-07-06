@@ -776,7 +776,6 @@ version = "1.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
-    { name = "cryptography" },
     { name = "httpx" },
     { name = "mysql-connector-python" },
     { name = "openbox-sdk-python" },
@@ -816,7 +815,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
-    { name = "cryptography", specifier = ">=43,<47" },
     { name = "httpx", specifier = ">=0.28.0,<1" },
     { name = "mysql-connector-python", specifier = ">=8.0.0" },
     { name = "openbox-sdk-python", editable = "../openbox-sdk-python" },
