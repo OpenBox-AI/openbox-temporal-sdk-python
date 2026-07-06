@@ -8,25 +8,13 @@
 # pyproject.toml on release.
 __version__ = "1.1.2"
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Simple Factories (recommended)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 from .worker import create_openbox_worker
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Core Configuration
-# ═══════════════════════════════════════════════════════════════════════════════
 
 from .config import (
     initialize,
     get_global_config,
     GovernanceConfig,
 )
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Errors (unified hierarchy in errors.py)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 from .errors import (
     OpenBoxError,
@@ -46,10 +34,6 @@ from .errors import (
     map_signing_error,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Types (sandbox-safe - can be imported in workflow code)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 from .types import (
     Verdict,
     WorkflowEventType,
@@ -61,15 +45,7 @@ from .types import (
 # signing/HTTP routed lazily through the governance activity).
 from .multi_agent import emit_handoff
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Interceptors
-# ═══════════════════════════════════════════════════════════════════════════════
-
 from .workflow_interceptor import GovernanceInterceptor
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Plugin (requires temporalio >= 1.23.0)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 try:
     from temporalio.plugin import SimplePlugin  # noqa: F401 — probe only
@@ -78,21 +54,9 @@ try:
 except ImportError:
     pass  # temporalio < 1.23.0, plugin not available
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Verdict Handler
-# ═══════════════════════════════════════════════════════════════════════════════
-
 from .verdict_handler import enforce_verdict, VerdictEnforcementResult
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HITL — Human-in-the-Loop approval helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
 from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Governance HTTP Client (sandbox-safe — httpx imported lazily inside methods)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 from .client import GovernanceClient
 
@@ -100,9 +64,7 @@ from .client import GovernanceClient
 # OpenTelemetry which uses importlib_metadata -> os.stat, causing sandbox issues.
 # Users must import directly: from openbox.activity_interceptor import ActivityGovernanceInterceptor
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Activities - DO NOT import here!
-# ═══════════════════════════════════════════════════════════════════════════════
 #
 # IMPORTANT: Do NOT import activities from openbox/__init__.py!
 # activities.py imports httpx which uses os.stat internally. If we re-export them
@@ -111,17 +73,13 @@ from .client import GovernanceClient
 # Users must import directly:
 #   from openbox.activities import send_governance_event
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Instrumentation — owned by the openbox_core base runtime
-# ═══════════════════════════════════════════════════════════════════════════════
 #
 # HTTP/DB/file/function hook instrumentation is installed by the base runtime
 # (create_openbox_worker / OpenBoxPlugin call runtime.install_instrumentation()).
 # There is no Temporal-local OpenTelemetry setup to import.
 #
-# ═══════════════════════════════════════════════════════════════════════════════
 # Tracing Decorators - NOT imported here to avoid sandbox issues!
-# ═══════════════════════════════════════════════════════════════════════════════
 #
 # @traced wraps the base SDK's governed() decorator. Import directly:
 #     from openbox.tracing import traced, create_span
@@ -132,15 +90,11 @@ from .client import GovernanceClient
 
 
 __all__ = [
-    # Simple Worker Factory (recommended)
     "create_openbox_worker",
-    # Plugin (recommended for temporalio >= 1.23.0)
     "OpenBoxPlugin",
-    # Configuration
     "initialize",
     "get_global_config",
     "GovernanceConfig",
-    # Errors (unified hierarchy)
     "OpenBoxError",
     "OpenBoxConfigError",
     "OpenBoxAuthError",
@@ -156,22 +110,16 @@ __all__ = [
     "ApprovalTimeoutError",
     "extract_governance_error",
     "map_signing_error",
-    # Types
     "Verdict",
     "WorkflowEventType",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
-    # Multi-agent
     "emit_handoff",
-    # Interceptors
     "GovernanceInterceptor",
-    # Verdict handler
     "enforce_verdict",
     "VerdictEnforcementResult",
-    # HITL helpers
     "handle_approval_response",
     "raise_approval_pending",
     "should_skip_hitl",
-    # Governance HTTP client
     "GovernanceClient",
 ]

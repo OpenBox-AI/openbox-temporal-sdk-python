@@ -1,13 +1,4 @@
-# tests/test_activity_interceptor.py
-"""Comprehensive tests for the OpenBox SDK activity_interceptor module.
-
-Migrated to the base-SDK architecture: the activity interceptor now takes a
-``TemporalGovernanceState`` (not a ``WorkflowSpanProcessor``) and drives all
-activity events through a ``GovernanceClient``. Hook governance (HTTP/DB/file/
-function) is owned by the base runtime and enforced by the ``TemporalFramework
-Adapter`` — the interceptor no longer interprets hook verdicts itself, so the
-hook-verdict-translation tests moved to tests/test_core_conformance_suite.py.
-"""
+"""Comprehensive tests for the OpenBox SDK activity_interceptor module."""
 
 import base64
 import re
@@ -33,11 +24,6 @@ from openbox.types import (
 from openbox.config import GovernanceConfig
 from openbox.governance_state import TemporalGovernanceState
 from openbox.core_adapter import get_core_context_store
-
-# =============================================================================
-# Helper Fixtures and Dataclasses for Testing
-# =============================================================================
-
 
 @dataclass
 class NestedData:
@@ -203,11 +189,6 @@ def patched_activity(mock_activity_info):
     return ctx, mock_activity
 
 
-# =============================================================================
-# Tests for _rfc3339_now()
-# =============================================================================
-
-
 class TestRfc3339Now:
     """Tests for _rfc3339_now() function."""
 
@@ -260,11 +241,6 @@ class TestRfc3339Now:
 
         # The result should be within 1 second of now
         assert abs((now - result_time).total_seconds()) < 1
-
-
-# =============================================================================
-# Tests for _deep_update_dataclass()
-# =============================================================================
 
 
 class TestDeepUpdateDataclass:
@@ -397,11 +373,6 @@ class TestDeepUpdateDataclass:
 
         # List items should be replaced in-place
         assert data.items == ["x", "y", "z"]
-
-
-# =============================================================================
-# Tests for _serialize_value()
-# =============================================================================
 
 
 class TestSerializeValue:
@@ -554,11 +525,6 @@ class TestSerializeValue:
         }
 
 
-# =============================================================================
-# Tests for TemporalGovernanceState run-scoping (signal verdict staleness)
-# =============================================================================
-
-
 class TestSignalVerdictRunScoping:
     """Signal verdicts are run-scoped: a verdict left by a PRIOR run with the
     same workflow_id must be ignored (and cleared) rather than enforced on a
@@ -583,11 +549,6 @@ class TestSignalVerdictRunScoping:
         assert state.get_signal_verdict("wf", "new-run") is None
         # And cleared, so even the original run no longer sees it.
         assert state.get_signal_verdict("wf", "old-run") is None
-
-
-# =============================================================================
-# Tests for ActivityGovernanceInterceptor class
-# =============================================================================
 
 
 class TestActivityGovernanceInterceptor:
@@ -653,17 +614,8 @@ class TestActivityGovernanceInterceptor:
         assert result._state is state
 
 
-# =============================================================================
-# Tests for _ActivityInterceptor class
-# =============================================================================
-
-
 class TestActivityInterceptor:
     """Tests for _ActivityInterceptor class."""
-
-    # =========================================================================
-    # Tests for execute_activity()
-    # =========================================================================
 
     @pytest.mark.asyncio
     async def test_skips_if_activity_type_in_skip_list(
@@ -1063,10 +1015,6 @@ class TestActivityInterceptor:
         assert exc_info.value.type == "ApprovalExpired"
         assert exc_info.value.non_retryable is True
 
-    # =========================================================================
-    # Tests for _send_activity_event() — exercises the real GovernanceClient
-    # =========================================================================
-
     @pytest.mark.asyncio
     async def test_send_activity_event_correct_payload(
         self, state, mock_activity_info
@@ -1284,10 +1232,6 @@ class TestActivityInterceptor:
         assert result.verdict == Verdict.HALT
         assert "Connection error" in result.reason
 
-    # =========================================================================
-    # Tests for poll_approval (via GovernanceClient)
-    # =========================================================================
-
     @pytest.mark.asyncio
     async def test_poll_approval_status_returns_status(
         self, state, governance_config
@@ -1476,11 +1420,6 @@ class TestActivityInterceptor:
             )
 
         assert "expired" not in result or result.get("expired") is not True
-
-
-# =============================================================================
-# Additional Edge Case Tests
-# =============================================================================
 
 
 class TestEdgeCases:
@@ -1703,11 +1642,6 @@ class TestEdgeCases:
         assert result.prompt == "[REDACTED]"
 
 
-# =============================================================================
-# Multi-Agent Session Propagation (activity side)
-# =============================================================================
-
-
 class TestActivityMultiAgentSession:
     """Activity interceptor reads the session header and tags activity events,
     and binds the session id onto the core ActivityContext so hook events
@@ -1867,9 +1801,7 @@ class TestCoreContextBindingCarriesPolicyFields:
         assert get_core_context_store().current_activity_context() is None
 
 
-# =============================================================================
 # Completed-hook HALT must terminate even when the activity also raises (H1)
-# =============================================================================
 
 
 class TestCompletedHaltReachesTerminateOnActivityRaise:

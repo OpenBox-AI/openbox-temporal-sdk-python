@@ -1,4 +1,3 @@
-# openbox/config.py
 """
 OpenBox SDK - Configuration for workflow-boundary governance (SPEC-003).
 
@@ -40,9 +39,7 @@ from .errors import (  # noqa: F401
     OpenBoxInsecureURLError,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # GovernanceConfig - Configuration for interceptors
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -116,9 +113,7 @@ class GovernanceConfig:
     hitl_poll_interval_ms: int = 5000
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Global Configuration Singleton
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _validate_api_key_format(api_key: str) -> bool:

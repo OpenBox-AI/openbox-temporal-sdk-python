@@ -55,8 +55,6 @@ dependencies = [
     "openbox-sdk-python>=0.2.0",
 ]
 
-# Local path dep during migration development; swapped for the published
-# package at release.
 [tool.uv.sources]
 openbox-sdk-python = { path = "../openbox-sdk-python", editable = true }
 

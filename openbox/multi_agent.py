@@ -1,4 +1,3 @@
-# openbox/multi_agent.py
 """Multi-agent primitives: handoff events + session-context propagation.
 
 The SDK does NOT own routing, session-id minting, or an agent registry — those
@@ -42,7 +41,6 @@ def _to_rfc3339(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-# ─── Handoff ─────────────────────────────────────────────────────────────────
 
 
 def build_handoff_payload(
@@ -112,7 +110,6 @@ async def emit_handoff(
     return await _send_governance_event(payload, timeout, on_api_error)
 
 
-# ─── Session-context propagation ───────────────────────────────────────────
 
 
 def read_session_from_memo() -> Optional[str]:

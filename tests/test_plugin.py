@@ -1,4 +1,3 @@
-# tests/test_plugin.py
 """
 Unit tests for OpenBoxPlugin(SimplePlugin).
 
@@ -20,10 +19,9 @@ PATCH_BASE = "openbox.plugin"
 def _make_plugin(**overrides):
     """Create OpenBoxPlugin with all heavy dependencies mocked.
 
-    The plugin now builds a base-SDK runtime via create_core_runtime() and calls
-    runtime.install_instrumentation(); both are stubbed so no network / real
-    instrumentation happens. A real TemporalGovernanceState is used (cheap,
-    no I/O) so tests can assert the same instance flows to both interceptors.
+    create_core_runtime() and runtime.install_instrumentation() are stubbed so
+    no network or real instrumentation happens. A real TemporalGovernanceState
+    is used so tests can assert the same instance flows to both interceptors.
     """
     defaults = dict(
         openbox_url="http://localhost:8086",
@@ -61,11 +59,6 @@ def _make_plugin(**overrides):
     return plugin, mocks
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Construction Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 class TestPluginInit:
     """Test OpenBoxPlugin constructor."""
 
@@ -82,8 +75,8 @@ class TestPluginInit:
     def test_builds_core_runtime_and_installs_instrumentation(self):
         """Plugin builds the base-SDK runtime and installs hook instrumentation.
 
-        Replaces the old WorkflowSpanProcessor construction: hook governance now
-        lives in openbox_core, installed once via runtime.install_instrumentation().
+        Hook governance lives in openbox_core, installed once via
+        runtime.install_instrumentation().
         """
         plugin, mocks = _make_plugin()
 
@@ -103,7 +96,7 @@ class TestPluginInit:
 
     def test_core_runtime_receives_instrumentation_flags(self):
         """instrument_databases / instrument_file_io / policy / timeout flow to
-        the base runtime builder (previously passed to setup_opentelemetry)."""
+        the runtime builder."""
         plugin, mocks = _make_plugin(
             instrument_databases=False,
             instrument_file_io=False,
@@ -224,11 +217,6 @@ class TestPluginInit:
                 )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# configure_worker Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 class TestPluginConfigureWorker:
     """Test OpenBoxPlugin.configure_worker()."""
 
@@ -269,11 +257,6 @@ class TestPluginConfigureWorker:
             with patch.object(SimplePlugin, "configure_worker", return_value=config):
                 plugin.configure_worker(config)
             mock_set.assert_not_called()
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Sandbox Passthrough Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestPluginWorkflowRunner:

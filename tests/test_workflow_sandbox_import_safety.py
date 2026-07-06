@@ -1,9 +1,8 @@
-"""Workflow-sandbox import safety — the migration must not poison sandbox paths.
+"""Workflow-sandbox import safety.
 
 Importing ``openbox.workflow_interceptor`` (and the pure modules it pulls in,
 including the base-SDK contracts) must NOT load network/crypto/signing
-modules. Mirrors the base SDK's import-safety harness; this is the branch's
-standing guard against sandbox regressions.
+modules.
 """
 
 from __future__ import annotations
@@ -28,11 +27,8 @@ FORBIDDEN_MODULES = (
     "openbox_core.runtime",
     "openbox_core.gate",
     "openbox_core.instrumentation",
-    # Temporal-side signing/adapter modules (deliberately omitted from eager
-    # __init__ exports). NOTE: openbox.client / openbox.hitl DO load via the
-    # package __init__ (pre-existing main-branch behavior) but lazy-import
-    # every heavy dep — the httpx/cryptography assertions above are the
-    # actual sandbox guard.
+    # Temporal-side signing/adapter modules deliberately stay off eager import
+    # paths. openbox.client / openbox.hitl lazy-import their heavy dependencies.
     "openbox.request_signing",
     "openbox.core_adapter",
 )

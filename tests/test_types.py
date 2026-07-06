@@ -1,4 +1,3 @@
-# tests/test_types.py
 """Comprehensive tests for the OpenBox SDK types module."""
 
 import pytest

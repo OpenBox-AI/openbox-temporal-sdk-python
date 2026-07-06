@@ -1,25 +1,18 @@
-# openbox/types.py
-"""Data types for workflow-boundary governance — shims over the OpenBox base SDK.
+"""Data types for workflow-boundary governance.
 
 ``Verdict``, ``GuardrailsCheckResult`` (base name: ``GuardrailsResult``),
-``WorkflowEventType`` (base name: ``EventType``), and the evaluation-result
-parsing now come from ``openbox_core.contracts`` — the shared contracts every
-OpenBox framework SDK consumes. Public names, signatures, and behavior are
-preserved; ``GovernanceVerdictResponse`` additionally gains the base-SDK
-fields Temporal never parsed before (``fallback_used``, ``diagnostics``,
-``raw``).
+``WorkflowEventType`` (base name: ``EventType``), and evaluation-result parsing
+come from ``openbox_core.contracts``. Public names, signatures, and behavior are
+preserved.
 
 SANDBOX SAFETY: ``openbox_core.contracts`` modules are pure (no network,
-crypto, OTel, or wall-clock at import) — verified by the base SDK's
-import-safety harness — so this module remains safe exactly where it was
-safe before.
+crypto, OTel, or wall-clock at import).
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-# Shared contracts — the single source of truth for these shapes.
 from openbox_core.contracts.events import EventType as WorkflowEventType  # noqa: F401
 from openbox_core.contracts.results import (  # noqa: F401
     EvaluationResult,
@@ -29,7 +22,6 @@ from openbox_core.contracts.results import (
     GuardrailsResult as GuardrailsCheckResult,  # noqa: F401  (Temporal-parity name)
 )
 
-# Re-export from errors.py for backward compatibility
 from .errors import GovernanceBlockedError  # noqa: F401
 
 
@@ -41,12 +33,8 @@ def rfc3339_now() -> str:
 class GovernanceVerdictResponse(EvaluationResult):
     """Response from governance API evaluation.
 
-    Now a thin subclass of the shared ``openbox_core`` ``EvaluationResult`` —
-    same public surface as before (``verdict``, ``reason``, ``policy_id``,
-    ``risk_score``, ``metadata``, ``governance_event_id``,
-    ``guardrails_result``, v1.1 fields, the ``action`` property, and
-    ``from_dict``) plus the shared fields (``fallback_used``, ``diagnostics``,
-    ``raw``, ``approval_expiration_time``).
+    Thin subclass of the shared ``openbox_core`` ``EvaluationResult`` that keeps
+    the Temporal SDK's public class name.
     """
 
     def __init__(
@@ -84,7 +72,7 @@ class GovernanceVerdictResponse(EvaluationResult):
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GovernanceVerdictResponse":
         """Parse a governance response (v1.0 and v1.1 compatible) via the
-        SHARED base-SDK parser — no hand-parsing of common fields remains."""
+        shared parser."""
         base = EvaluationResult.from_dict(data)
         instance = cls.__new__(cls)
         instance.__dict__.update(base.__dict__)

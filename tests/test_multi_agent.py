@@ -21,7 +21,6 @@ def _converter():
     return _default_converter().payload_converter
 
 
-# ─── Event type ──────────────────────────────────────────────────────────────
 
 
 def test_handoff_event_type_value():
@@ -29,7 +28,6 @@ def test_handoff_event_type_value():
     assert WorkflowEventType.HANDOFF.value == "Handoff"
 
 
-# ─── build_handoff_payload ─────────────────────────────────────────────────────
 
 
 def test_build_handoff_payload_minimal():
@@ -66,7 +64,6 @@ def test_build_handoff_payload_rejects_empty(from_did, session_id):
         build_handoff_payload(from_did, session_id)
 
 
-# ─── emit_handoff ──────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -101,7 +98,6 @@ async def test_emit_handoff_validates_before_network():
     sender.assert_not_awaited()
 
 
-# ─── session header round-trip ──────────────────────────────────────────────────
 
 
 def test_inject_and_read_session_header_round_trip():

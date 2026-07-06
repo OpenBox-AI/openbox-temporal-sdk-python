@@ -1,4 +1,3 @@
-# openbox/client.py
 """OpenBox Temporal SDK — Governance HTTP Client.
 
 Centralizes governance API HTTP calls for activity-level events.

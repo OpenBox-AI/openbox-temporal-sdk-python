@@ -1,5 +1,3 @@
-# openbox/activity_interceptor.py
-# Handles: ActivityStarted, ActivityCompleted (direct HTTP, WITH spans)
 """
 Temporal activity interceptor for activity-boundary governance.
 
@@ -8,9 +6,6 @@ ActivityGovernanceInterceptor: Factory that creates ActivityInboundInterceptor
 Captures 2 activity-level events:
 4. ActivityStarted (execute_activity entry)
 5. ActivityCompleted (execute_activity exit)
-
-NOTE: Workflow events (WorkflowStarted, WorkflowCompleted, SignalReceived) are
-handled by GovernanceInterceptor in workflow_interceptor.py
 
 IMPORTANT: Activities CAN use datetime/time and make HTTP calls directly.
 This is different from workflow interceptors which must maintain determinism.
@@ -23,7 +18,7 @@ import time
 import json
 
 
-from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .types import rfc3339_now as _rfc3339_now
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -199,7 +194,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info = activity.info()
         start_time = time.time()
 
-        # Skip if configured (e.g., send_governance_event to avoid loops)
         if info.activity_type in self._config.skip_activity_types:
             return await self.next.execute_activity(input)
 
@@ -210,10 +204,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             input.headers, activity.payload_converter()
         )
 
-        # Check for blocking verdicts from prior governance (signal verdict)
         await self._check_pending_verdicts(info)
 
-        # Check for pending approval on retry (HITL polling)
         await self._check_pending_approval(info)
 
         # Clear any stale within-activity abort flag from a prior run reusing the
@@ -222,11 +214,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             info.workflow_id, info.activity_id
         )
 
-        # Serialize activity input
         activity_input = self._serialize_input(input, info)
 
-        # Send ActivityStarted event (optional). Hook context/payloads are owned
-        # by the base runtime via core_activity_scope — no local context buffer.
         governance_verdict: Optional[GovernanceVerdictResponse] = None
         if self._config.send_activity_start_event:
             governance_verdict = await self._send_activity_event(
@@ -236,16 +225,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
             )
 
-        # Enforce ActivityStarted verdict (HITL, BLOCK, HALT, guardrails)
         if governance_verdict:
             await self._enforce_verdict(governance_verdict, info, "activity_start")
 
-        # Apply guardrails input redaction
         activity_input = self._apply_input_redaction(
             governance_verdict, input, activity_input
         )
 
-        # Execute the actual activity
         try:
             result, status, error, activity_output, end_time = await self._run_activity(
                 input, info, activity_input=activity_input, session_id=session_id
@@ -259,7 +245,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             await self._consume_completed_halt(info)
             raise
 
-        # Send ActivityCompleted + enforce verdict + apply output redaction
         result = await self._handle_completion(
             info, status, error, start_time, end_time,
             activity_input, activity_output, result,
@@ -282,8 +267,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             await _terminate_workflow_for_halt(
                 info.workflow_id, stop[1] or "Governance halt"
             )
-
-    # ─── Verdict checks ───────────────────────────────────────────────────
 
     async def _check_pending_verdicts(self, info) -> None:
         """Enforce a SignalReceived BLOCK/HALT recorded for this run by the
@@ -314,8 +297,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 type="GovernanceBlock",
                 non_retryable=True,
             )
-
-    # ─── HITL approval ────────────────────────────────────────────────────
 
     async def _check_pending_approval(self, info) -> bool:
         """Poll for pending HITL approval on retry. Returns True if approved."""
@@ -357,8 +338,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             return True
         return False
 
-    # ─── Input serialization ──────────────────────────────────────────────
-
     def _serialize_input(self, input: ExecuteActivityInput, info) -> list:
         """Serialize activity input arguments."""
         try:
@@ -378,8 +357,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 return [str(arg) for arg in input.args] if input.args else []
             except Exception:
                 return []
-
-    # ─── Verdict enforcement ──────────────────────────────────────────────
 
     async def _enforce_verdict(
         self, verdict_response: GovernanceVerdictResponse, info, context: str
@@ -421,8 +398,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 non_retryable=True,
             )
 
-    # ─── Guardrails redaction ─────────────────────────────────────────────
-
     def _apply_input_redaction(
         self,
         verdict: Optional[GovernanceVerdictResponse],
@@ -440,7 +415,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         redacted = verdict.guardrails_result.redacted_input
         activity.logger.info("Applying guardrails redaction to activity input")
 
-        # Normalize to list to match args structure
         if isinstance(redacted, dict):
             redacted = [redacted]
 
@@ -489,8 +463,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         return redacted_output
 
-    # ─── Activity execution ───────────────────────────────────────────────
-
     async def _run_activity(
         self,
         input: ExecuteActivityInput,
@@ -520,9 +492,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ) as span:
             trace_id = span.get_span_context().trace_id
 
-            # The ONLY hook-context bridge: binds the shared ActivityContext and
-            # registers the trace (try/finally reset) so base hooks resolve
-            # context even from executor threads where ContextVars don't flow.
             with core_activity_scope(
                 info,
                 activity_input,
@@ -540,8 +509,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         end_time = time.time()
         return result, status, error, activity_output, end_time
 
-    # ─── Post-execution handling ──────────────────────────────────────────
-
     async def _handle_completion(
         self, info, status, error, start_time, end_time,
         activity_input, activity_output, result, multi_agent_session_id=None,
@@ -558,7 +525,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         base_aborted = store.is_activity_aborted(info.workflow_id, info.activity_id)
         store.clear_activity_aborted(info.workflow_id, info.activity_id)
 
-        # Completed HALT reaches Temporal's terminate path with the recorded reason.
         if completed_stop is not None and completed_stop[0] is Verdict.HALT:
             await _terminate_workflow_for_halt(
                 info.workflow_id, completed_stop[1] or "Governance halt"
@@ -566,7 +532,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         was_aborted = base_aborted or completed_stop is not None
 
-        # Send ActivityCompleted event (unless aborted by hook governance)
         completed_verdict = None
         if was_aborted:
             activity.logger.info(
@@ -588,14 +553,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 error=error,
             )
 
-        # Enforce completed verdict
         if completed_verdict:
             await self._enforce_verdict(completed_verdict, info, "activity_end")
 
-        # Apply output redaction
         return self._apply_output_redaction(completed_verdict, result)
-
-    # ─── Event sending ────────────────────────────────────────────────────
 
     async def _send_activity_event(
         self, info, event_type: str, multi_agent_session_id=None, **extra
@@ -630,7 +591,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             **serialized_extra,
         }
 
-        # Final safety check - ensure payload is JSON serializable
         try:
             json.dumps(payload)
         except TypeError as e:

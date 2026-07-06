@@ -1,4 +1,3 @@
-# tests/test_workflow_interceptor.py
 """
 Comprehensive pytest tests for the OpenBox SDK workflow_interceptor module.
 
@@ -25,10 +24,6 @@ from openbox.workflow_interceptor import (
 from openbox.types import Verdict
 from openbox.config import GovernanceConfig
 from openbox.governance_state import TemporalGovernanceState
-
-# =============================================================================
-# Tests for _serialize_value()
-# =============================================================================
 
 
 class TestSerializeValue:
@@ -217,11 +212,6 @@ class TestSerializeValue:
         assert isinstance(result, str)
 
 
-# =============================================================================
-# Tests for GovernanceHaltError
-# =============================================================================
-
-
 class TestGovernanceHaltError:
     """Tests for the GovernanceHaltError exception class."""
 
@@ -255,11 +245,6 @@ class TestGovernanceHaltError:
         with pytest.raises(GovernanceHaltError) as exc_info:
             raise GovernanceHaltError(msg)
         assert str(exc_info.value) == msg
-
-
-# =============================================================================
-# Tests for _send_governance_event()
-# =============================================================================
 
 
 class TestSendGovernanceEvent:
@@ -378,8 +363,6 @@ class TestSendGovernanceEvent:
     @pytest.mark.asyncio
     async def test_string_matching_on_message_is_ignored(self, mock_workflow):
         """Messages containing 'GovernanceHalt' must NOT trigger halt without proper type."""
-        # User workflow could legitimately throw an error whose string happens to contain
-        # "GovernanceHalt" — the old string-match logic would false-positive on this.
         error = Exception("GovernanceHalt: user happens to mention this string")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
@@ -433,11 +416,6 @@ class TestSendGovernanceEvent:
         call_args = mock_workflow.execute_activity.call_args
         expected_timeout = timedelta(seconds=30.0)  # 25 + 5
         assert call_args.kwargs["start_to_close_timeout"] == expected_timeout
-
-
-# =============================================================================
-# Tests for GovernanceInterceptor
-# =============================================================================
 
 
 class TestGovernanceInterceptor:
@@ -532,11 +510,6 @@ class TestGovernanceInterceptor:
         assert isinstance(result, type)
         # The class should be named _Inbound
         assert result.__name__ == "_Inbound"
-
-
-# =============================================================================
-# Tests for _Inbound interceptor class (inner class)
-# =============================================================================
 
 
 class TestInboundInterceptor:
@@ -1196,11 +1169,6 @@ class TestInboundInterceptor:
         assert state.get_signal_verdict("wf-123", "run-456") is None
 
 
-# =============================================================================
-# Integration-style tests (testing closures and captured variables)
-# =============================================================================
-
-
 class TestInterceptorClosures:
     """Tests to verify that closures capture variables correctly."""
 
@@ -1269,11 +1237,6 @@ class TestInterceptorClosures:
         assert interceptor2.api_url == "https://api2.openbox.ai"
         assert interceptor1.skip_workflow_types == {"Skip1"}
         assert interceptor2.skip_workflow_types == {"Skip2"}
-
-
-# =============================================================================
-# Edge Cases
-# =============================================================================
 
 
 class TestEdgeCases:
@@ -1386,11 +1349,6 @@ class TestEdgeCases:
             api_key="test-key",
         )
         assert isinstance(interceptor, Interceptor)
-
-
-# =============================================================================
-# Multi-Agent Session Propagation (workflow side)
-# =============================================================================
 
 
 class TestMultiAgentSessionPropagation:

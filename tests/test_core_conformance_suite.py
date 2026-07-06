@@ -4,9 +4,8 @@ Proves the Temporal adapter drives core instrumentation with native
 semantics: started BLOCK/HALT surface as non-retryable ApplicationErrors with
 the existing ``GovernanceBlock``/``GovernanceHalt`` types BEFORE the real
 operation runs; REQUIRE_APPROVAL surfaces as the retryable ``ApprovalPending``
-error powering Temporal's HITL retry loop; completed verdicts only mark
-future execution. This is the Phase 8 kit imported from an external repo —
-exactly what later framework migrations will do.
+error powering Temporal's HITL retry loop; completed verdicts only mark future
+execution.
 
 Hook governance is owned by the base ``openbox_core`` runtime; the Temporal
 adapter maps base verdicts onto Temporal-native effects and records the small
