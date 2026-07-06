@@ -1,15 +1,12 @@
-"""Public API compatibility gate for the base-SDK migration branch.
+"""Public API compatibility gate.
 
-Pins the post-migration public surface: every export, the
-``create_openbox_worker``/``OpenBoxPlugin`` kwargs, and the shared shim types'
-(Verdict / EvaluationResult / WorkflowEventType) behavioral identity. Any
-accidental rename/removal fails here first.
+Pins every export, the ``create_openbox_worker``/``OpenBoxPlugin`` kwargs, and
+the shared shim types' behavioral identity. Any accidental rename/removal fails
+here first.
 
-Note: ``WorkflowSpanProcessor`` and ``WorkflowSpanBuffer`` were INTENTIONALLY
-removed — hook instrumentation now lives entirely in the base SDK
-(``openbox_core``) and the worker builds+owns an ``OpenBoxRuntime`` instead of a
-Temporal-local span processor. Their absence is asserted below so they are not
-silently re-added.
+``WorkflowSpanProcessor`` and ``WorkflowSpanBuffer`` are intentionally absent.
+Hook instrumentation lives in ``openbox_core`` and the worker owns an
+``OpenBoxRuntime``.
 """
 
 from __future__ import annotations
@@ -18,9 +15,6 @@ import inspect
 
 import openbox
 
-# Post-migration export list. WorkflowSpanProcessor / WorkflowSpanBuffer are
-# deliberately absent (see module docstring); every other pre-migration name
-# is preserved for backward compatibility.
 EXPECTED_EXPORTS = {
     "ApprovalExpiredError",
     "ApprovalRejectedError",
@@ -57,7 +51,6 @@ EXPECTED_EXPORTS = {
     "emit_handoff",
 }
 
-# Symbols removed by the migration; instrumentation is base-SDK-owned now.
 REMOVED_EXPORTS = {
     "WorkflowSpanProcessor",
     "WorkflowSpanBuffer",
@@ -116,7 +109,6 @@ class TestExports:
         assert len(openbox.__all__) == 32
 
     def test_removed_exports_absent(self):
-        # Instrumentation shims are base-SDK-owned now; they must NOT reappear.
         for name in REMOVED_EXPORTS:
             assert name not in openbox.__all__, f"{name} unexpectedly re-exported"
             assert not hasattr(openbox, name), f"{name} unexpectedly present on module"

@@ -5,9 +5,8 @@ OPENS A FILE, and with the base file instrumentation patching
 ``builtins.open``/``io.open`` that read re-enters governance (circular import
 inside the workflow sandbox when eager; unbounded recursion when lazy).
 
-The companion invariant — file-hook code must not run import machinery inside a
-governed ``open()`` — now lives in the base SDK's file instrumentation and is
-covered by its own tests.
+The companion invariant is that governed ``open()`` paths must not run import
+machinery inside the file hook.
 """
 
 import ast
@@ -69,8 +68,3 @@ class TestStaticVersion:
                 f"{mod.__name__}.__version__ ({mod.__version__}) out of sync "
                 f"with pyproject ({declared}) — update the static string on release"
             )
-
-
-# NOTE: the file-hook re-entrancy guard (no import machinery inside a governed
-# open()) now lives in the base SDK's file instrumentation and is covered by its
-# own tests — the Temporal-local file_governance_hooks module was removed.

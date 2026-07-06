@@ -1,19 +1,13 @@
-# openbox/request_signing.py
-"""AIP DID + Ed25519 signed-request construction — thin shim over the base SDK.
+"""AIP DID + Ed25519 signed-request construction.
 
-The canonical signing contract now lives in ``openbox_core.identity`` (the
-OpenBox base SDK); this module keeps the Temporal SDK's public surface and
-delegates the canonical-string/signature construction, byte-for-byte
-(gated by tests/test_base_sdk_signing_parity.py against the golden fixture)::
+This module keeps the Temporal SDK's public surface while delegating the
+canonical-string/signature construction to ``openbox_core.identity``::
 
     UPPER(METHOD)\\nPATH\\nTIMESTAMP\\nNONCE\\nBODY_SHA256_HEX
 
-SANDBOX SAFETY: unchanged — ``cryptography`` work happens only through a
-pre-loaded signer object passed in by the caller, ``httpx`` is imported lazily
-inside the transports, and this module must NEVER be imported on the Temporal
-workflow sandbox path. Timestamp/nonce generation stays in THIS module's
-namespace (``datetime``/``secrets``) so existing deterministic-signing tests
-keep patching the same seams.
+SANDBOX SAFETY: ``cryptography`` work happens only through a pre-loaded signer
+object passed by the caller, ``httpx`` is imported lazily inside the transports,
+and this module must not be imported from the Temporal workflow sandbox path.
 """
 
 from __future__ import annotations
@@ -22,7 +16,6 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-# Canonical constants come from the base SDK — single source of truth.
 from openbox_core.identity import (  # noqa: F401  (re-exported public names)
     EMPTY_BODY_SHA256,
     HEADER_BODY_SHA256,
@@ -61,10 +54,6 @@ def prepare_signed_request(
         ``(headers, body_bytes)``. Callers MUST send ``content=body_bytes`` —
         never ``json=`` — so the transmitted bytes match the hashed bytes.
     """
-    # Fully delegated to the base SDK. Passing the Temporal-branded SDK
-    # identifier keeps Authorization/User-Agent/SDK-Version headers specific to
-    # this framework; timestamp/nonce are generated HERE so the deterministic
-    # signing tests keep patching this module's datetime/secrets seams.
     from . import __version__
 
     sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"

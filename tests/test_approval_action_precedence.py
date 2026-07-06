@@ -1,13 +1,8 @@
-"""Regression gate for the approval decision-source precedence change.
+"""Regression gate for approval decision-source precedence.
 
-BEHAVIOR CHANGE (deliberate, base-SDK adoption): approval poll responses now
-parse via ``openbox_core.contracts.results.ApprovalResult``, which prefers
-``action`` over ``verdict`` when both are present. The pre-migration code
-preferred ``verdict`` (``Verdict.from_string(response.get("verdict") or
-response.get("action"))``). Additionally, a response with NEITHER field is now
-PENDING (retry) instead of the old implicit ALLOW from ``from_string(None)``.
-
-These tests pin the new semantics explicitly so any future flip is loud.
+Approval poll responses parse via ``ApprovalResult``, which prefers ``action``
+over ``verdict`` when both are present. A response with neither field remains
+pending and must never auto-approve.
 """
 
 from __future__ import annotations
@@ -31,8 +26,6 @@ def call(response):
 
 class TestActionPrecedence:
     def test_action_allow_wins_over_verdict_block(self):
-        """OLD behavior: verdict-first -> BLOCK -> ApprovalRejected.
-        NEW behavior: action-first -> ALLOW -> approved."""
         assert call({"verdict": "block", "action": "continue"}) is True
 
     def test_action_block_wins_over_verdict_allow(self):
@@ -50,8 +43,6 @@ class TestActionPrecedence:
 
 class TestAbsentDecisionIsPending:
     def test_empty_response_keeps_polling_never_auto_allows(self):
-        """OLD behavior: from_string(None) -> ALLOW (approval granted!).
-        NEW behavior: pending -> retryable ApprovalPending."""
         with pytest.raises(ApplicationError) as exc_info:
             call({})
         assert exc_info.value.type == "ApprovalPending"

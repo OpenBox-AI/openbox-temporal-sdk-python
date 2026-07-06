@@ -1,4 +1,3 @@
-# tests/test_plugin_integration.py
 """
 Integration tests for OpenBoxPlugin with Temporal test server.
 
@@ -22,9 +21,7 @@ from temporalio.worker import Worker
 PATCH_BASE = "openbox.plugin"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Test Workflows & Activities
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @activity.defn
@@ -65,9 +62,7 @@ class SignalWorkflow:
         self._done = True
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Plugin Factory (mocked init, real configure_worker)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _create_mock_plugin(**overrides):
@@ -98,11 +93,6 @@ def _create_mock_plugin(**overrides):
         from openbox.plugin import OpenBoxPlugin
 
         return OpenBoxPlugin(**defaults)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Integration Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestPluginWorkerLifecycle:
@@ -209,11 +199,6 @@ class TestPluginWorkerLifecycle:
             result = await handle.result()
 
         assert result == "signal:test-data"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Replay Safety Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestPluginReplaySafety:

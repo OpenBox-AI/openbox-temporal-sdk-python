@@ -1,4 +1,3 @@
-# openbox/core_adapter.py
 """Temporal FrameworkAdapter + core ActivityContext binding for the base SDK.
 
 This is the Temporal side of the ``openbox_core`` adapter seam. Governance is

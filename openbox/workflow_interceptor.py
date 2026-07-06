@@ -1,4 +1,3 @@
-# openbox/workflow_interceptor.py
 """
 Temporal workflow interceptor for workflow-boundary governance.
 
@@ -38,8 +37,6 @@ from .errors import (
     GOVERNANCE_HALT_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
 )
-# Shared event contracts — pure/import-safe in the workflow sandbox (verified
-# by the base SDK's import-safety harness + tests/test_workflow_sandbox_import_safety.py).
 from openbox_core.contracts import events as _events
 
 from .types import Verdict
@@ -150,7 +147,6 @@ def _serialize_value(value: Any) -> Any:
         return str(value)
 
 
-# Re-export from errors.py for backward compatibility
 from .errors import GovernanceHaltError  # noqa: F401
 
 
@@ -189,24 +185,18 @@ async def _send_governance_event(
     except Exception as e:
         app_error_type = _application_error_type(e)
 
-        # GovernanceHalt / legacy GovernanceStop: workflow should terminate
-        # (client.terminate() already called by the activity, but re-raise to
-        # ensure the workflow code path stops).
         if app_error_type in (
             GOVERNANCE_HALT_ERROR_TYPE,
             GOVERNANCE_STOP_ERROR_TYPE,
         ):
             raise GovernanceHaltError(str(e))
 
-        # GovernanceBlock: the current activity is blocked; the workflow continues.
         if app_error_type == GOVERNANCE_BLOCK_ERROR_TYPE:
             return None
 
-        # Activity raised GovernanceAPIError (fail_closed + API unreachable).
         if app_error_type == GOVERNANCE_API_ERROR_TYPE:
             raise GovernanceHaltError(str(e))
 
-        # Other errors with fail_open: silently continue.
         return None
 
 
@@ -220,9 +210,6 @@ class GovernanceInterceptor(Interceptor):
         state=None,  # TemporalGovernanceState — signal verdict bridge to activities
         config=None,  # Optional GovernanceConfig
     ):
-        # api_url / api_key are accepted for backward compatibility but no longer
-        # flow to the governance activity — credentials live on GovernanceActivities.
-        # Kept on self in case downstream callers introspect.
         self.api_url = api_url.rstrip("/") if api_url else ""
         self.api_key = api_key
         self.state = state
@@ -241,7 +228,6 @@ class GovernanceInterceptor(Interceptor):
     def workflow_interceptor_class(
         self, input: WorkflowInterceptorClassInput
     ) -> Optional[Type[WorkflowInboundInterceptor]]:
-        # Capture via closure
         state = self.state
         timeout = self.api_timeout
         on_error = self.on_api_error
@@ -275,14 +261,11 @@ class GovernanceInterceptor(Interceptor):
             async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
                 info = workflow.info()
 
-                # Skip if configured
                 if info.workflow_type in skip_types:
                     return await super().execute_workflow(input)
 
-                # Multi-agent session id from memo (app-supplied; omitempty).
                 sid = read_session_from_memo()
 
-                # WorkflowStarted event
                 if send_start and workflow.patched("openbox-v2-start"):
                     await _send_governance_event(
                         _events.workflow_started(
@@ -296,14 +279,11 @@ class GovernanceInterceptor(Interceptor):
                         on_error,
                     )
 
-                # Execute workflow
                 error = None
                 try:
                     result = await super().execute_workflow(input)
 
-                    # WorkflowCompleted event (success)
                     if workflow.patched("openbox-v2-complete"):
-                        # Serialize workflow result for governance
                         workflow_output = None
                         try:
                             workflow_output = _serialize_value(result)
@@ -352,11 +332,9 @@ class GovernanceInterceptor(Interceptor):
             async def handle_signal(self, input: HandleSignalInput) -> None:
                 info = workflow.info()
 
-                # Skip if configured
                 if input.signal in skip_sigs or info.workflow_type in skip_types:
                     return await super().handle_signal(input)
 
-                # SignalReceived event - check verdict and store if "stop"
                 if workflow.patched("openbox-v2-signal"):
                     sid = read_session_from_memo()
                     result = await _send_governance_event(
@@ -373,8 +351,6 @@ class GovernanceInterceptor(Interceptor):
                         on_error,
                     )
 
-                    # If governance returned BLOCK/HALT, store verdict for activity interceptor
-                    # The next activity will check this and fail with GovernanceStop
                     verdict = (
                         Verdict.from_string(
                             result.get("verdict") or result.get("action")
