@@ -1,4 +1,3 @@
-# tests/test_temporal_hook_parity.py
 """Deterministic Temporal-context hook parity (no live OpenAI credentials).
 
 Proves that when base instrumentation is installed through the Temporal
@@ -6,13 +5,12 @@ runtime/adapter and a Temporal-shaped ActivityContext is bound, an OpenAI-shaped
 chat/completions HTTP call emits the FLAT hook interface Core consumes:
 
 - top-level ``hook_type == "http_request"``, ``http_url``, ``http_method``
-- NOT the LangGraph-observed nested shape where the useful OTel data lives only
-  under ``data.otel``
+- NOT a nested shape where the useful OTel data lives only under ``data.otel``
 
 ``semantic_type`` (e.g. ``llm_completion``) is intentionally NOT set by the SDK
-— the base wire contract computes it at Core from this flat span (identical for
-legacy Temporal, base Temporal, and LangGraph). This test asserts the flat
-inputs to that classification; the optional live-OpenAI smoke test is separate.
+— the base wire contract computes it at Core from this flat span. This test
+asserts the flat inputs to that classification; the optional live-OpenAI smoke
+test is separate.
 """
 
 import httpx
@@ -91,7 +89,7 @@ def test_openai_chat_completion_emits_flat_http_hook(server):
     assert started["http_method"] == "POST"
     assert started["http_url"].endswith("/v1/chat/completions")
     assert started["stage"] == "started"
-    # The nested LangGraph-observed shape must NOT be how data is carried.
+    # The nested OTel shape must NOT be how data is carried.
     assert "data" not in started or "otel" not in (started.get("data") or {})
 
     # Completed stage carries the same flat contract.

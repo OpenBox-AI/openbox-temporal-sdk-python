@@ -1,4 +1,3 @@
-# openbox/tracing.py
 """Function tracing decorator — a compatibility wrapper over the base SDK.
 
 ``@traced`` delegates to ``openbox_core.instrumentation.function.governed``:

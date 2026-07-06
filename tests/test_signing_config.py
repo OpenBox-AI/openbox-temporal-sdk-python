@@ -1,4 +1,3 @@
-# tests/test_signing_config.py
 """Config-level DID/key validation and signing error-mapping tests."""
 
 import base64
@@ -24,9 +23,7 @@ def _valid_seed_b64() -> str:
     return base64.b64encode(os.urandom(32)).decode("ascii")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # DID validation
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_validate_did_accepts_valid():
@@ -49,9 +46,7 @@ def test_validate_did_rejects_bad(bad):
         _validate_did(bad)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Ed25519 seed loading
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_load_seed_valid_32_bytes():
@@ -81,9 +76,7 @@ def test_seed_errors_never_echo_key_bytes():
     assert secret not in str(ei.value)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # initialize() both-or-neither + repr safety
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_initialize_requires_both_did_and_key():
@@ -137,9 +130,7 @@ def test_has_signing_false_without_credentials():
     assert cfg.get_signer() is None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Signing error mapping
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.parametrize(
@@ -170,9 +161,7 @@ def test_map_signing_error_none():
     assert isinstance(err, OpenBoxSigningError)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # P1: manual-path constructors inherit the global signer (no unsigned leak)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_governance_client_inherits_global_signer():
@@ -239,9 +228,7 @@ def test_explicit_signer_overrides_global():
     assert client._signer is other_signer
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # P3: OpenBoxSigningError is public
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_signing_error_exported_from_package_root():

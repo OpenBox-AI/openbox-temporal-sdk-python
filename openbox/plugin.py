@@ -1,4 +1,3 @@
-# openbox/plugin.py
 """
 OpenBox Plugin for Temporal Workers.
 
@@ -52,8 +51,6 @@ class OpenBoxPlugin(SimplePlugin):
         *,
         openbox_url: str,
         openbox_api_key: str,
-        # AIP DID + Ed25519 signing (both-or-neither). Required for
-        # signing_required=true agents; every Core request is signed locally.
         agent_did: Optional[str] = None,
         agent_private_key: Optional[str] = None,
         governance_timeout: float = 30.0,
@@ -68,14 +65,8 @@ class OpenBoxPlugin(SimplePlugin):
         db_libraries: Optional[Set[str]] = None,
         sqlalchemy_engine: Optional[Any] = None,
         instrument_file_io: bool = True,
-        # Propagate W3C traceparent/baggage through Temporal headers so spans
-        # started by the caller (e.g., an HTTP server) stitch to workflow and
-        # activity spans on the worker side. Uses Temporal's built-in
-        # TracingInterceptor under the hood.
         enable_trace_propagation: bool = True,
     ):
-        # 1. Validate API key (sync, uses urllib). Also loads the Ed25519 signer
-        #    and validates a signing_required=true agent via a signed GET.
         validate_api_key(
             api_url=openbox_url,
             api_key=openbox_api_key,
@@ -84,22 +75,14 @@ class OpenBoxPlugin(SimplePlugin):
             agent_private_key=agent_private_key,
         )
 
-        # Pull the loaded signer (loaded once, never re-parsed downstream).
         from .config import get_global_config
 
         _signer = get_global_config().get_signer()
 
-        # 2. Temporal governance state (signal verdicts, HITL markers, completed-
-        #    hook stop bridge), shared by both interceptors.
         from .governance_state import TemporalGovernanceState
 
         self._state = TemporalGovernanceState()
 
-        # 3. Build and OWN the base-SDK runtime; it installs all hook
-        #    instrumentation (HTTP/DB/file/function) and owns hook payload
-        #    building + evaluation + enforcement. db_libraries / sqlalchemy_engine
-        #    are accepted for compatibility but ignored (the base runtime installs
-        #    every available DB instrumentor and governs SQLAlchemy globally).
         from .core_adapter import create_core_runtime
 
         self._runtime = create_core_runtime(
@@ -119,10 +102,8 @@ class OpenBoxPlugin(SimplePlugin):
             instrument_databases=instrument_databases,
             instrument_file_io=instrument_file_io,
         )
-        # Process-lifetime install (idempotent).
         self._runtime.install_instrumentation()
 
-        # 4. Create governance config (lifecycle-event path)
         config = GovernanceConfig(
             on_api_error=governance_policy,
             api_timeout=governance_timeout,
@@ -134,7 +115,6 @@ class OpenBoxPlugin(SimplePlugin):
             hitl_enabled=hitl_enabled,
         )
 
-        # 5. Create interceptors (state-backed; base runtime owns hooks)
         from .workflow_interceptor import GovernanceInterceptor
         from .activity_interceptor import ActivityGovernanceInterceptor
 
@@ -163,18 +143,11 @@ class OpenBoxPlugin(SimplePlugin):
             ),
         ]
 
-        # Header-based OTel trace propagation. Temporal's built-in
-        # TracingInterceptor implements both client.Interceptor and
-        # worker.Interceptor — SimplePlugin auto-routes it to both sides.
-        # Without it, trace IDs set by the caller don't reach workflow/
-        # activity spans, leaving disconnected trees in the backend.
         if enable_trace_propagation:
             from temporalio.contrib.opentelemetry import TracingInterceptor
 
             interceptors.append(TracingInterceptor())
 
-        # 6. Build governance activity instance with credentials captured in self —
-        # avoids passing api_key through activity inputs / workflow history.
         from .activities import build_governance_activities
 
         governance_activities = build_governance_activities(
@@ -184,7 +157,6 @@ class OpenBoxPlugin(SimplePlugin):
             signer=_signer,
         )
 
-        # 7. Sandbox passthrough for opentelemetry
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner | None:
             if runner is None:
                 return None
@@ -197,7 +169,6 @@ class OpenBoxPlugin(SimplePlugin):
                 )
             return runner
 
-        # Store config for logging
         self._governance_policy = governance_policy
         self._governance_timeout = governance_timeout
         self._instrument_databases = instrument_databases

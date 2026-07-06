@@ -1,8 +1,6 @@
-# openbox/errors.py
 """OpenBox Temporal SDK — Unified exception hierarchy.
 
-All SDK errors inherit from OpenBoxError. Mirrors the LangGraph SDK error
-hierarchy for consistency across the OpenBox SDK family.
+All SDK errors inherit from OpenBoxError.
 
 Hierarchy:
     OpenBoxError (base)
@@ -27,12 +25,10 @@ if TYPE_CHECKING:
     from .types import Verdict
 
 
-# ═══════════════════════════════════════════════════════════════════
 # ApplicationError.type values raised by governance activities.
 # Use these constants — never string-match on error messages or
 # exception class names (brittle against locale / reformatting /
 # Temporal's ActivityError wrapping).
-# ═══════════════════════════════════════════════════════════════════
 
 GOVERNANCE_HALT_ERROR_TYPE: Final[str] = "GovernanceHalt"
 GOVERNANCE_BLOCK_ERROR_TYPE: Final[str] = "GovernanceBlock"
@@ -41,18 +37,8 @@ GOVERNANCE_API_ERROR_TYPE: Final[str] = "GovernanceAPIError"
 GOVERNANCE_STOP_ERROR_TYPE: Final[str] = "GovernanceStop"
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Base
-# ═══════════════════════════════════════════════════════════════════
-
-
 class OpenBoxError(Exception):
     """Base class for all OpenBox SDK errors."""
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Configuration errors (backward-compat: OpenBoxConfigError stays)
-# ═══════════════════════════════════════════════════════════════════
 
 
 class OpenBoxConfigError(OpenBoxError):
@@ -135,11 +121,6 @@ def map_signing_error(reason_code: str | None, fallback: str = "") -> OpenBoxSig
     return OpenBoxSigningError(msg, reason_code)
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Governance verdict errors
-# ═══════════════════════════════════════════════════════════════════
-
-
 class GovernanceBlockedError(OpenBoxError):
     """Raised by OTel hooks when governance blocks an operation.
 
@@ -176,11 +157,6 @@ class GovernanceAPIError(OpenBoxError):
     """Raised when governance API fails and policy is fail_closed."""
 
 
-# ═══════════════════════════════════════════════════════════════════
-# Guardrails errors
-# ═══════════════════════════════════════════════════════════════════
-
-
 class GuardrailsValidationError(OpenBoxError):
     """Raised when guardrails validation_passed is False.
 
@@ -194,11 +170,6 @@ class GuardrailsValidationError(OpenBoxError):
             "; ".join(self.reasons) if self.reasons else "Guardrails validation failed"
         )
         super().__init__(reason_str)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# HITL approval errors
-# ═══════════════════════════════════════════════════════════════════
 
 
 class ApprovalExpiredError(OpenBoxError):
@@ -220,11 +191,6 @@ class ApprovalTimeoutError(OpenBoxError):
             else "Approval polling timed out"
         )
         super().__init__(msg)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Utility: exception chain walker
-# ═══════════════════════════════════════════════════════════════════
 
 
 def extract_governance_error(exc: BaseException) -> GovernanceBlockedError | None:

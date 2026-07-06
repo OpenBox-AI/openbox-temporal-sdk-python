@@ -1,8 +1,7 @@
 """Shared test fixtures for governance tests.
 
-Hook payload/instrumentation behavior is now owned by the base SDK and covered
-by its conformance suite; these fixtures cover only Temporal framework
-integration (global-config lifecycle + transport-agnostic payload decoding).
+These fixtures cover Temporal framework integration: global-config lifecycle and
+transport-agnostic payload decoding.
 """
 
 import json as _json

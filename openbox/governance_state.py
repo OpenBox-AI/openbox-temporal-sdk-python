@@ -1,4 +1,3 @@
-# openbox/governance_state.py
 """Temporal-owned governance state — the small amount of Temporal semantics that
 must survive PAST a base-SDK hook callback.
 
@@ -44,8 +43,6 @@ class TemporalGovernanceState:
         # (workflow_id, run_id, activity_id) -> (verdict, reason) from a completed hook
         self._completed_stop: dict[_RunActivityKey, Tuple[Verdict, Optional[str]]] = {}
 
-    # ── Signal verdicts (workflow interceptor → next activity) ─────────────
-
     def set_signal_verdict(
         self, workflow_id: str, run_id: str, verdict: Verdict, reason: Optional[str] = None
     ) -> None:
@@ -68,8 +65,6 @@ class TemporalGovernanceState:
                 return None
             return verdict, reason
 
-    # ── HITL pending-approval markers ──────────────────────────────────────
-
     def mark_pending_approval(self, workflow_id: str, run_id: str, activity_id: str) -> None:
         with self._lock:
             self._pending_approval.add((workflow_id, run_id, activity_id))
@@ -81,8 +76,6 @@ class TemporalGovernanceState:
     def clear_pending_approval(self, workflow_id: str, run_id: str, activity_id: str) -> None:
         with self._lock:
             self._pending_approval.discard((workflow_id, run_id, activity_id))
-
-    # ── Completed-hook stop bridge (base adapter → activity interceptor) ───
 
     def record_completed_stop(
         self,

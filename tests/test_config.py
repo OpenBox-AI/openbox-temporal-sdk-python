@@ -1,4 +1,3 @@
-# tests/test_config.py
 """
 Comprehensive pytest tests for the OpenBox SDK config module.
 
@@ -28,10 +27,6 @@ from openbox.config import (
     OpenBoxInsecureURLError,
     API_KEY_PATTERN,
 )
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# GovernanceConfig Dataclass Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestGovernanceConfigDefaults:
@@ -226,9 +221,7 @@ class TestGovernanceConfigMutability:
         assert "HitlX" not in config2.skip_hitl_activity_types
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # _validate_url_security() Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestValidateUrlSecurity:
@@ -290,9 +283,7 @@ class TestValidateUrlSecurity:
         assert "Insecure HTTP URL detected" in str(exc_info.value)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # _validate_api_key_format() Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestValidateApiKeyFormat:
@@ -419,9 +410,7 @@ class TestApiKeyPattern:
         assert API_KEY_PATTERN.match("obx_staging_abc") is None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # _GlobalConfig Class Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestGlobalConfigClass:
@@ -549,11 +538,6 @@ class TestGlobalConfigClass:
         assert "api_url=''" in repr_str
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# get_global_config() Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 class TestGetGlobalConfig:
     """Test get_global_config() function."""
 
@@ -579,11 +563,6 @@ class TestGetGlobalConfig:
 
         # Restore original
         config.api_url = original_url
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# initialize() Function Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestInitializeWithValidateFalse:
@@ -803,11 +782,6 @@ class TestInitializeWithValidateTrue:
         assert call_kwargs["timeout"] == 45.0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Exception Classes Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 class TestExceptionClasses:
     """Test exception classes and their inheritance."""
 
@@ -880,11 +854,6 @@ class TestExceptionClasses:
             caught_type = "config"
 
         assert caught_type == "auth"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Edge Cases and Integration Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestEdgeCases:

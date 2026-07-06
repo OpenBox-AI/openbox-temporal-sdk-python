@@ -1,4 +1,3 @@
-# tests/test_worker.py
 """
 Comprehensive pytest tests for the OpenBox SDK worker module.
 
@@ -11,7 +10,6 @@ Bootstrap model under test (base-SDK instrumentation):
   create_openbox_worker() validates the key, creates a TemporalGovernanceState,
   builds+owns an openbox_core runtime via create_core_runtime(...), installs
   instrumentation, then wires both interceptors with that shared state.
-  There is no WorkflowSpanProcessor / setup_opentelemetry_for_governance anymore.
 """
 
 import functools
@@ -22,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 from openbox.governance_state import TemporalGovernanceState
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Shared patch stack
 #
 # create_openbox_worker() imports these names differently:
@@ -35,9 +32,7 @@ from openbox.governance_state import TemporalGovernanceState
 # create_core_runtime is ALWAYS patched: the real one builds an openbox_core
 # runtime and install_instrumentation() patches HTTP/DB/file globally + can hit
 # the network. The mock's .install_instrumentation is a MagicMock so tests can
-# assert it was invoked exactly once (the observable "instrumentation installed"
-# behavior that replaced setup_opentelemetry_for_governance).
-# ─────────────────────────────────────────────────────────────────────────────
+# assert it was invoked exactly once.
 
 _PATCH_TARGETS = [
     ("mock_worker_class", "openbox.worker.Worker"),
@@ -94,11 +89,6 @@ def with_worker_patches(func):
     return wrapper
 
 
-# ===============================================================================
-# With OpenBox Config Tests
-# ===============================================================================
-
-
 class TestCreateOpenboxWorkerWithConfig:
     """Test create_openbox_worker() with OpenBox configuration."""
 
@@ -127,8 +117,7 @@ class TestCreateOpenboxWorkerWithConfig:
     def test_builds_and_installs_core_runtime(self, **m):
         """Builds an openbox_core runtime and installs instrumentation exactly once.
 
-        Replaces the old setup_opentelemetry_for_governance / WorkflowSpanProcessor
-        assertions: instrumentation setup now flows through create_core_runtime +
+        Instrumentation setup flows through create_core_runtime and
         runtime.install_instrumentation().
         """
         from openbox.worker import create_openbox_worker
@@ -312,11 +301,6 @@ class TestCreateOpenboxWorkerWithConfig:
         assert interceptors[0] == mock_workflow_interceptor
         assert interceptors[1] == mock_activity_interceptor_instance
         assert interceptors[2] == mock_custom_interceptor
-
-
-# ===============================================================================
-# Parameter Passthrough Tests
-# ===============================================================================
 
 
 class TestParameterPassthrough:
@@ -582,11 +566,6 @@ class TestParameterPassthrough:
         )
 
 
-# ===============================================================================
-# Configuration Options Tests
-# ===============================================================================
-
-
 class TestConfigurationOptions:
     """Test configuration options for governance."""
 
@@ -820,8 +799,7 @@ class TestConfigurationOptions:
     def test_instrument_databases_passed_to_core_runtime(self, **m):
         """instrument_databases is forwarded to create_core_runtime.
 
-        The base runtime owns DB instrumentation now, so the flag rides on
-        create_core_runtime instead of the removed setup_opentelemetry_for_governance.
+        DB instrumentation configuration is owned by create_core_runtime.
         """
         from openbox.worker import create_openbox_worker
 
@@ -897,11 +875,6 @@ class TestConfigurationOptions:
         assert "sqlalchemy_engine" not in m["mock_create_core_runtime"].call_args.kwargs
 
 
-# ===============================================================================
-# Logging Output Tests
-# ===============================================================================
-
-
 class TestLogOutput:
     """Test initialization status logging."""
 
@@ -963,11 +936,6 @@ class TestLogOutput:
         assert "hitl=disabled" in log_text
 
 
-# ===============================================================================
-# Return Value Tests
-# ===============================================================================
-
-
 class TestReturnValue:
     """Test return value of create_openbox_worker()."""
 
@@ -987,11 +955,6 @@ class TestReturnValue:
         )
 
         assert result == mock_worker
-
-
-# ===============================================================================
-# Edge Cases Tests
-# ===============================================================================
 
 
 class TestEdgeCases:
