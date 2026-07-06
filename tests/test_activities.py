@@ -589,8 +589,9 @@ class TestSendGovernanceEvent:
             assert headers["Authorization"] == "Bearer test-api-key"
             from openbox import __version__
 
-            assert headers["User-Agent"] == f"OpenBox-SDK/{__version__}"
-            assert headers["X-OpenBox-SDK-Version"] == __version__
+            sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"
+            assert headers["User-Agent"] == f"OpenBox-SDK/{sdk_identifier}"
+            assert headers["X-OpenBox-SDK-Version"] == sdk_identifier
 
     # -------------------------------------------------------------------------
     # Verdict types tests

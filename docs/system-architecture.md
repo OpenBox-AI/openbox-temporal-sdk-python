@@ -730,12 +730,12 @@ Body and header capture is owned by the `openbox_core` base runtime (see the bas
 
 2. Governance requests
    → Include Authorization: Bearer {api_key} header
-   → Include User-Agent: OpenBox-SDK/{version} header
-   → Include X-OpenBox-SDK-Version: {version} header
+   → Include User-Agent: OpenBox-SDK/openbox-temporal-python-v{version} header
+   → Include X-OpenBox-SDK-Version: openbox-temporal-python-v{version} header
    → Server validates on each request
 ```
 
-**SDK Version Header:** Core requests include `X-OpenBox-SDK-Version` (and `User-Agent: OpenBox-SDK/{version}`) with the SDK version. The version is a **static `__version__` in `openbox/__init__.py`** — it is intentionally NOT read via `importlib.metadata`, because a metadata lookup opens a file and, with file instrumentation active, would re-enter the file hook. The header is assembled in `request_signing.py`, which imports the static `__version__`.
+**SDK Version Header:** Core requests include `X-OpenBox-SDK-Version: openbox-temporal-python-v{version}` (and `User-Agent: OpenBox-SDK/openbox-temporal-python-v{version}`) with the SDK identifier. The package version is a **static `__version__` in `openbox/__init__.py`** — it is intentionally NOT read via `importlib.metadata`, because a metadata lookup opens a file and, with file instrumentation active, would re-enter the file hook. The header is assembled in `request_signing.py`, which imports the static `__version__`.
 
 ### Temporal Sandbox Compliance
 
