@@ -1,19 +1,14 @@
-# openbox/hitl.py
 """OpenBox Temporal SDK — Human-in-the-Loop (HITL) approval handling.
 
 NOT sandbox-safe — uses temporalio.exceptions. Do NOT import from
 workflow_interceptor.py or other workflow-context code.
-
-Extracted from activity_interceptor.py. Uses flat GovernanceConfig fields
-(hitl_enabled, skip_hitl_activity_types) — no nested HITLConfig.
 
 Temporal HITL uses the retry-based pattern:
   1. First attempt: set buffer.pending_approval=True, raise retryable ApprovalPending
   2. On retry: poll approval status, handle terminal verdict (expired/approved/rejected)
      or raise retryable ApprovalPending again to keep waiting.
 
-handle_approval_response() takes the raw dict from GovernanceClient.poll_approval()
-and raises the same ApplicationError types as the original inline code.
+handle_approval_response() takes the raw dict from GovernanceClient.poll_approval().
 """
 
 from __future__ import annotations
@@ -74,10 +69,8 @@ def handle_approval_response(
             A human explicitly rejected the request (BLOCK/HALT verdict).
     """
     if response is None:
-        # API call failed — retry activity to poll again
         raise_approval_pending("Failed to check approval status, retrying...")
 
-    # Check expiration before verdict (expired flag takes precedence)
     if response.get("expired"):
         from temporalio.exceptions import ApplicationError
 
@@ -88,16 +81,20 @@ def handle_approval_response(
             non_retryable=True,
         )
 
+    from openbox_core.contracts.results import ApprovalResult
+
     from .types import Verdict
 
-    verdict = Verdict.from_string(response.get("verdict") or response.get("action"))
+    approval = ApprovalResult.from_dict(response)
+    verdict = approval.verdict
+
+    if verdict is None:
+        raise_approval_pending(f"Awaiting approval for activity {activity_type}")
 
     if verdict == Verdict.ALLOW:
-        # Approval granted — caller clears buffer.pending_approval and proceeds
         return True
 
     if verdict.should_stop():
-        # Human explicitly rejected (BLOCK or HALT)
         reason = response.get("reason", "Activity rejected")
         from temporalio.exceptions import ApplicationError
 
@@ -107,7 +104,6 @@ def handle_approval_response(
             non_retryable=True,
         )
 
-    # Still pending (REQUIRE_APPROVAL / CONSTRAIN) — keep retrying
     raise_approval_pending(f"Awaiting approval for activity {activity_type}")
 
 

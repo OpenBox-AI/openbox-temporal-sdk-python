@@ -3,7 +3,8 @@
 OpenBox SDK provides **governance and observability** for Temporal workflows by capturing workflow/activity lifecycle events, HTTP telemetry, database queries, and file operations, then sending them to OpenBox Core for policy evaluation.
 
 **Key Features:**
-- 6 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted)
+- 7 event types (WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted, Handoff)
+- Multi-agent sessions — propagate a shared `multi_agent_session_id` across workflow + activity events
 - 5-tier verdict system (ALLOW, CONSTRAIN, REQUIRE_APPROVAL, BLOCK, HALT)
 - **Hook-level governance** — per-operation evaluation (HTTP requests, file I/O, database queries, function tracing) with started/completed stages
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
@@ -151,8 +152,6 @@ worker = create_openbox_worker(
 
     # Database instrumentation
     instrument_databases=True,
-    db_libraries={"psycopg2", "sqlalchemy"},  # None = all available
-    sqlalchemy_engine=engine,  # pass pre-existing engine for query capture
 
     # File I/O instrumentation
     instrument_file_io=False,  # disabled by default
@@ -199,6 +198,48 @@ OpenBox Core returns a verdict indicating what action the SDK should take.
 | SignalReceived | Signal received | workflow_id, signal_name, signal_args |
 | ActivityStarted | Activity begins | activity_id, activity_type, activity_input |
 | ActivityCompleted | Activity ends | activity_id, activity_type, activity_input, activity_output, spans, status, duration |
+| Handoff | Agent hands off to another agent | from_agent_did, multi_agent_session_id |
+
+When a workflow runs as part of a multi-agent session (see below), every event
+above also carries `multi_agent_session_id`. The field is omitted when no
+session id is supplied.
+
+---
+
+## Multi-Agent Sessions
+
+Group the work of several agents under one shared `multi_agent_session_id`. The
+SDK only **propagates** the id you supply — it never invents one, and it owns no
+routing, session minting, or agent registry (those stay in your application).
+
+**Supply the id** via the Temporal workflow memo at start time:
+
+```python
+await client.start_workflow(
+    MyWorkflow.run,
+    arg,
+    id="order-123",
+    task_queue="my-queue",
+    memo={"openbox_multi_agent_session_id": session_id},
+)
+```
+
+The SDK then tags every governance event (workflow, activity, and hook events)
+with that id, propagating it from the workflow to its activities automatically.
+
+**Emit an explicit handoff** from inside workflow code:
+
+```python
+from openbox import emit_handoff
+
+await emit_handoff(
+    multi_agent_session_id=session_id,
+    from_agent_did="did:aip:...",   # the sending agent
+)
+```
+
+The receiving agent is derived server-side from the signed identity and is never
+sent. `emit_handoff` validates its arguments locally before any network call.
 
 ---
 
@@ -231,7 +272,7 @@ OpenBox Core can validate and redact sensitive data before/after activity execut
 
 ## Error Handling
 
-Configure error policy via `on_api_error` (constants available as `hook_governance.FAIL_OPEN` / `FAIL_CLOSED`):
+Configure error policy via the `governance_policy` parameter (`"fail_open"` / `"fail_closed"`):
 
 | Policy | Behavior |
 |--------|----------|
@@ -259,15 +300,12 @@ Configure error policy via `on_api_error` (constants available as `hook_governan
 - `redis` — native OTel `request_hook`/`response_hook`
 - `sqlalchemy` — `before/after_cursor_execute` event listeners
 
-**SQLAlchemy Note:** If your SQLAlchemy engine is created before `create_openbox_worker()` runs (e.g., at module import time), you must pass it via the `sqlalchemy_engine` parameter. Without this, `SQLAlchemyInstrumentor` only patches future `create_engine()` calls and won't capture queries on pre-existing engines.
+**SQLAlchemy Note:** Query-level governance works on pre-existing engines automatically — even engines created before `create_openbox_worker()` runs (e.g., at module import time) — because the base runtime governs SQLAlchemy via a global `Engine` event listener. No engine handle needs to be passed in. The `db_libraries` and `sqlalchemy_engine` parameters are still accepted for backward compatibility but are no longer required and have no effect: the base runtime installs every available database instrumentor best-effort.
 
 ```python
-from db.engine import engine
-
 worker = create_openbox_worker(
     ...,
-    db_libraries={"psycopg2", "sqlalchemy"},
-    sqlalchemy_engine=engine,
+    instrument_databases=True,  # default; installs all available DB instrumentors
 )
 ```
 
@@ -363,7 +401,7 @@ Every database operation is evaluated at `started` (pre-query, can block) and `c
 
 ### Function Tracing
 
-Functions decorated with `@traced` are automatically governed when `hook_governance` is configured:
+Functions decorated with `@traced` are automatically governed when a worker (or plugin) has installed the base runtime. `@traced` wraps the base SDK's `governed()` decorator:
 
 | Stage | Trigger | Data Available |
 |-------|---------|----------------|
@@ -372,15 +410,13 @@ Functions decorated with `@traced` are automatically governed when `hook_governa
 
 **How it works (Function Tracing):**
 
-1. `@traced` decorator wrapper starts OTel span
-2. → SDK sends `started` governance evaluation with function name and module
-3. If verdict is BLOCK/HALT → `GovernanceBlockedError` raised, function never executes
+1. `@traced` delegates to the base SDK's `governed()` decorator
+2. → the base runtime sends a `started` FUNCTION_CALL evaluation with function name and module
+3. If verdict is BLOCK/HALT → the call is blocked and the function never executes
 4. Function executes normally
-5. → SDK sends `completed` governance evaluation with result or error info
-6. If verdict is BLOCK/HALT → `GovernanceBlockedError` raised after execution
-7. When `hook_governance` is not configured → zero overhead, no governance calls
-
-**Governed span tracking:** When hook-level governance is active, the SDK marks HTTP spans as "governed" so the OTel `on_end` processor skips buffering them — preventing duplicate spans.
+5. → the base runtime sends a `completed` FUNCTION_CALL evaluation with result or error info
+6. If verdict is BLOCK/HALT → the block is surfaced after execution
+7. When no base runtime is installed → transparent passthrough, zero governance calls
 
 ---
 
@@ -391,115 +427,86 @@ See [System Architecture](./docs/system-architecture.md) for detailed component 
 **High-Level Flow:**
 
 ```
-Workflow/Activity → Interceptors → Span Processor → OpenBox Core API
-                                                    ↓
-                                            Returns Verdict
-                                                    ↓
-                                    (ALLOW, BLOCK, HALT, etc.)
+Workflow / Activity lifecycle → Temporal SDK interceptors → OpenBox Core API
+                                                            ↓
+                                                    Returns Verdict
+                                                            ↓
+                                            (ALLOW, BLOCK, HALT, REQUIRE_APPROVAL)
 
-Hook-Level (per HTTP request):
-Activity HTTP Call → OTel Hook → hook_governance → API (started) → Allow/Block
-                   → Response  → hook_governance → API (completed) → Allow/Block
-
-Hook-Level (per file operation):
-Activity open()       → hook_governance → API (started)   → Allow/Block
-Activity read/write() → hook_governance → API (started)   → Allow/Block
-                      → hook_governance → API (completed) → Allow/Block
-Activity close()      → hook_governance → API (completed) → Allow/Block
-
-Hook-Level (per DB query):
-Activity DB Call → db_governance_hooks → hook_governance → API (started) → Allow/Block
-                → Query executes     → hook_governance → API (completed)
-
-Hook-Level (per @traced function):
-@traced call    → hook_governance → API (started) → Allow/Block
-                → Function runs  → hook_governance → API (completed)
+Hook-Level (per HTTP request / DB query / file op / @traced fn):
+Operation → base-SDK instrumentation → OpenBox Core API (started)   → Allow/Block
+          → Operation runs           → OpenBox Core API (completed) → Allow/Block
 ```
 
-**Module responsibilities:**
-- `otel_setup.py` — OTel instrumentation, hooks, TracedFile wrapper
-- `hook_governance.py` — Shared governance evaluator (payload building, API calls, verdict handling)
-- `db_governance_hooks.py` — Per-library DB governance wrappers (wrapt, OTel hooks, SQLAlchemy events)
-- `span_processor.py` — Span buffering, activity context tracking
-- `activity_interceptor.py` — Activity lifecycle governance events
+The Temporal worker/plugin builds and owns an `openbox_core` runtime that installs
+all hook instrumentation. Hook payload building, evaluation, and enforcement are
+owned entirely by the base SDK; the Temporal SDK maps the resulting verdicts onto
+Temporal-native effects.
+
+**Responsibility split:**
+
+Base SDK (`openbox_core`):
+- HTTP / DB / file / function hook instrumentation
+- Hook payload shape, evaluation, and enforcement
+
+Temporal SDK (this package):
+- `workflow_interceptor.py` / `activity_interceptor.py` — workflow/activity/signal lifecycle governance events (via workflow-safe activities)
+- `governance_state.py` — `TemporalGovernanceState`: signal-verdict bridging, HITL pending-approval markers, completed-hook stop/halt propagation
+- `core_adapter.py` — builds the base runtime (`create_core_runtime`) and maps base verdicts to Temporal effects (`TemporalFrameworkAdapter`)
 
 ---
 
 ## Advanced Usage
 
-For manual control, import individual components:
+The supported integration is a single call. Both `create_openbox_worker(...)` and
+`OpenBoxPlugin(...)` build and own the base `openbox_core` runtime, install all
+hook instrumentation, register the governance interceptors, and wire the
+`send_governance_event` activity for you — there is no manual OpenTelemetry or
+span-processor setup to perform.
+
+Worker factory:
 
 ```python
-from openbox import (
-    initialize,
-    WorkflowSpanProcessor,
-    GovernanceInterceptor,
-    GovernanceConfig,
-)
-from openbox.otel_setup import setup_opentelemetry_for_governance
-from openbox.activity_interceptor import ActivityGovernanceInterceptor
-from openbox.activities import build_governance_activities
-from openbox.hook_governance import FAIL_OPEN, FAIL_CLOSED  # error policy constants
+import os
+from openbox import create_openbox_worker
 
-# 1. Initialize SDK
-initialize(api_url="http://localhost:8086", api_key="obx_test_key_1")
-
-# 2. Create span processor
-span_processor = WorkflowSpanProcessor(
-    ignored_url_prefixes=["http://localhost:8086"]
-)
-
-# 3. Setup OTel instrumentation (governance always enabled)
-setup_opentelemetry_for_governance(
-    span_processor,
-    api_url="http://localhost:8086",
-    api_key="obx_test_key_1",
-    sqlalchemy_engine=engine,  # optional: instrument pre-existing engine
-)
-
-# 4. Create governance config
-config = GovernanceConfig(
-    on_api_error="fail_closed",
-    api_timeout=30.0,
-)
-
-# 5. Create interceptors
-workflow_interceptor = GovernanceInterceptor(
-    api_url="http://localhost:8086",
-    api_key="obx_test_key_1",
-    span_processor=span_processor,
-    config=config,
-)
-
-activity_interceptor = ActivityGovernanceInterceptor(
-    api_url="http://localhost:8086",
-    api_key="obx_test_key_1",
-    span_processor=span_processor,
-    config=config,
-)
-
-# 6. Build the governance activity instance (credentials captured on `self`
-# so they never flow through workflow history).
-governance_activities = build_governance_activities(
-    api_url="http://localhost:8086",
-    api_key="obx_test_key_1",
-)
-
-# 7. Create worker
-from temporalio.worker import Worker
-from temporalio.contrib.opentelemetry import TracingInterceptor
-worker = Worker(
+worker = create_openbox_worker(
     client=client,
     task_queue="my-task-queue",
     workflows=[MyWorkflow],
-    activities=[my_activity, governance_activities.send_governance_event],
-    interceptors=[
-        workflow_interceptor,
-        activity_interceptor,
-        TracingInterceptor(),  # W3C header propagation for OTel spans
-    ],
+    activities=[my_activity],
+    openbox_url=os.getenv("OPENBOX_URL"),
+    openbox_api_key=os.getenv("OPENBOX_API_KEY"),
+    governance_policy="fail_closed",
+    governance_timeout=30.0,
+    instrument_databases=True,
+    instrument_file_io=True,
+)
+
+await worker.run()
+```
+
+Plugin (Temporal >= 1.23.0) — attach to a plain `Worker`:
+
+```python
+from temporalio.worker import Worker
+from openbox.plugin import OpenBoxPlugin
+
+worker = Worker(
+    client,
+    task_queue="my-task-queue",
+    workflows=[MyWorkflow],
+    activities=[my_activity],
+    plugins=[OpenBoxPlugin(
+        openbox_url=os.getenv("OPENBOX_URL"),
+        openbox_api_key=os.getenv("OPENBOX_API_KEY"),
+        governance_policy="fail_closed",
+    )],
 )
 ```
+
+Both entry points accept the same governance, HITL, signing, and instrumentation
+options (see [Configuration](./docs/configuration.md)).
 
 ---
 
@@ -515,13 +522,17 @@ worker = Worker(
 
 ## Testing
 
-The SDK includes comprehensive test coverage with 15 test files:
+The SDK includes comprehensive test coverage under `tests/`:
 
 ```bash
 pytest tests/
 ```
 
-Test files: `test_activities.py`, `test_activity_interceptor.py`, `test_config.py`, `test_db_governance_hooks.py`, `test_file_governance_hooks.py`, `test_otel_hook_pause.py`, `test_otel_hook_pause_db.py`, `test_otel_setup.py`, `test_plugin.py`, `test_plugin_integration.py`, `test_span_processor.py`, `test_tracing.py`, `test_types.py`, `test_worker.py`, `test_workflow_interceptor.py`
+Coverage spans the worker factory and plugin, workflow/activity/signal
+interceptors, HITL approval flow, request signing, public-API compatibility, and
+parity with the base SDK's hook governance (`test_temporal_hook_parity.py`,
+`test_core_conformance_suite.py`). Hook instrumentation internals (HTTP/DB/file
+payload shape) are verified in the base SDK's own conformance suite.
 
 ---
 

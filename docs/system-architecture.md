@@ -1,14 +1,20 @@
 # System Architecture
 
-**Last Updated:** 2026-03-23
-**Version:** 1.2.1
-**Total LOC:** 6,000+ (across 17 Python files)
+**Last Updated:** 2026-07-03
+**Version:** 1.3.0
 
 ---
 
 ## Overview
 
-OpenBox SDK for Temporal Workflows is a governance and observability layer that sits between Temporal workflows and OpenBox Core. It captures workflow/activity lifecycle events, HTTP telemetry, database queries, and file operations, then sends them to OpenBox Core for policy evaluation.
+OpenBox SDK for Temporal Workflows is a governance and observability layer that sits between Temporal workflows and OpenBox Core.
+
+Responsibilities are split across two packages:
+
+- **Base SDK (`openbox_core`)** — HTTP/DB/file/function hook instrumentation, the hook payload shape, hook evaluation, and enforcement. The Temporal worker/plugin builds and owns an `openbox_core` runtime that installs all of this instrumentation.
+- **Temporal SDK (this package)** — lifecycle governance (workflow/activity/signal events sent via workflow-safe activities), HITL retry, signal-verdict bridging, and completed-hook stop/halt propagation, coordinated through `TemporalGovernanceState`.
+
+The worker/plugin captures workflow and activity lifecycle events and sends them to OpenBox Core for policy evaluation, while the base runtime it installs governs each HTTP call, database query, file operation, and `@traced` function in real time.
 
 ---
 
@@ -36,36 +42,40 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
 │  │                          │    │ - HITL approval polling      │  │
 │  │ Sends via activity       │    │ Sends via direct HTTP        │  │
 │  └────────────┬─────────────┘    └──────────┬───────────────────┘  │
-│               │                               │                      │
+│               │  state=                       │  state=              │
 │               ▼                               ▼                      │
 │  ┌────────────────────────────────────────────────────────────────┐│
-│  │            WorkflowSpanProcessor (Span Buffering)              ││
+│  │        TemporalGovernanceState (governance_state.py)          ││
 │  │  ────────────────────────────────────────────────────────────  ││
-│  │  - Buffer spans per workflow_id                                ││
-│  │  - Store HTTP bodies/headers separately (privacy)              ││
-│  │  - Map trace_id → workflow_id for child spans                  ││
-│  │  - Store verdicts from SignalReceived                          ││
+│  │  Workflow-safe, run-scoped state shared by both interceptors:  ││
+│  │  - Signal verdicts (BLOCK/HALT fail the next activity)         ││
+│  │  - HITL pending-approval markers (retry polls status)          ││
+│  │  - Completed-hook stop bridge (BLOCK skip / HALT terminate)    ││
 │  └────────────────────────────────────────────────────────────────┘│
 │               │                                                      │
-│               ▼                                                      │
+│               ▼  (verdict → Temporal effect)                        │
 │  ┌────────────────────────────────────────────────────────────────┐│
-│  │ Hook-Level Governance Layer (Real-time per-operation)         ││
+│  │      TemporalFrameworkAdapter + core_activity_scope           ││
+│  │                        (core_adapter.py)                       ││
 │  │  ────────────────────────────────────────────────────────────  ││
-│  │ - HTTP request/response hooks evaluate at started/completed    ││
-│  │ - Database query hooks evaluate before/after execution         ││
-│  │ - File I/O hooks evaluate on open/read/write operations        ││
-│  │ - @traced decorator evaluates function calls                   ││
-│  └────────────────────────────────────────────────────────────────┘│
-│               │                                                      │
-│               ▼                                                      │
-│  ┌────────────────────────────────────────────────────────────────┐│
-│  │         OpenTelemetry Instrumentation Layer                    ││
-│  │  ────────────────────────────────────────────────────────────  ││
-│  │  HTTP:    httpx, requests, urllib3, urllib                     ││
-│  │  Database: PostgreSQL, MySQL, MongoDB, Redis, SQLAlchemy      ││
-│  │  File I/O: open(), read(), write()                            ││
-│  │  Functions: @traced decorator                                 ││
-│  └────────────────────────────────────────────────────────────────┘│
+│  │  - Maps base verdicts onto Temporal-native effects            ││
+│  │  - core_activity_scope binds the shared ActivityContext       ││
+│  │    (the only hook-context bridge)                              ││
+│  └───────────────────────────────┬────────────────────────────────┘│
+└──────────────────────────────────┼──────────────────────────────────┘
+                                    │  builds + owns
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│            openbox_core Base Runtime (installed by worker/plugin)   │
+│  ────────────────────────────────────────────────────────────────   │
+│  Owns HTTP/DB/file/function hook instrumentation, the hook payload   │
+│  shape, hook evaluation, and enforcement:                            │
+│    HTTP:      httpx, requests, urllib3, urllib                       │
+│    Database:  PostgreSQL, MySQL, SQLite, MongoDB, Redis, SQLAlchemy  │
+│    File I/O:  open(), read(), write()                                │
+│    Functions: @traced (wraps openbox_core governed())               │
+│  Resolves per-operation activity context from the ContextStore that │
+│  core_activity_scope binds into.                                     │
 └─────────────────────────────────────────────────────────────────────┘
              │
              ▼
@@ -95,18 +105,21 @@ OpenBox SDK for Temporal Workflows is a governance and observability layer that 
 
 **File:** `openbox/plugin.py`
 
-`OpenBoxPlugin` extends Temporal's `SimplePlugin` base class, providing a drop-in integration for the AI Partner Ecosystem. It composes all existing SDK components (interceptors, OTel setup, governance activities) without modifying them.
+`OpenBoxPlugin` extends Temporal's `SimplePlugin` base class, providing a drop-in integration for the AI Partner Ecosystem. It composes the SDK's interceptors, the base-SDK runtime, and the governance activity.
 
 ```
 Worker(client, task_queue, workflows, activities,
        plugins=[OpenBoxPlugin(openbox_url=..., openbox_api_key=...)])
 
 OpenBoxPlugin.__init__():
-  → validate_api_key()                        # config.py
-  → WorkflowSpanProcessor()                   # span_processor.py
-  → setup_opentelemetry_for_governance()       # otel_setup.py
-  → GovernanceInterceptor()                    # workflow_interceptor.py
-  → ActivityGovernanceInterceptor()            # activity_interceptor.py
+  → validate_api_key()                        # config.py (also loads Ed25519 signer)
+  → TemporalGovernanceState()                 # governance_state.py
+  → create_core_runtime(state=...)            # core_adapter.py (base runtime)
+  → runtime.install_instrumentation()         # installs HTTP/DB/file/function hooks
+  → GovernanceConfig(...)                      # config.py
+  → GovernanceInterceptor(state=...)           # workflow_interceptor.py
+  → ActivityGovernanceInterceptor(state=..., client=...)  # activity_interceptor.py
+  → TracingInterceptor()                       # temporalio W3C trace propagation
   → SimplePlugin.__init__(interceptors, activities, workflow_runner)
 
 OpenBoxPlugin.configure_worker(config):
@@ -114,11 +127,14 @@ OpenBoxPlugin.configure_worker(config):
   → super().configure_worker(config)            # appends interceptors, activities
 ```
 
+Both interceptors now take `state=` (a `TemporalGovernanceState`), not a span processor. `create_openbox_worker(...)` follows the same sequence with the same public signature.
+
 **Key design choices:**
-- Composition-only — no changes to existing modules
+- The base runtime is built and owned by the worker/plugin; `install_instrumentation()` runs once for the process lifetime (idempotent)
 - Sandbox passthrough for `opentelemetry` via `workflow_runner` callback
 - `configure_worker()` captures Temporal client ref for HALT terminate calls
 - Plugin name: `"openbox.OpenBoxPlugin"` per Temporal's naming standard
+- `db_libraries` / `sqlalchemy_engine` are accepted for compatibility but ignored: the base runtime installs every available DB instrumentor and governs SQLAlchemy via a global Engine listener (covers pre-existing engines)
 
 ---
 
@@ -133,7 +149,7 @@ OpenBoxPlugin.configure_worker(config):
 **Key Characteristics:**
 - Workflow-safe (no HTTP, no datetime, no os.stat)
 - Events sent via `send_governance_event` activity for determinism
-- Stores BLOCK/HALT verdicts from SignalReceived for activity interceptor
+- Records BLOCK/HALT verdicts from SignalReceived in `TemporalGovernanceState` for the activity interceptor
 
 **Event Flow:**
 ```
@@ -153,8 +169,8 @@ OpenBoxPlugin.configure_worker(config):
 
 4. Signal received
    → Sends SignalReceived via activity
-   → If verdict is BLOCK/HALT, stores in span processor
-   → Next activity will check verdict and fail
+   → If verdict is BLOCK/HALT, calls state.set_signal_verdict(wf, run, verdict, reason)
+   → Next activity reads state.get_signal_verdict() and fails
 ```
 
 **Code Location:** `openbox/workflow_interceptor.py`
@@ -166,34 +182,35 @@ OpenBoxPlugin.configure_worker(config):
 **Key Characteristics:**
 - Activity-only (direct HTTP allowed)
 - Captures activity arguments and return values
-- Collects child spans (HTTP, database, file I/O)
+- Binds the shared `ActivityContext` via `core_activity_scope` so base hooks fire during user code
 - Enforces guardrails redaction
 - Polls for HITL approval on retry
 
 **Event Flow:**
 ```
 1. Activity starts
-   → Check for pending BLOCK/HALT verdict from signal
-   → Check for pending approval and poll if present
-   → Register workflow buffer if needed
+   → Check pending signal verdict via state.get_signal_verdict()
+   → Check pending approval via state.has_pending_approval() and poll if present
+   → Clear any stale within-activity abort flag from the base ContextStore
    → Send ActivityStarted event (optional)
    → Apply input guardrails if present
 
 2. Activity executes
-   → Create OTel span with trace_id mapping
+   → Open OTel span, then core_activity_scope binds the shared ActivityContext
    → User activity code runs
-   → Child spans (HTTP/DB/file) captured automatically
-   → Hook-level governance evaluates each operation in real-time
+   → Base runtime fires HTTP/DB/file/function hooks and governs each operation;
+     a BLOCK/HALT/approval is raised as a Temporal-native error by the adapter
 
 3. Activity completes
-   → Collect child spans from buffer
-   → Send ActivityCompleted event with input/output/spans
+   → take_completed_stop() + base within-activity abort flag decide whether the
+     operation was governed-stopped (HALT → terminate; BLOCK → skip completed event)
+   → Send ActivityCompleted event with input/output (unless aborted)
    → Apply output guardrails if present
    → Handle REQUIRE_APPROVAL verdict (retry with polling)
 
 4. Activity retries (if approval pending)
    → Poll /api/v1/governance/approval
-   → If approved: clear pending, proceed
+   → If approved: clear pending via state.clear_pending_approval(), proceed
    → If rejected: raise non-retryable error
    → If expired: terminate workflow
 ```
@@ -262,421 +279,125 @@ OpenBoxError (base)
   - `REQUIRE_APPROVAL` → raise `ApprovalPending`
   - `BLOCK` / `HALT` → raise `GovernanceStop`
 
-**Used By:** Activity interceptor, hook governance, workflow interceptor
+**Used By:** Activity interceptor and workflow interceptor for lifecycle-event verdicts
 
 **Code Location:** `openbox/verdict_handler.py`
 
 ---
 
-### 3. Span Buffering Layer
+### 3. Governance State (`governance_state.py`)
 
-#### WorkflowSpanProcessor (continued)
+#### TemporalGovernanceState
 
-**Responsibility:** Buffer spans per workflow and merge body/header data
+**Responsibility:** Hold the small amount of Temporal semantics that must survive past a base-SDK hook callback — signal verdicts, HITL pending markers, and the completed-hook stop bridge. Workflow-safe, thread-safe, and shared by both interceptors.
 
-**Key Data Structures:**
+The base SDK (`openbox_core`) owns hook context, hook payload building, hook evaluation, and the within-activity abort short-circuit (its `ContextStore`). This object holds only the effects the base runtime cannot express itself. All keys are **run-scoped**: state from a prior run with the same `workflow_id` is ignored and cleared.
+
+**Methods:**
 ```python
-class WorkflowSpanProcessor:
-    _buffers: Dict[str, WorkflowSpanBuffer]          # workflow_id → buffer
-    _trace_to_workflow: Dict[int, str]               # trace_id → workflow_id
-    _trace_to_activity: Dict[int, str]               # trace_id → activity_id
-    _body_data: Dict[int, dict]                      # span_id → {bodies, headers}
-    _verdicts: Dict[str, dict]                       # workflow_id → verdict
+class TemporalGovernanceState:
+    # Signal verdicts (workflow interceptor → next activity)
+    def set_signal_verdict(self, workflow_id, run_id, verdict, reason=None) -> None
+    def get_signal_verdict(self, workflow_id, run_id) -> Optional[(Verdict, reason)]  # clears stale run
+    def clear_signal_verdict(self, workflow_id) -> None
+
+    # HITL pending-approval markers
+    def mark_pending_approval(self, workflow_id, run_id, activity_id) -> None
+    def has_pending_approval(self, workflow_id, run_id, activity_id) -> bool
+    def clear_pending_approval(self, workflow_id, run_id, activity_id) -> None
+
+    # Completed-hook stop bridge (adapter → activity interceptor)
+    def record_completed_stop(self, workflow_id, run_id, activity_id, verdict, reason=None) -> None
+    def take_completed_stop(self, workflow_id, run_id, activity_id) -> Optional[(Verdict, reason)]
+
+    # Cleanup
+    def cleanup_run(self, workflow_id, run_id) -> None
 ```
 
-**Span Buffering Flow:**
-```
-1. Activity starts
-   → ActivityInterceptor creates OTel span
-   → Calls span_processor.register_trace(trace_id, workflow_id, activity_id)
-   → Child spans (HTTP/DB) share same trace_id
-
-2. HTTP call made
-   → OTel HTTP instrumentation creates child span
-   → Hook captures request/response bodies
-   → Calls span_processor.store_body(span_id, request_body=..., response_body=...)
-
-3. Span ends
-   → span_processor.on_end(span) called by OTel
-   → Looks up workflow_id via span attributes or trace_id mapping
-   → Merges body data from _body_data into span dict
-   → Appends span to workflow buffer
-
-4. Activity completes
-   → ActivityInterceptor retrieves buffer.spans
-   → Filters spans by activity_id
-   → Sends to OpenBox Core in ActivityCompleted event
-```
-
-**Privacy Design:**
-- Bodies stored in `_body_data` dict, NOT in OTel span attributes
-- Merged into span dict only when sending to OpenBox Core
-- Optional fallback OTel processor receives spans WITHOUT bodies
-
-**Code Location:** `openbox/span_processor.py`
+**Code Location:** `openbox/governance_state.py`
 
 ---
 
-### 4. Hook-Level Governance Layer
+### 4. Base Runtime Seam (`core_adapter.py`)
 
-#### Hook Governance Module (`hook_governance.py`)
+Hook-level governance (per HTTP call, DB query, file operation, and `@traced` function) is owned entirely by the `openbox_core` base runtime. The Temporal SDK builds that runtime, installs it, and maps its verdicts onto Temporal-native effects. This module is NOT sandbox-safe and is never imported from workflow-context code.
 
-**Responsibility:** Real-time governance evaluation for each operation
+#### create_core_runtime + install_instrumentation
 
-**Architecture:**
-1. Hook modules detect an operation and build a `span_data` dict
-2. Hook calls `evaluate_sync()` or `evaluate_async()` in `hook_governance.py`
-3. This module: looks up activity context, assembles payload, sends to API
-4. If verdict is BLOCK/HALT/REQUIRE_APPROVAL → raises `GovernanceBlockedError`
+**Responsibility:** Build the `openbox_core` runtime that owns all hook instrumentation for a worker/plugin, then install it.
 
-**Payload Structure (hook_trigger simplified to boolean):**
-```json
-{
-  "workflow_id": "string",
-  "activity_id": "string",
-  "run_id": "string",
-  "hook_trigger": true,
-  "timestamp": "RFC3339 timestamp",
-  "spans": [
-    {
-      "span_id": "16-char hex",
-      "trace_id": "32-char hex",
-      "parent_span_id": "16-char hex or null",
-      "stage": "started|completed",
-      "hook_type": "http_request|db_query|file_operation|function_call",
-      "start_time": nanoseconds,
-      "end_time": nanoseconds or null,
-      "duration_ns": nanoseconds or null,
-      "name": "operation name",
-      "kind": "CLIENT|INTERNAL|SERVER",
-      "attributes": {...OTel-original only...},
-      "status": {"code": "ERROR|UNSET", "description": "string or null"},
-      "events": [],
+```python
+runtime = create_core_runtime(
+    api_url=..., api_key=..., state=state,          # TemporalGovernanceState
+    timeout_seconds=30.0, on_api_error="fail_open",
+    agent_did=None, agent_private_key=None,
+    hitl_enabled=True,
+    skip_workflow_types=None, skip_activity_types=None, skip_signals=None,
+    send_start_event=True, send_activity_start_event=True,
+    instrument_databases=True, instrument_file_io=True,
+    max_body_size=65536,
+)  # -> openbox_core.runtime.OpenBoxRuntime
 
-      // Type-specific fields at root level (not in attributes)
-      // HTTP-specific:
-      "http_method": "GET|POST|...",
-      "http_url": "string",
-      "http_status_code": number,
-      "request_body": "string or null",
-      "request_headers": {...},
-      "response_body": "string or null",
-      "response_headers": {...},
-      "error": "string or null",
-
-      // Database-specific:
-      "db_system": "postgresql|mysql|mongodb|redis",
-      "db_operation": "SELECT|INSERT|UPDATE|DELETE|GET|...",
-      "db_statement": "SQL or command",
-      "db_name": "database name",
-      "server_address": "host",
-      "server_port": number,
-
-      // File-specific:
-      "file_path": "string",
-      "file_mode": "r|w|a|...",
-      "file_operation": "open|read|write|close",
-      "file_bytes": number,
-
-      // Function-specific:
-      "code_function": "function name",
-      "code_namespace": "module name"
-    }
-  ],
-  "span_count": 1
-}
+runtime.install_instrumentation()     # process-lifetime, idempotent
+# runtime.uninstall_instrumentation() / runtime.close() for explicit teardown
 ```
 
-**Key Characteristics:**
-- `hook_trigger` is simple boolean `true` (replaces dict with type/stage/data)
-- All span data at root level: `http_method`, `db_system`, `file_path`, `function` (type-specific fields NOT in attributes)
-- `attributes` field contains ONLY original OTel attributes (no custom fields injected)
-- `hook_type` field discriminates operation type: `http_request`, `db_query`, `file_operation`, `function_call`
-- Single span per evaluation (no accumulated history)
-- `duration_ns` computed for all hook types
+The base runtime installs every available HTTP/DB/file instrumentor and governs SQLAlchemy via a global Engine listener; the caller stores the runtime and owns its lifecycle. The evaluate call never governs itself (the base manager always ignores its own `api_url`).
 
-**Code Location:** `openbox/hook_governance.py`
+#### TemporalFrameworkAdapter
+
+**Responsibility:** Map base-SDK governance outcomes onto Temporal-native behavior. Never builds hook payloads or evaluates hook events itself.
+
+**Verdict → Temporal effect mapping:**
+- **BLOCK / HALT** (started hook or lifecycle) → non-retryable `temporalio` `ApplicationError`
+- **REQUIRE_APPROVAL** → retryable `ApprovalPending` (Temporal's native HITL retry loop) + a pending marker in `TemporalGovernanceState`; if HITL is unavailable for the activity, degrades to a non-retryable block (fail safe)
+- **completed-hook BLOCK / HALT** → recorded run-scoped in `TemporalGovernanceState` for the activity interceptor to surface after user code returns
+
+**Methods:** `handle_approval_sync(result, context=None)`, `handle_approval(result)` (async), `on_completed_hook_result(result, context=None)`, `raise_hook_blocked(result)`, `raise_lifecycle_blocked(result)`.
+
+#### core_activity_scope
+
+**Responsibility:** Bind the shared `ActivityContext` around activity execution with a guaranteed try/finally reset.
+
+```python
+with core_activity_scope(info, activity_input, trace_id=..., multi_agent_session_id=...):
+    result = await self.next.execute_activity(input)
+```
+
+This is the **only** hook-context bridge: base instrumentation resolves the activity context from the `ContextStore` this binds into (ambient `ContextVar`, or the trace map for hook code running where `ContextVar`s do not propagate, e.g. executor threads). `get_core_context_store()` and `build_core_activity_context()` support this seam.
+
+**Code Location:** `openbox/core_adapter.py`
+
+#### Hook instrumentation internals
+
+The hook payload shape (per-operation span data for HTTP/DB/file/function), body/header capture, and enforcement now live in **`openbox_core` (base SDK)**. See the base SDK for the exact payload fields and per-library capture strategy — they are no longer defined in this package. Supported surfaces installed by the base runtime include HTTP (`httpx`, `requests`, `urllib3`, `urllib`), databases (PostgreSQL, MySQL, SQLite, MongoDB, Redis, SQLAlchemy), file I/O (`open`/`read`/`write`), and `@traced` functions.
 
 ---
 
-### 5. Instrumentation Layer
+### 5. Function Tracing (`tracing.py`)
 
-#### HTTP Instrumentation
+#### @traced
 
-**Supported Libraries:**
-- `httpx` - Sync + async, full body capture via Client.send patching
-- `requests` - Full body capture via hooks
-- `urllib3` - Full body capture via hooks
-- `urllib` - Request body only (response stream consumed)
+**Implementation:** `@traced` in `tracing.py` wraps the base SDK's `openbox_core.instrumentation.function.governed` decorator.
 
-**Instrumentation Strategy:**
-
-1. **OTel Instrumentors** - Create spans with standard attributes
-   ```python
-   from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-   HTTPXClientInstrumentor().instrument(
-       request_hook=_httpx_request_hook,
-       response_hook=_httpx_response_hook,
-   )
-   ```
-
-2. **Hook-Level Governance** (request hook) - started stage governance evaluation
-   - Builds span data and calls governance evaluate_sync/evaluate_async
-   - Span data includes type-specific fields at root: http_method, http_url, request/response bodies, http_status_code
-   - Can block HTTP request if governance returns BLOCK/HALT
-   ```python
-   def _httpx_request_hook(span, request):
-       # Build span data with hook_type and type-specific fields at root level
-       span_data = _build_http_span_data(span, method, url, "started", request_body=body)
-       # Evaluate governance
-       _hook_gov.evaluate_sync(span, identifier=url, span_data=span_data)
-   ```
-
-3. **Custom Hooks** - Capture bodies/headers via `span_processor.store_body()`
-   ```python
-   def _httpx_request_hook(span, request):
-       body = extract_body(request)
-       headers = dict(request.headers)
-       _span_processor.store_body(
-           span.context.span_id,
-           request_body=body,
-           request_headers=headers,
-       )
-   ```
-
-4. **Response Hook** (completed stage) - Governance evaluation with response
-   - Builds span data with response body and status code
-   - Calls governance evaluate_sync/evaluate_async with completed stage
-   - Status set to "ERROR" if http_status_code >= 400
-
-5. **Client.send Patching** (httpx only) - Reliable body capture
-   ```python
-   def _patched_async_send(self, request, *args, **kwargs):
-       request_body = request.content
-       response = await _original_async_send(self, request, *args, **kwargs)
-       response_body = response.text
-       span_processor.store_body(span_id, request_body=..., response_body=...)
-       return response
-   ```
-
-6. **Span Data Format** (for governance evaluation)
-   ```
-   stage: "started" | "completed"
-   span_id: hex string (16 chars)
-   trace_id: hex string (32 chars)
-   parent_span_id: hex string or null
-   name: "HTTP {METHOD}" (e.g., "HTTP GET")
-   kind: "CLIENT"
-   start_time: nanosecond timestamp
-   end_time: nanosecond timestamp (completed only), None for started
-   status: {code: "ERROR" if status >= 400, "UNSET", description: error}
-   hook_type: "http_request"
-   attributes: {http.method, http.url, http.status_code} (OTel-original only)
-
-   // Type-specific fields at root level:
-   http_method: HTTP method
-   http_url: HTTP URL
-   http_status_code: HTTP status code
-   request_body: request body text
-   response_body: response body text
-   request_headers: dict of request headers
-   response_headers: dict of response headers
-   ```
-
-**Code Location:** `openbox/http_governance_hooks.py` (re-exported via `openbox/otel_setup.py`)
-
-#### Database Instrumentation
-
-**Supported Databases:**
-- PostgreSQL: `psycopg2` (sync), `asyncpg` (async)
-- MySQL: `mysql-connector-python`, `pymysql`
-- SQLite: `sqlite3` (built-in, new in v1.1)
-- MongoDB: `pymongo`
-- Redis: `redis`
-- SQLAlchemy: `sqlalchemy` (ORM)
-
-**Instrumentation Strategy:**
-
-1. **DB Governance Hooks** (installed BEFORE OTel) — per-query started/completed governance
-   ```python
-   # db_governance_hooks.py installs wrapt/event hooks before OTel instrumentors
-   _db_gov.setup_psycopg2_hooks()       # wrapt on cursor.execute
-   Psycopg2Instrumentor().instrument()   # OTel span creation
-   ```
-   - Both started + completed stages call governance evaluate with `span_data=` parameter
-   - Span data includes: db.system, db.operation, db.statement, status, duration_ns
-
-2. **OTel Instrumentors** - Create spans with db.* attributes
-   ```python
-   # Span attributes:
-   {
-       "db.system": "postgresql",
-       "db.statement": "SELECT * FROM users WHERE id = $1",
-       "db.operation": "SELECT",
-       "db.name": "mydb",
-   }
-   ```
-
-3. **Span Data Format** (for governance evaluation)
-   ```
-   stage: "started" | "completed"
-   span_id: hex string (16 chars)
-   trace_id: hex string (32 chars)
-   parent_span_id: hex string or null
-   name: "{OPERATION} {SYSTEM}" (e.g., "SELECT postgresql")
-   kind: "CLIENT"
-   start_time: nanosecond timestamp
-   end_time: nanosecond timestamp (completed only), None for started
-   status: {code: "ERROR" if error, "UNSET", description: error or null}
-   hook_type: "db_query"
-   attributes: {db.system, db.operation, db.statement, db.name, server.address, server.port, rowcount}
-
-   // Type-specific fields at root level:
-   db_system: "postgresql" etc
-   db_operation: "SELECT" etc
-   db_statement: SQL query
-   db_name: database name
-   server_address: host
-   server_port: port
-   duration_ns: query duration in nanoseconds
-   ```
-
-4. **Span Capture** - Automatically buffered by WorkflowSpanProcessor
-
-**Per-library hook strategy:**
-
-| Library | Method | Notes |
-|---------|--------|-------|
-| redis | Native OTel `request_hook`/`response_hook` | Passed to `RedisInstrumentor().instrument()` |
-| sqlalchemy | `before/after_cursor_execute` + `handle_error` events | Requires engine reference |
-| psycopg2, asyncpg, mysql, pymysql, pymongo | `wrapt` monkey-patching | C extensions may be immutable (silently skipped) |
-
-**Code Location:** `openbox/db_governance_hooks.py` (orchestrated by `openbox/otel_setup.py`)
-
-#### File I/O Instrumentation
-
-**Implementation:** Monkey-patch `builtins.open` with `TracedFile` wrapper
-
-**Instrumentation Strategy:**
-
-1. **Patch open()** - Replace with tracing wrapper
-   ```python
-   _original_open = builtins.open
-
-   def traced_open(file, mode='r', *args, **kwargs):
-       span = tracer.start_span("file.open")
-       file_obj = _original_open(file, mode, *args, **kwargs)
-       return TracedFile(file_obj, file_path, mode, span)
-   ```
-
-2. **Hook-Level Governance** (on open, read, write) - started/completed stages
-   - Builds span data with file path, mode, operation
-   - Both started + completed stages call governance evaluate_sync with span_data
-   - Can block file access (open, read, write) if governance returns BLOCK/HALT
-   ```python
-   def _evaluate_governance(self, operation: str, stage: str, span=None):
-       span_data = _build_file_span_data(span, file_path, mode, operation, stage)
-       _hook_gov.evaluate_sync(span, identifier=file_path, span_data=span_data)
-   ```
-
-3. **Wrap File Operations** - Trace each read/write
-   ```python
-   class TracedFile:
-       def read(self, size=-1):
-           with tracer.start_as_current_span("file.read") as span:
-               # Governance started stage
-               self._evaluate_governance("read", "started", span=span)
-               data = self._file.read(size)
-               span.set_attribute("file.bytes", len(data))
-               # Governance completed stage
-               self._evaluate_governance("read", "completed", span=span, data=data)
-               return data
-   ```
-
-4. **Span Data Format** (for governance evaluation)
-   ```
-   stage: "started" | "completed"
-   span_id: hex string (16 chars)
-   trace_id: hex string (32 chars)
-   parent_span_id: hex string or null
-   name: "file.{operation}" (e.g., "file.read")
-   kind: "INTERNAL"
-   start_time: nanosecond timestamp
-   end_time: nanosecond timestamp (completed only), None for started
-   status: {code: "ERROR" if error, "UNSET", description: error}
-   hook_type: "file_operation"
-   attributes: {file.path, file.mode, file.operation, openbox.governance.error}
-
-   // Type-specific fields at root level:
-   file_path: path to file
-   file_mode: "r", "w", etc
-   file_operation: "open", "read", "write"
-   file_bytes: bytes read/written
-   duration_ns: operation duration
-   ```
-
-**Skipped Paths:** `/dev/`, `/proc/`, `/sys/`, `__pycache__`, `.pyc`, `.so`
-
-**Code Location:** `openbox/file_governance_hooks.py` (re-exported via `openbox/otel_setup.py`)
-
-#### Function Tracing Instrumentation
-
-**Implementation:** `@traced` decorator in `tracing.py`
-
-**Decorator Features:**
+**Behavior:**
+- With an installed base runtime, a `@traced` function emits started/completed `FUNCTION_CALL` hook events and is governed (can be blocked/halted)
+- Without an installed runtime it is a transparent passthrough (zero governance overhead)
 - Supports sync and async functions
-- Creates OTel span with configurable name
-- Captures function arguments, return values, exceptions
-- Serializes args/results safely with max length limits
-- Hook-level governance at started and completed stages
 
-**Instrumentation Strategy:**
+```python
+from openbox.tracing import traced, create_span
 
-1. **Decorator Wrapper** - Wraps function execution
-   ```python
-   @traced
-   def my_function(arg1, arg2):
-       return do_something(arg1, arg2)
+@traced
+def my_function(arg1, arg2):
+    return do_something(arg1, arg2)
 
-   @traced(name="custom-name", capture_args=True, capture_result=True)
-   async def my_async_function(data):
-       return await process(data)
-   ```
+@traced(name="custom-name", capture_args=True, capture_result=True)
+async def my_async_function(data):
+    return await process(data)
+```
 
-2. **Hook-Level Governance** - When `hook_governance` is configured
-   - `started` stage: Before function executes (can block)
-   - `completed` stage: After function returns or raises (can block/halt)
-   - Both stages pass `span_data=` parameter with structured span info
-   - Zero overhead when governance not configured
-
-3. **Span Data Format** (for governance evaluation)
-   ```
-   stage: "started" | "completed"
-   span_id: hex string (16 chars)
-   trace_id: hex string (32 chars)
-   parent_span_id: hex string or null
-   name: function name or custom span name
-   kind: "INTERNAL"
-   start_time: nanosecond timestamp
-   end_time: nanosecond timestamp (completed only), None for started
-   status: {code: "ERROR" | "UNSET", description: error message or null}
-   hook_type: "function_call"
-   attributes: {code.function, code.namespace, ...function args, result, errors}
-
-   // Type-specific fields at root level:
-   code_function: function name
-   code_namespace: module name
-   ```
-
-4. **Span Attributes**
-   ```
-   code.function = function name
-   code.namespace = module name
-   function.arg.N = positional args (JSON)
-   function.kwarg.X = keyword args (JSON)
-   function.result = return value (JSON)
-   error / error.type / error.message = exception details
-   ```
+`capture_exception` and `max_arg_length` are accepted for backward compatibility but no longer tuned here — the base SDK records the completed/error stages and applies its own privacy truncation. `create_span(name, attributes=None)` is a plain OpenTelemetry span helper with no governance. Function-call hook payload building and evaluation live in `openbox_core`.
 
 **Code Location:** `openbox/tracing.py`
 
@@ -835,30 +556,28 @@ Authorization: Bearer {api_key}
 ┌───────────────────────────────────────────────────────────────┐
 │ ActivityGovernanceInterceptor.execute_activity()              │
 │                                                               │
-│ 1. Pre-execution checks                                      │
-│    - Check pending BLOCK/HALT verdict → fail if present      │
-│    - Check pending approval → poll if present                │
+│ 1. Pre-execution checks (via TemporalGovernanceState)        │
+│    - get_signal_verdict() BLOCK/HALT → fail if present       │
+│    - has_pending_approval() → poll approval if present       │
 │                                                               │
 │ 2. Send ActivityStarted event (optional)                     │
 │    - Captures activity_input                                 │
 │    - Returns verdict + guardrails                            │
 │                                                               │
 │ 3. Execute activity                                          │
-│    - Create OTel span (temporal.workflow_id attribute)       │
-│    - Register trace_id → workflow_id mapping                 │
-│    - User activity code runs:                                │
-│      * HTTP calls → hooks build span_data → governance       │
-│        evaluates at started/completed stages                 │
-│      * DB queries → hooks build span_data → governance       │
-│        evaluates at started/completed stages                 │
-│      * File operations → hooks build span_data → governance  │
-│      * Functions → @traced evaluates at started/completed    │
-│    - Child spans captured automatically                      │
+│    - Open OTel span (temporal.workflow_id attribute)         │
+│    - core_activity_scope binds the shared ActivityContext    │
+│    - User activity code runs; base runtime governs each op:  │
+│      * HTTP calls / DB queries / file ops / @traced funcs    │
+│        → base hooks fire at started/completed stages         │
+│      * BLOCK/HALT/approval raised as a Temporal-native error │
+│        by the adapter (propagates here to fail/retry)        │
 │                                                               │
-│ 4. Send ActivityCompleted event                              │
-│    - Captures activity_output                                │
-│    - Includes all child spans                                │
-│    - Returns verdict + guardrails                            │
+│ 4. Handle completion                                         │
+│    - take_completed_stop() + base abort flag decide if the   │
+│      operation was governed-stopped (HALT terminate / BLOCK  │
+│      skip); otherwise send ActivityCompleted event           │
+│    - Captures activity_output, returns verdict + guardrails  │
 │                                                               │
 │ 5. Return result (or raise exception from hook governance)   │
 └───────────────────────────────────────────────────────────────┘
@@ -884,13 +603,13 @@ Authorization: Bearer {api_key}
 │ ActivityInterceptor raises ApplicationError             │
 │ - type: "ApprovalPending"                               │
 │ - non_retryable: False (Temporal will retry)            │
-│ - buffer.pending_approval = True                        │
+│ - state.mark_pending_approval(wf, run, act)             │
 └────────────┬────────────────────────────────────────────┘
              │
              ▼ (Temporal retry with backoff)
 ┌─────────────────────────────────────────────────────────┐
 │ Activity retries                                        │
-│ - Check buffer.pending_approval == True                 │
+│ - state.has_pending_approval(wf, run, act) == True      │
 │ - Poll POST /api/v1/governance/approval                 │
 └────────────┬────────────────────────────────────────────┘
              │
@@ -909,46 +628,29 @@ Authorization: Bearer {api_key}
       │                        │                   │
       ▼                        ▼                   ▼
 ┌────────────┐          ┌──────────────┐   ┌──────────────┐
-│Clear       │          │Raise non-    │   │Raise non-    │
-│pending     │          │retryable     │   │retryable     │
-│Proceed     │          │error         │   │error         │
+│clear_      │          │Raise non-    │   │Raise non-    │
+│pending_    │          │retryable     │   │retryable     │
+│approval()  │          │error         │   │error         │
+│Proceed     │          │              │   │              │
 └────────────┘          └──────────────┘   └──────────────┘
 ```
 
 ### Hook-Level Governance Flow
 
+Hook detection, payload building, and evaluation are owned by the `openbox_core` base runtime. The Temporal SDK provides the activity-context bridge (`core_activity_scope`) and maps the resulting verdict onto Temporal-native effects (`TemporalFrameworkAdapter`).
+
 ```
 ┌──────────────────────────────────────────────────────┐
-│ Operation detected by hook (HTTP, DB, File, @traced) │
+│ Operation detected by base runtime hook              │
+│ (HTTP, DB, File, @traced) — openbox_core             │
 └────────────┬───────────────────────────────────────┘
              │
              ▼
 ┌──────────────────────────────────────────────────────┐
-│ Hook builds span_data dict                           │
-│ - hook_type: "http_request|db_query|file_operation" │
-│ - stage: "started" or "completed"                    │
-│ - Type-specific fields at root level                 │
-│   (http_method, http_url, http_status_code, etc.)   │
-└────────────┬───────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────┐
-│ Hook calls _hook_gov.evaluate_sync/async()           │
-│ - Passes span and span_data                          │
-└────────────┬───────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────┐
-│ hook_governance looks up activity context            │
-│ - Uses trace_id to find workflow_id + activity_id    │
-│ - Builds full payload with hook_trigger=true         │
-└────────────┬───────────────────────────────────────┘
-             │
-             ▼
-┌──────────────────────────────────────────────────────┐
-│ POST /api/v1/governance/evaluate                     │
-│ - Sends payload with single span                     │
-│ - Waits for verdict response                         │
+│ Base runtime resolves activity context               │
+│ - From the ContextStore that core_activity_scope     │
+│   binds into (ambient ContextVar or trace map)       │
+│ - Builds the hook payload + POSTs to Core evaluate   │
 └────────────┬───────────────────────────────────────┘
              │
              ▼
@@ -965,12 +667,17 @@ Authorization: Bearer {api_key}
 └─────┬──────┘      └─────┬─────────────┘  └─────┬──────┘
       │                    │                      │
       ▼                    ▼                      ▼
-┌────────────┐   ┌──────────────────┐   ┌──────────────┐
-│Continue    │   │Raise             │   │Log warning,  │
-│operation   │   │GovernanceBlocked │   │continue      │
-└────────────┘   │Error, abort      │   └──────────────┘
-                 │activity          │
-                 └──────────────────┘
+┌────────────┐   ┌────────────────────────┐  ┌──────────────┐
+│Continue    │   │TemporalFrameworkAdapter│  │Log warning,  │
+│operation   │   │maps to Temporal effect:│  │continue      │
+└────────────┘   │ BLOCK/HALT → non-retry │  └──────────────┘
+                 │  ApplicationError      │
+                 │ REQUIRE_APPROVAL →     │
+                 │  retryable + pending   │
+                 │  marker in state       │
+                 │ completed BLOCK/HALT → │
+                 │  recorded in state     │
+                 └────────────────────────┘
 ```
 
 ---
@@ -979,7 +686,9 @@ Authorization: Bearer {api_key}
 
 ### Data Privacy
 
-**Design Principle:** Bodies stored separately from OTel spans
+**Design Principle:** Request/response bodies go only to OpenBox Core, never to external OTel exporters
+
+Body and header capture is owned by the `openbox_core` base runtime (see the base SDK for the exact capture and truncation behavior; body size is bounded by `max_body_size`). Bodies are included only in the payload sent to the trusted OpenBox Core endpoint and are kept out of the standard OTel span attributes exported to external tracing systems.
 
 ```
 ┌────────────────────────────────────────────────────────┐
@@ -988,27 +697,25 @@ Authorization: Bearer {api_key}
              │
              ▼
 ┌────────────────────────────────────────────────────────┐
-│ OTel HTTP Instrumentation                              │
-│ - Creates span with standard attributes                │
-│   {http.method, http.url, http.status_code}            │
-│ - NO body data in span attributes                      │
+│ openbox_core base runtime hook                         │
+│ - Captures request/response bodies + headers           │
+│ - OTel span carries only standard attributes           │
+│   {http.method, http.url, http.status_code} (NO body)  │
 └────────────┬───────────────────────────────────────────┘
              │
-             ├─────────────┬────────────────┐
-             │             │                │
-             ▼             ▼                ▼
-┌────────────────┐  ┌──────────────┐  ┌──────────────────┐
-│ Span to        │  │ Body to      │  │ Span to          │
-│ WorkflowSpan   │  │ span_processor│  │ Fallback OTel    │
-│ Processor      │  │ ._body_data  │  │ Exporter (Jaeger)│
-│ (governance)   │  │ (private)    │  │ (NO body)        │
-└────────────────┘  └──────────────┘  └──────────────────┘
+             ├──────────────────────────┐
+             ▼                          ▼
+┌────────────────────────┐   ┌──────────────────────┐
+│ Hook payload to        │   │ Span to external OTel │
+│ OpenBox Core evaluate  │   │ Exporter (Jaeger etc) │
+│ (bodies, trusted)      │   │ (NO body)             │
+└────────────────────────┘   └──────────────────────┘
 ```
 
 **Benefits:**
 - Sensitive data never exported to external tracing systems
 - Bodies only sent to OpenBox Core (trusted endpoint)
-- Ignored URLs (e.g., OpenBox API) completely skip capture
+- The OpenBox API URL is skipped so the evaluate call never governs itself
 
 ### API Authentication
 
@@ -1023,12 +730,12 @@ Authorization: Bearer {api_key}
 
 2. Governance requests
    → Include Authorization: Bearer {api_key} header
-   → Include User-Agent: OpenBox-SDK/{version} header
-   → Include X-OpenBox-SDK-Version: {version} header
+   → Include User-Agent: OpenBox-SDK/openbox-temporal-python-v{version} header
+   → Include X-OpenBox-SDK-Version: openbox-temporal-python-v{version} header
    → Server validates on each request
 ```
 
-**SDK Version Header:** All API calls include `X-OpenBox-SDK-Version` with the SDK version from `importlib.metadata`. Built centrally in `hook_governance.build_auth_headers()`.
+**SDK Version Header:** Core requests include `X-OpenBox-SDK-Version: openbox-temporal-python-v{version}` (and `User-Agent: OpenBox-SDK/openbox-temporal-python-v{version}`) with the SDK identifier. The package version is a **static `__version__` in `openbox/__init__.py`** — it is intentionally NOT read via `importlib.metadata`, because a metadata lookup opens a file and, with file instrumentation active, would re-enter the file hook. The header is assembled in `request_signing.py`, which imports the static `__version__`.
 
 ### Temporal Sandbox Compliance
 

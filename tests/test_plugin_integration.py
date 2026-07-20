@@ -1,4 +1,3 @@
-# tests/test_plugin_integration.py
 """
 Integration tests for OpenBoxPlugin with Temporal test server.
 
@@ -22,9 +21,7 @@ from temporalio.worker import Worker
 PATCH_BASE = "openbox.plugin"
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Test Workflows & Activities
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @activity.defn
@@ -65,13 +62,19 @@ class SignalWorkflow:
         self._done = True
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Plugin Factory (mocked init, real configure_worker)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _create_mock_plugin(**overrides):
-    """Create OpenBoxPlugin with __init__ dependencies mocked."""
+    """Create OpenBoxPlugin with __init__ dependencies mocked.
+
+    These E2E tests exercise the plugin LIFECYCLE and composition (worker starts,
+    runs a workflow, stops cleanly; replay is deterministic), not governance
+    interceptor logic — so the governance interceptors are mocked out, exactly as
+    before. Network + base-SDK instrumentation install are also stubbed:
+    validate_api_key is a no-op and create_core_runtime returns a MagicMock
+    runtime whose install_instrumentation does nothing.
+    """
     defaults = dict(
         openbox_url="http://localhost:8086",
         openbox_api_key="obx_test_key_123",
@@ -80,8 +83,9 @@ def _create_mock_plugin(**overrides):
 
     with (
         patch(f"{PATCH_BASE}.validate_api_key"),
-        patch(f"{PATCH_BASE}.WorkflowSpanProcessor"),
-        patch("openbox.otel_setup.setup_opentelemetry_for_governance"),
+        patch(
+            "openbox.core_adapter.create_core_runtime", return_value=MagicMock()
+        ),
         patch("openbox.workflow_interceptor.GovernanceInterceptor"),
         patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
         patch(f"{PATCH_BASE}.GovernanceClient"),
@@ -89,11 +93,6 @@ def _create_mock_plugin(**overrides):
         from openbox.plugin import OpenBoxPlugin
 
         return OpenBoxPlugin(**defaults)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Integration Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestPluginWorkerLifecycle:
@@ -200,11 +199,6 @@ class TestPluginWorkerLifecycle:
             result = await handle.result()
 
         assert result == "signal:test-data"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Replay Safety Tests
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestPluginReplaySafety:

@@ -2,6 +2,120 @@
 
 All notable changes to OpenBox SDK for Temporal Workflows.
 
+## [Unreleased]
+
+## [1.2.0] - 2026-07-20
+
+### Changed
+
+- **Depends on `openbox-sdk-python>=0.2.0`** (import package `openbox_core`) — the shared
+  base SDK owning contracts, the always-strict gate, identity/signing, the evaluate
+  client, context runtime, Core `SpanData` wire serialization, generic instrumentation,
+  and the conformance kit. The `0.2.0` floor adds Redis/MongoDB/urllib3/urllib
+  instrumentation in the base runtime so no hook coverage is lost in the flip.
+- **Hook governance is now owned entirely by the base runtime.** The worker/plugin
+  build and own an `openbox_core` runtime and call `install_instrumentation()`;
+  HTTP/DB/file/function hooks, payload shape, evaluation, and enforcement all live in
+  `openbox_core`. LangGraph and Temporal now emit one identical flat hook interface.
+- `request_signing` now shims over `openbox_core.identity`. Signed request bytes are
+  UNCHANGED — gated byte-for-byte by a golden fixture generated from the pre-migration
+  signer (`tests/test_base_sdk_signing_parity.py`).
+- `Verdict`, `GuardrailsCheckResult`, and `WorkflowEventType` re-export the shared
+  contracts; `GovernanceVerdictResponse` subclasses the shared `EvaluationResult`
+  (same public surface, plus `fallback_used`/`diagnostics`/`raw`/`approval_expiration_time`).
+- Workflow lifecycle events route through shared `EventEnvelope` factories
+  (sandbox-safe pure contracts; wire payloads unchanged).
+- Activity execution binds the shared `ActivityContext` with a guaranteed
+  try/finally reset — governance context can no longer leak when an activity raises.
+
+### Behavior changes (regression-gated)
+
+- **Approval decision precedence:** approval poll responses parse via the shared
+  `ApprovalResult`; `action` now outranks `verdict` when both are present
+  (previously verdict-first), and a response with NEITHER field stays PENDING
+  (previously implicit ALLOW). Pinned by `tests/test_approval_action_precedence.py`.
+
+### Known behavior differences in the core runtime
+
+- **Completed-hook semantics:** core completed hooks never raise to the caller —
+  stop verdicts mark FUTURE execution blocked (abort/halt flags). Some legacy
+  completed hooks could raise after the operation ran (HTTP response hook, file
+  close); raising post-hoc cannot undo the operation, so the core model drops it
+  by design.
+- **Fail-closed shaping:** core maps started-hook evaluation failures under
+  `on_api_error="fail_closed"` (and started-hook contract errors, always) to a
+  non-retryable `GovernanceHalt` via the adapter — same terminal effect as
+  legacy's HALT-shaped `GovernanceBlockedError`, different exception chain.
+- **Redaction point for `activity_input`:** the core `ActivityContext` receives
+  the post-redaction input (what actually ran); the legacy buffer stored the
+  pre-redaction value. Core hook payloads therefore never leak redacted fields.
+
+### Added
+
+- `openbox.governance_state.TemporalGovernanceState` — run-scoped state carrying the
+  Temporal effects that must survive past a base hook callback: signal BLOCK/HALT
+  verdicts that fail the next activity, HITL pending-approval retry markers, and the
+  completed-hook stop bridge (completed BLOCK skips the duplicate completed event;
+  completed HALT reaches the terminate path). Consumed on every activity exit path.
+- `openbox.core_adapter` — `TemporalFrameworkAdapter` (maps base-SDK verdicts to
+  native `ApplicationError` types and the retry-based HITL loop; REQUIRE_APPROVAL marks
+  the pending-approval retry marker and degrades to a non-retryable block when HITL is
+  disabled/skipped; completed BLOCK/HALT records run-scoped stop state with the resolved
+  `ActivityContext`), and `create_core_runtime(...)` which builds and owns the base
+  runtime the worker/plugin install. `core_activity_scope` is the sole hook-context
+  bridge (guaranteed try/finally reset + trace registration).
+- Redis, MongoDB, urllib3, and urllib governance now flow through the base runtime.
+- Gates: workflow-sandbox import-safety, base-SDK conformance suite driven by the
+  Temporal adapter, public-API compatibility suite, and a deterministic
+  `llm_completion` hook-parity test (flat interface via the Temporal runtime, no live
+  OpenAI credentials).
+
+### Removed
+
+- `WorkflowSpanProcessor`, `WorkflowSpanBuffer`, and the `setup_opentelemetry_for_governance`
+  entry point (public exports). Governance instrumentation is installed by the base
+  runtime; there is no Temporal-local OpenTelemetry setup to call.
+- Temporal-local hook modules `otel_setup`, `hook_governance`, `http_governance_hooks`,
+  `db_governance_hooks`, `file_governance_hooks`, `span_processor`, and the dead
+  `context_propagation` helper (its ContextVar-to-executor propagation lives in the base
+  runtime). Their payload-shape/instrumentation coverage moved to the base SDK suite.
+- `openbox.tracing.traced` now wraps `openbox_core.instrumentation.function.governed`;
+  `create_span` remains a plain span helper.
+
+### Fixed (legacy file instrumentation — pre-existing upstream)
+
+- **Runtime RecursionError under file instrumentation:** governance evaluation
+  itself opens files (httpx/ssl, package-metadata scans via importlib_metadata/
+  zipp) — governing those opens re-evaluated recursively until RecursionError.
+  traced_open now (1) passes through any open performed on a thread already
+  inside file-governance work (re-entrancy guard) and (2) bypasses
+  interpreter-owned trees (venv, stdlib, site-packages — sys.prefix/base_prefix
+  + sysconfig paths): those reads are Python machinery, not application data
+  access. Application paths (./.env, data files, temp files) remain governed.
+  Same guard mirrored in the base SDK's file instrumentation.
+
+### Fixed (HTTP hook payloads — pre-existing upstream)
+
+- **Mangled method on httpx spans:** OTel's httpx instrumentation passes the
+  method as BYTES; `str(b"POST")` shipped `http_method: "b'POST'"` on every
+  httpx started span. Methods now decode bytes-safely at all client paths.
+- **Credential leak in governance payloads:** raw request/response headers
+  (`authorization`, `cookie`, `set-cookie`, `x-api-key`, …) were sent to Core
+  verbatim — live API keys landed in Core logs. All header dicts are now
+  redacted at the span-data builder choke point. Same redaction added to the
+  base SDK instrumentation. **Rotate any API keys that appeared in payloads.**
+
+### Migration notes
+
+- Base-runtime instrumentation is the sole hook governance path
+  and the legacy in-repo hook stack is removed. Approval-retry, signal BLOCK/HALT, and
+  completed-hook BLOCK/HALT behavior are preserved (run-scoped, cleaned after use).
+- Dropped coverage vs the legacy stack: direct raw-driver DB queries (psycopg2/mysql/
+  pymysql/sqlite3 used WITHOUT SQLAlchemy). The base runtime governs SQLAlchemy (all
+  backends), asyncpg, Redis, and MongoDB; activating raw dbapi driver instrumentors
+  interferes with SQLAlchemy's own dialect queries, so raw-driver-only governance is a
+  base-SDK follow-up.
+
 ## [1.1.2] - 2026-04-22
 
 ### Security

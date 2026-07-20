@@ -1,4 +1,3 @@
-# openbox/worker.py
 """
 OpenBox-enabled Temporal Worker factory.
 
@@ -35,7 +34,6 @@ from temporalio.client import Client
 from temporalio.worker import Worker, Interceptor
 
 from .config import initialize as validate_api_key, GovernanceConfig
-from .span_processor import WorkflowSpanProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +44,8 @@ def create_openbox_worker(
     *,
     workflows: Sequence[Type] = (),
     activities: Sequence[Callable] = (),
-    # OpenBox config (required)
     openbox_url: str,
     openbox_api_key: str,
-    # AIP DID + Ed25519 signing (both-or-neither). When set, every Core request
-    # is signed locally; required for signing_required=true agents.
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
     governance_timeout: float = 30.0,
@@ -60,18 +55,12 @@ def create_openbox_worker(
     skip_workflow_types: Optional[set] = None,
     skip_activity_types: Optional[set] = None,
     skip_signals: Optional[set] = None,
-    # HITL configuration
     hitl_enabled: bool = True,
-    # Database instrumentation
     instrument_databases: bool = True,
     db_libraries: Optional[set] = None,
     sqlalchemy_engine: Optional[Any] = None,
-    # File I/O instrumentation
     instrument_file_io: bool = True,
-    # Header-based W3C trace propagation via Temporal's built-in TracingInterceptor.
-    # Without it, trace IDs set by the caller don't reach workflow/activity spans.
     enable_trace_propagation: bool = True,
-    # Standard Worker options
     activity_executor: Optional[Executor] = None,
     workflow_task_executor: Optional[ThreadPoolExecutor] = None,
     interceptors: Sequence[Interceptor] = (),
@@ -135,7 +124,7 @@ def create_openbox_worker(
                           instrumentation works on pre-existing engines.
 
         # File I/O instrumentation
-        instrument_file_io: Instrument file I/O operations (default: False)
+        instrument_file_io: Instrument file I/O operations (default: True)
 
         # Standard Worker options (passed through to Worker)
         activity_executor: Executor for activities
@@ -168,13 +157,10 @@ def create_openbox_worker(
     """
     logger.info("Initializing OpenBox SDK with URL: %s", openbox_url)
 
-    # 0. Store Temporal client reference for HALT terminate calls
     from .activities import set_temporal_client
 
     set_temporal_client(client)
 
-    # 1. Validate API key (also validates URL security + loads the Ed25519 signer).
-    #    A signing_required=true agent is validated via a signed /auth/validate GET.
     validate_api_key(
         api_url=openbox_url,
         api_key=openbox_api_key,
@@ -183,35 +169,35 @@ def create_openbox_worker(
         agent_private_key=agent_private_key,
     )
 
-    # Pull the loaded signer (Ed25519PrivateKey object) from global config so the
-    # raw seed is loaded exactly once and never re-parsed downstream.
     from .config import get_global_config
 
     _signer = get_global_config().get_signer()
 
-    # 2. Create span processor
-    span_processor = WorkflowSpanProcessor(ignored_url_prefixes=[openbox_url])
+    from .governance_state import TemporalGovernanceState
 
-    # 3. Setup OTel HTTP, database, and file I/O instrumentation
-    from .otel_setup import setup_opentelemetry_for_governance
+    state = TemporalGovernanceState()
 
-    setup_opentelemetry_for_governance(
-        span_processor,
+    from .core_adapter import create_core_runtime
+
+    runtime = create_core_runtime(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        ignored_urls=[openbox_url],
-        instrument_databases=instrument_databases,
-        db_libraries=db_libraries,
-        instrument_file_io=instrument_file_io,
-        sqlalchemy_engine=sqlalchemy_engine,
-        api_timeout=governance_timeout,
+        state=state,
+        timeout_seconds=governance_timeout,
         on_api_error=governance_policy,
-        max_body_size=65536,
         agent_did=agent_did,
-        signer=_signer,
+        agent_private_key=agent_private_key,
+        hitl_enabled=hitl_enabled,
+        skip_workflow_types=skip_workflow_types or set(),
+        skip_activity_types=skip_activity_types or {"send_governance_event"},
+        skip_signals=skip_signals or set(),
+        send_start_event=send_start_event,
+        send_activity_start_event=send_activity_start_event,
+        instrument_databases=instrument_databases,
+        instrument_file_io=instrument_file_io,
     )
+    runtime.install_instrumentation()
 
-    # 4. Create governance config
     config = GovernanceConfig(
         on_api_error=governance_policy,
         api_timeout=governance_timeout,
@@ -223,7 +209,6 @@ def create_openbox_worker(
         hitl_enabled=hitl_enabled,
     )
 
-    # 5. Create interceptors
     from .workflow_interceptor import GovernanceInterceptor
     from .activity_interceptor import ActivityGovernanceInterceptor
     from .client import GovernanceClient
@@ -231,11 +216,10 @@ def create_openbox_worker(
     workflow_interceptor = GovernanceInterceptor(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        span_processor=span_processor,
+        state=state,
         config=config,
     )
 
-    # Shared GovernanceClient: persistent auth headers, single config source
     governance_client = GovernanceClient(
         api_url=openbox_url,
         api_key=openbox_api_key,
@@ -248,13 +232,11 @@ def create_openbox_worker(
     activity_interceptor = ActivityGovernanceInterceptor(
         api_url=openbox_url,
         api_key=openbox_api_key,
-        span_processor=span_processor,
+        state=state,
         config=config,
         client=governance_client,
     )
 
-    # 6. Build governance activities with credentials captured on the instance
-    # (so api_key never leaks through activity inputs into workflow history).
     from .activities import build_governance_activities
 
     governance_activities = build_governance_activities(
@@ -264,10 +246,8 @@ def create_openbox_worker(
         signer=_signer,
     )
 
-    # Add OpenBox components
     all_interceptors: list = [workflow_interceptor, activity_interceptor, *interceptors]
 
-    # Header-based OTel trace propagation via Temporal's built-in interceptor.
     if enable_trace_propagation:
         from temporalio.contrib.opentelemetry import TracingInterceptor
 
@@ -277,7 +257,7 @@ def create_openbox_worker(
 
     logger.info(
         "OpenBox SDK initialized: policy=%s timeout=%ss db=%s file=%s hitl=%s "
-        "hook_governance=enabled events=WorkflowStarted,WorkflowCompleted,"
+        "instrumentation=openbox_core events=WorkflowStarted,WorkflowCompleted,"
         "WorkflowFailed,SignalReceived,ActivityStarted,ActivityCompleted",
         governance_policy,
         governance_timeout,
@@ -286,7 +266,6 @@ def create_openbox_worker(
         "enabled" if hitl_enabled else "disabled",
     )
 
-    # Create and return Worker
     return Worker(
         client,
         task_queue=task_queue,
