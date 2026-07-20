@@ -1,4 +1,3 @@
-# tests/test_request_signing.py
 """Unit + local-verify tests for AIP DID + Ed25519 request signing.
 
 Body-hash determinism is the #1 failure mode against Core, so these tests assert
@@ -59,9 +58,7 @@ def _verify_like_core(headers: dict, method: str, path: str, body: bytes,
     public_key.verify(sig, canonical.encode("utf-8"))  # raises on mismatch
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # serialize_body / empty-body hash
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_empty_body_is_empty_bytes():
@@ -78,9 +75,7 @@ def test_serialize_body_is_compact_no_spaces():
     assert b", " not in body and b": " not in body
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Signed round-trip (local verify harness)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_signed_request_verifies_with_public_key(signer):
@@ -144,9 +139,7 @@ def test_all_five_sites_verify(signer):
         _verify_like_core(headers, method, path, body, signer.public_key())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Header format / canonical correctness
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_five_aip_headers_present_when_signing(signer):
@@ -165,6 +158,7 @@ def test_base_auth_headers_always_present(signer):
     )
     assert headers["Authorization"] == "Bearer obx_test_k"
     assert "User-Agent" in headers and "X-OpenBox-SDK-Version" in headers
+    assert headers["X-OpenBox-SDK-Version"].startswith("openbox-temporal-python-v")
 
 
 def test_body_sha_is_lowercase_hex(signer):
@@ -206,9 +200,7 @@ def test_method_is_upper_in_canonical(signer):
                       signer.public_key())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Nonce uniqueness
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_nonce_unique_across_calls(signer):
@@ -221,9 +213,7 @@ def test_nonce_unique_across_calls(signer):
     assert len(nonces) == 500
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Unsigned mode
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_unsigned_mode_no_aip_headers():
@@ -245,9 +235,7 @@ def test_did_without_signer_stays_unsigned():
     assert HEADER_SIGNATURE not in headers
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Transports send content= (never json=)
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_send_sync_posts_content_bytes():
@@ -271,9 +259,7 @@ async def test_send_async_posts_content_bytes():
     assert "json" not in client.post.call_args.kwargs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Sandbox import isolation — cryptography/request_signing must NOT load eagerly
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_workflow_import_path_excludes_crypto_and_signing():

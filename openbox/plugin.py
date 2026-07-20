@@ -1,4 +1,3 @@
-# openbox/plugin.py
 """
 OpenBox Plugin for Temporal Workers.
 
@@ -25,7 +24,6 @@ from temporalio.worker import WorkerConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from .config import initialize as validate_api_key, GovernanceConfig
-from .span_processor import WorkflowSpanProcessor
 from .client import GovernanceClient
 
 logger = logging.getLogger(__name__)
@@ -53,8 +51,6 @@ class OpenBoxPlugin(SimplePlugin):
         *,
         openbox_url: str,
         openbox_api_key: str,
-        # AIP DID + Ed25519 signing (both-or-neither). Required for
-        # signing_required=true agents; every Core request is signed locally.
         agent_did: Optional[str] = None,
         agent_private_key: Optional[str] = None,
         governance_timeout: float = 30.0,
@@ -69,14 +65,8 @@ class OpenBoxPlugin(SimplePlugin):
         db_libraries: Optional[Set[str]] = None,
         sqlalchemy_engine: Optional[Any] = None,
         instrument_file_io: bool = True,
-        # Propagate W3C traceparent/baggage through Temporal headers so spans
-        # started by the caller (e.g., an HTTP server) stitch to workflow and
-        # activity spans on the worker side. Uses Temporal's built-in
-        # TracingInterceptor under the hood.
         enable_trace_propagation: bool = True,
     ):
-        # 1. Validate API key (sync, uses urllib). Also loads the Ed25519 signer
-        #    and validates a signing_required=true agent via a signed GET.
         validate_api_key(
             api_url=openbox_url,
             api_key=openbox_api_key,
@@ -85,36 +75,35 @@ class OpenBoxPlugin(SimplePlugin):
             agent_private_key=agent_private_key,
         )
 
-        # Pull the loaded signer (loaded once, never re-parsed downstream).
         from .config import get_global_config
 
         _signer = get_global_config().get_signer()
 
-        # 2. Create span processor
-        self._span_processor = WorkflowSpanProcessor(
-            ignored_url_prefixes=[openbox_url]
-        )
+        from .governance_state import TemporalGovernanceState
 
-        # 3. Setup OTel instrumentation (HTTP, DB, File I/O)
-        from .otel_setup import setup_opentelemetry_for_governance
+        self._state = TemporalGovernanceState()
 
-        setup_opentelemetry_for_governance(
-            self._span_processor,
+        from .core_adapter import create_core_runtime
+
+        self._runtime = create_core_runtime(
             api_url=openbox_url,
             api_key=openbox_api_key,
-            ignored_urls=[openbox_url],
-            instrument_databases=instrument_databases,
-            db_libraries=db_libraries,
-            instrument_file_io=instrument_file_io,
-            sqlalchemy_engine=sqlalchemy_engine,
-            api_timeout=governance_timeout,
+            state=self._state,
+            timeout_seconds=governance_timeout,
             on_api_error=governance_policy,
-            max_body_size=65536,
             agent_did=agent_did,
-            signer=_signer,
+            agent_private_key=agent_private_key,
+            hitl_enabled=hitl_enabled,
+            skip_workflow_types=skip_workflow_types or set(),
+            skip_activity_types=skip_activity_types or {"send_governance_event"},
+            skip_signals=skip_signals or set(),
+            send_start_event=send_start_event,
+            send_activity_start_event=send_activity_start_event,
+            instrument_databases=instrument_databases,
+            instrument_file_io=instrument_file_io,
         )
+        self._runtime.install_instrumentation()
 
-        # 4. Create governance config
         config = GovernanceConfig(
             on_api_error=governance_policy,
             api_timeout=governance_timeout,
@@ -126,7 +115,6 @@ class OpenBoxPlugin(SimplePlugin):
             hitl_enabled=hitl_enabled,
         )
 
-        # 5. Create interceptors
         from .workflow_interceptor import GovernanceInterceptor
         from .activity_interceptor import ActivityGovernanceInterceptor
 
@@ -143,30 +131,23 @@ class OpenBoxPlugin(SimplePlugin):
             GovernanceInterceptor(
                 api_url=openbox_url,
                 api_key=openbox_api_key,
-                span_processor=self._span_processor,
+                state=self._state,
                 config=config,
             ),
             ActivityGovernanceInterceptor(
                 api_url=openbox_url,
                 api_key=openbox_api_key,
-                span_processor=self._span_processor,
+                state=self._state,
                 config=config,
                 client=governance_client,
             ),
         ]
 
-        # Header-based OTel trace propagation. Temporal's built-in
-        # TracingInterceptor implements both client.Interceptor and
-        # worker.Interceptor — SimplePlugin auto-routes it to both sides.
-        # Without it, trace IDs set by the caller don't reach workflow/
-        # activity spans, leaving disconnected trees in the backend.
         if enable_trace_propagation:
             from temporalio.contrib.opentelemetry import TracingInterceptor
 
             interceptors.append(TracingInterceptor())
 
-        # 6. Build governance activity instance with credentials captured in self —
-        # avoids passing api_key through activity inputs / workflow history.
         from .activities import build_governance_activities
 
         governance_activities = build_governance_activities(
@@ -176,7 +157,6 @@ class OpenBoxPlugin(SimplePlugin):
             signer=_signer,
         )
 
-        # 7. Sandbox passthrough for opentelemetry
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner | None:
             if runner is None:
                 return None
@@ -189,7 +169,6 @@ class OpenBoxPlugin(SimplePlugin):
                 )
             return runner
 
-        # Store config for logging
         self._governance_policy = governance_policy
         self._governance_timeout = governance_timeout
         self._instrument_databases = instrument_databases
@@ -218,7 +197,7 @@ class OpenBoxPlugin(SimplePlugin):
         hitl_status = "enabled" if self._hitl_enabled else "disabled"
         logger.info(
             "OpenBox Plugin initialized: policy=%s timeout=%ss "
-            "db=%s file=%s hitl=%s hook_governance=enabled",
+            "db=%s file=%s hitl=%s instrumentation=openbox_core",
             self._governance_policy,
             self._governance_timeout,
             db_status,

@@ -1,4 +1,3 @@
-# openbox/config.py
 """
 OpenBox SDK - Configuration for workflow-boundary governance (SPEC-003).
 
@@ -13,6 +12,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Set, Optional
 
+from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
+from openbox_core.identity import (
+    AGENT_DID_PREFIX as CORE_AGENT_DID_PREFIX,
+    load_ed25519_seed as load_core_ed25519_seed,
+    validate_agent_did as validate_core_agent_did,
+)
+
 # NOTE: urllib and logging imports are lazy to avoid Temporal sandbox restrictions.
 # Both use os.stat internally which triggers sandbox errors.
 
@@ -24,20 +30,11 @@ def _get_logger():
     return logging.getLogger(__name__)
 
 
-def _build_auth_headers(api_key: str) -> dict:
-    """Build auth headers reusing hook_governance's centralized builder."""
-    from .hook_governance import build_auth_headers
-
-    return build_auth_headers(api_key)
-
-
 # API key format pattern (obx_live_... or obx_test_...)
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_\w+$")
 
-# Agent DID prefix; the suffix must be a parseable UUID (validated via uuid.UUID,
-# matching Core's UUID parser rather than a loose regex).
-AGENT_DID_PREFIX = "did:aip:"
-
+# Backward-compatible public constant, owned by the base SDK.
+AGENT_DID_PREFIX = CORE_AGENT_DID_PREFIX
 
 # Re-export from errors.py for backward compatibility
 from .errors import (  # noqa: F401
@@ -47,9 +44,7 @@ from .errors import (  # noqa: F401
     OpenBoxInsecureURLError,
 )
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # GovernanceConfig - Configuration for interceptors
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -123,9 +118,7 @@ class GovernanceConfig:
     hitl_poll_interval_ms: int = 5000
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Global Configuration Singleton
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def _validate_api_key_format(api_key: str) -> bool:
@@ -134,28 +127,11 @@ def _validate_api_key_format(api_key: str) -> bool:
 
 
 def _validate_did(agent_did: str) -> None:
-    """Validate agent DID format (did:aip:<uuid>).
-
-    Parses the suffix with uuid.UUID so malformed UUID layouts fail locally at
-    init (matching Core's parser) rather than slipping through to a Core 4xx.
-
-    Raises OpenBoxConfigError on mismatch.
-    """
-    import uuid
-
-    if not isinstance(agent_did, str) or not agent_did.startswith(AGENT_DID_PREFIX):
-        raise OpenBoxConfigError(
-            f"Invalid agent DID format. Expected 'did:aip:<uuid>', "
-            f"got: '{str(agent_did)[:24]}...' (showing first 24 chars)"
-        )
-    suffix = agent_did[len(AGENT_DID_PREFIX) :]
+    """Validate agent DID format through the shared base SDK."""
     try:
-        uuid.UUID(suffix)
-    except (ValueError, AttributeError):
-        raise OpenBoxConfigError(
-            f"Invalid agent DID: '{agent_did[:24]}...' — the part after "
-            f"'{AGENT_DID_PREFIX}' is not a valid UUID."
-        )
+        validate_core_agent_did(agent_did)
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
 
 
 def resolve_signing_defaults(agent_did, signer):
@@ -173,38 +149,11 @@ def resolve_signing_defaults(agent_did, signer):
 
 
 def _load_ed25519_seed(agent_private_key: str):
-    """Decode a base64 raw 32-byte Ed25519 seed and load a private key object.
-
-    The provisioned key is a raw 32-byte seed (base64), NOT PKCS8. Returns a
-    cryptography Ed25519PrivateKey. Never echoes key bytes in error messages —
-    the seed is non-repudiation material.
-
-    Raises OpenBoxConfigError on any failure (bad base64, wrong length, load error).
-    """
-    import base64
-
-    # cryptography imported lazily — keeps it off any eager import path.
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
+    """Decode and load an Ed25519 signer through the shared base SDK."""
     try:
-        seed = base64.b64decode(agent_private_key, validate=True)
-    except Exception:
-        raise OpenBoxConfigError(
-            "Invalid agent private key: not valid base64 (key bytes not shown)."
-        )
-
-    if len(seed) != 32:
-        raise OpenBoxConfigError(
-            f"Invalid agent private key: expected a 32-byte Ed25519 seed, "
-            f"got {len(seed)} bytes (key bytes not shown)."
-        )
-
-    try:
-        return Ed25519PrivateKey.from_private_bytes(seed)
-    except Exception:
-        raise OpenBoxConfigError(
-            "Invalid agent private key: could not load Ed25519 key (key bytes not shown)."
-        )
+        return load_core_ed25519_seed(agent_private_key)
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
 
 
 def _validate_url_security(api_url: str) -> None:
@@ -421,34 +370,23 @@ def initialize(
         OpenBoxConfigError: Invalid DID / private key, or only one of the pair set
         OpenBoxNetworkError: Cannot reach OpenBox Core
 
+    Note:
+        Most users do not call ``initialize()`` directly — use
+        ``create_openbox_worker(...)`` or ``OpenBoxPlugin(...)``, which validate
+        the key, build and own the base ``OpenBoxRuntime`` (installing all
+        HTTP/DB/file/function hook instrumentation), and wire the interceptors.
+
     Example:
-        from openbox import (
-            initialize,
-            setup_opentelemetry_for_governance,
-            WorkflowSpanProcessor,
-            GovernanceInterceptor,
-            ActivityGovernanceInterceptor,
-            OpenBoxClient,
-            GovernanceConfig,
+        from openbox import create_openbox_worker
+
+        worker = create_openbox_worker(
+            client=client,
+            task_queue="my-queue",
+            workflows=[MyWorkflow],
+            activities=[my_activity],
+            openbox_url="https://api.openbox.ai",
+            openbox_api_key="obx_live_...",
         )
-
-        # 1. Initialize SDK (use HTTPS for production, HTTP allowed for localhost only)
-        initialize(api_url="https://api.openbox.ai", api_key="obx_live_...")
-
-        # 2. Setup OTel and span processor
-        span_processor = WorkflowSpanProcessor()
-        setup_opentelemetry_for_governance(span_processor)
-
-        # 3. Create client and config
-        client = OpenBoxClient(api_url="...", api_key="...")
-        config = GovernanceConfig()
-
-        # 4. Create interceptors (BOTH workflow and activity)
-        workflow_interceptor = GovernanceInterceptor(client, span_processor, config)
-        activity_interceptor = ActivityGovernanceInterceptor(api_url, api_key, span_processor, config)
-
-        # 5. Add to Temporal worker
-        worker = Worker(..., interceptors=[workflow_interceptor, activity_interceptor])
     """
     # Validate URL security (HTTPS required for non-localhost)
     _validate_url_security(api_url)

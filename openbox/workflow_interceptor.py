@@ -1,4 +1,3 @@
-# openbox/workflow_interceptor.py
 """
 Temporal workflow interceptor for workflow-boundary governance.
 
@@ -24,9 +23,12 @@ from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import (
     Interceptor,
     WorkflowInboundInterceptor,
+    WorkflowOutboundInterceptor,
     WorkflowInterceptorClassInput,
     ExecuteWorkflowInput,
     HandleSignalInput,
+    StartActivityInput,
+    StartLocalActivityInput,
 )
 
 from .errors import (
@@ -35,7 +37,10 @@ from .errors import (
     GOVERNANCE_HALT_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
 )
+from openbox_core.contracts import events as _events
+
 from .types import Verdict
+from .multi_agent import read_session_from_memo, inject_session_header
 
 
 def _application_error_type(exc: BaseException) -> Optional[str]:
@@ -142,7 +147,6 @@ def _serialize_value(value: Any) -> Any:
         return str(value)
 
 
-# Re-export from errors.py for backward compatibility
 from .errors import GovernanceHaltError  # noqa: F401
 
 
@@ -181,24 +185,18 @@ async def _send_governance_event(
     except Exception as e:
         app_error_type = _application_error_type(e)
 
-        # GovernanceHalt / legacy GovernanceStop: workflow should terminate
-        # (client.terminate() already called by the activity, but re-raise to
-        # ensure the workflow code path stops).
         if app_error_type in (
             GOVERNANCE_HALT_ERROR_TYPE,
             GOVERNANCE_STOP_ERROR_TYPE,
         ):
             raise GovernanceHaltError(str(e))
 
-        # GovernanceBlock: the current activity is blocked; the workflow continues.
         if app_error_type == GOVERNANCE_BLOCK_ERROR_TYPE:
             return None
 
-        # Activity raised GovernanceAPIError (fail_closed + API unreachable).
         if app_error_type == GOVERNANCE_API_ERROR_TYPE:
             raise GovernanceHaltError(str(e))
 
-        # Other errors with fail_open: silently continue.
         return None
 
 
@@ -209,15 +207,12 @@ class GovernanceInterceptor(Interceptor):
         self,
         api_url: str = "",
         api_key: str = "",
-        span_processor=None,  # Shared with activity interceptor for HTTP spans
+        state=None,  # TemporalGovernanceState — signal verdict bridge to activities
         config=None,  # Optional GovernanceConfig
     ):
-        # api_url / api_key are accepted for backward compatibility but no longer
-        # flow to the governance activity — credentials live on GovernanceActivities.
-        # Kept on self in case downstream callers introspect.
         self.api_url = api_url.rstrip("/") if api_url else ""
         self.api_key = api_key
-        self.span_processor = span_processor
+        self.state = state
         self.api_timeout = getattr(config, "api_timeout", 30.0) if config else 30.0
         self.on_api_error = (
             getattr(config, "on_api_error", "fail_open") if config else "fail_open"
@@ -233,45 +228,62 @@ class GovernanceInterceptor(Interceptor):
     def workflow_interceptor_class(
         self, input: WorkflowInterceptorClassInput
     ) -> Optional[Type[WorkflowInboundInterceptor]]:
-        # Capture via closure
-        span_processor = self.span_processor
+        state = self.state
         timeout = self.api_timeout
         on_error = self.on_api_error
         send_start = self.send_start_event
         skip_types = self.skip_workflow_types
         skip_sigs = self.skip_signals
 
+        class _Outbound(WorkflowOutboundInterceptor):
+            """Stamps the multi-agent session id onto every scheduled activity."""
+
+            def start_activity(self, input: StartActivityInput):
+                sid = read_session_from_memo()
+                if sid:
+                    input.headers = inject_session_header(
+                        input.headers, sid, workflow.payload_converter()
+                    )
+                return super().start_activity(input)
+
+            def start_local_activity(self, input: StartLocalActivityInput):
+                sid = read_session_from_memo()
+                if sid:
+                    input.headers = inject_session_header(
+                        input.headers, sid, workflow.payload_converter()
+                    )
+                return super().start_local_activity(input)
+
         class _Inbound(WorkflowInboundInterceptor):
+            def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+                super().init(_Outbound(outbound))
+
             async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
                 info = workflow.info()
 
-                # Skip if configured
                 if info.workflow_type in skip_types:
                     return await super().execute_workflow(input)
 
-                # WorkflowStarted event
+                sid = read_session_from_memo()
+
                 if send_start and workflow.patched("openbox-v2-start"):
                     await _send_governance_event(
-                        {
-                            "source": "workflow-telemetry",
-                            "event_type": "WorkflowStarted",
-                            "workflow_id": info.workflow_id,
-                            "run_id": info.run_id,
-                            "workflow_type": info.workflow_type,
-                            "task_queue": info.task_queue,
-                        },
+                        _events.workflow_started(
+                            workflow_id=info.workflow_id,
+                            run_id=info.run_id,
+                            workflow_type=info.workflow_type,
+                            task_queue=info.task_queue,
+                            multi_agent_session_id=sid,
+                        ).to_payload_dict(),
                         timeout,
                         on_error,
                     )
 
-                # Execute workflow
                 error = None
                 try:
                     result = await super().execute_workflow(input)
 
-                    # WorkflowCompleted event (success)
                     if workflow.patched("openbox-v2-complete"):
-                        # Serialize workflow result for governance
                         workflow_output = None
                         try:
                             workflow_output = _serialize_value(result)
@@ -281,14 +293,13 @@ class GovernanceInterceptor(Interceptor):
                             )
 
                         await _send_governance_event(
-                            {
-                                "source": "workflow-telemetry",
-                                "event_type": "WorkflowCompleted",
-                                "workflow_id": info.workflow_id,
-                                "run_id": info.run_id,
-                                "workflow_type": info.workflow_type,
-                                "workflow_output": workflow_output,
-                            },
+                            _events.workflow_completed(
+                                workflow_id=info.workflow_id,
+                                run_id=info.run_id,
+                                workflow_type=info.workflow_type,
+                                multi_agent_session_id=sid,
+                                extra={"workflow_output": workflow_output},
+                            ).to_payload_dict(),
                             timeout,
                             on_error,
                         )
@@ -303,14 +314,13 @@ class GovernanceInterceptor(Interceptor):
                         # GovernanceHaltError and shadow the real workflow exception).
                         try:
                             await _send_governance_event(
-                                {
-                                    "source": "workflow-telemetry",
-                                    "event_type": "WorkflowFailed",
-                                    "workflow_id": info.workflow_id,
-                                    "run_id": info.run_id,
-                                    "workflow_type": info.workflow_type,
-                                    "error": error,
-                                },
+                                _events.workflow_failed(
+                                    workflow_id=info.workflow_id,
+                                    run_id=info.run_id,
+                                    workflow_type=info.workflow_type,
+                                    error=error,
+                                    multi_agent_session_id=sid,
+                                ).to_payload_dict(),
                                 timeout,
                                 on_error,
                             )
@@ -322,29 +332,25 @@ class GovernanceInterceptor(Interceptor):
             async def handle_signal(self, input: HandleSignalInput) -> None:
                 info = workflow.info()
 
-                # Skip if configured
                 if input.signal in skip_sigs or info.workflow_type in skip_types:
                     return await super().handle_signal(input)
 
-                # SignalReceived event - check verdict and store if "stop"
                 if workflow.patched("openbox-v2-signal"):
+                    sid = read_session_from_memo()
                     result = await _send_governance_event(
-                        {
-                            "source": "workflow-telemetry",
-                            "event_type": "SignalReceived",
-                            "workflow_id": info.workflow_id,
-                            "run_id": info.run_id,
-                            "workflow_type": info.workflow_type,
-                            "task_queue": info.task_queue,
-                            "signal_name": input.signal,
-                            "signal_args": input.args,
-                        },
+                        _events.signal_received(
+                            workflow_id=info.workflow_id,
+                            run_id=info.run_id,
+                            workflow_type=info.workflow_type,
+                            task_queue=info.task_queue,
+                            signal_name=input.signal,
+                            multi_agent_session_id=sid,
+                            extra={"signal_args": input.args},
+                        ).to_payload_dict(),
                         timeout,
                         on_error,
                     )
 
-                    # If governance returned BLOCK/HALT, store verdict for activity interceptor
-                    # The next activity will check this and fail with GovernanceStop
                     verdict = (
                         Verdict.from_string(
                             result.get("verdict") or result.get("action")
@@ -352,12 +358,13 @@ class GovernanceInterceptor(Interceptor):
                         if result
                         else Verdict.ALLOW
                     )
-                    if verdict.should_stop() and span_processor:
-                        span_processor.set_verdict(
+                    if verdict.should_stop() and state:
+                        # Run-scoped: the next activity in THIS run enforces it.
+                        state.set_signal_verdict(
                             info.workflow_id,
+                            info.run_id,
                             verdict,
                             result.get("reason"),
-                            info.run_id,  # Include run_id to detect stale verdicts
                         )
 
                 await super().handle_signal(input)

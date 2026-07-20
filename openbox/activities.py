@@ -1,10 +1,8 @@
-# openbox/activities.py
-#
-# IMPORTANT: This module imports httpx which uses os.stat internally.
-# Do NOT import this module from workflow code (workflow_interceptor.py)!
-# The workflow interceptor references this activity by string name "send_governance_event".
 """
 Governance event activity for workflow-level HTTP calls.
+
+NOT sandbox-safe: this module imports httpx. Workflow code references the
+activity by string name instead of importing it.
 
 CRITICAL: Temporal workflows must be deterministic. HTTP calls are NOT allowed directly
 in workflow code (including interceptors). WorkflowInboundInterceptor sends events via
@@ -29,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 
-from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .types import rfc3339_now as _rfc3339_now
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -49,7 +47,6 @@ def set_temporal_client(client) -> None:
     _temporal_client = client
 
 
-# Re-export from errors.py for backward compatibility
 from .errors import GovernanceAPIError  # noqa: F401
 
 
@@ -259,14 +256,12 @@ def build_governance_activities(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Backward-compat module-level helper.
 #
 # Not decorated with @activity.defn — worker/plugin register the class-based
 # version above so credentials never flow through activity inputs. This shim
 # exists for direct callers (tests, scripts) who already hold credentials and
 # want to invoke the HTTP logic without constructing the class themselves.
-# ─────────────────────────────────────────────────────────────────────────────
 async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Backward-compat wrapper — delegates to GovernanceActivities.
 

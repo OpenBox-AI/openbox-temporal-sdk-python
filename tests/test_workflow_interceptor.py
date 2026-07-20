@@ -1,4 +1,3 @@
-# tests/test_workflow_interceptor.py
 """
 Comprehensive pytest tests for the OpenBox SDK workflow_interceptor module.
 
@@ -24,10 +23,7 @@ from openbox.workflow_interceptor import (
 )
 from openbox.types import Verdict
 from openbox.config import GovernanceConfig
-
-# =============================================================================
-# Tests for _serialize_value()
-# =============================================================================
+from openbox.governance_state import TemporalGovernanceState
 
 
 class TestSerializeValue:
@@ -216,11 +212,6 @@ class TestSerializeValue:
         assert isinstance(result, str)
 
 
-# =============================================================================
-# Tests for GovernanceHaltError
-# =============================================================================
-
-
 class TestGovernanceHaltError:
     """Tests for the GovernanceHaltError exception class."""
 
@@ -254,11 +245,6 @@ class TestGovernanceHaltError:
         with pytest.raises(GovernanceHaltError) as exc_info:
             raise GovernanceHaltError(msg)
         assert str(exc_info.value) == msg
-
-
-# =============================================================================
-# Tests for _send_governance_event()
-# =============================================================================
 
 
 class TestSendGovernanceEvent:
@@ -377,8 +363,6 @@ class TestSendGovernanceEvent:
     @pytest.mark.asyncio
     async def test_string_matching_on_message_is_ignored(self, mock_workflow):
         """Messages containing 'GovernanceHalt' must NOT trigger halt without proper type."""
-        # User workflow could legitimately throw an error whose string happens to contain
-        # "GovernanceHalt" — the old string-match logic would false-positive on this.
         error = Exception("GovernanceHalt: user happens to mention this string")
         mock_workflow.execute_activity = AsyncMock(side_effect=error)
 
@@ -434,17 +418,12 @@ class TestSendGovernanceEvent:
         assert call_args.kwargs["start_to_close_timeout"] == expected_timeout
 
 
-# =============================================================================
-# Tests for GovernanceInterceptor
-# =============================================================================
-
-
 class TestGovernanceInterceptor:
     """Tests for the GovernanceInterceptor class."""
 
     def test_initialization_with_all_parameters(self):
         """Test initialization with all parameters."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         config = GovernanceConfig(
             api_timeout=60.0,
             on_api_error="fail_closed",
@@ -456,13 +435,13 @@ class TestGovernanceInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-api-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
         assert interceptor.api_url == "https://api.openbox.ai"
         assert interceptor.api_key == "test-api-key"
-        assert interceptor.span_processor is mock_span_processor
+        assert interceptor.state is state
         assert interceptor.api_timeout == 60.0
         assert interceptor.on_api_error == "fail_closed"
         assert interceptor.send_start_event is False
@@ -488,7 +467,7 @@ class TestGovernanceInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=None,
+            state=None,
             config=None,
         )
 
@@ -497,7 +476,7 @@ class TestGovernanceInterceptor:
         assert interceptor.send_start_event is True
         assert interceptor.skip_workflow_types == set()
         assert interceptor.skip_signals == set()
-        assert interceptor.span_processor is None
+        assert interceptor.state is None
 
     def test_default_values_from_config(self):
         """Test default values are read from config."""
@@ -533,11 +512,6 @@ class TestGovernanceInterceptor:
         assert result.__name__ == "_Inbound"
 
 
-# =============================================================================
-# Tests for _Inbound interceptor class (inner class)
-# =============================================================================
-
-
 class TestInboundInterceptor:
     """Tests for the _Inbound interceptor class."""
 
@@ -554,7 +528,9 @@ class TestInboundInterceptor:
     @pytest.fixture
     def mock_workflow_module(self, mock_workflow_info):
         """Create a mock workflow module with patched methods."""
-        with patch("openbox.workflow_interceptor.workflow") as mock:
+        with patch("openbox.workflow_interceptor.workflow") as mock, patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
             mock.info.return_value = mock_workflow_info
             mock.patched.return_value = True
             mock.execute_activity = AsyncMock(return_value={"verdict": "allow"})
@@ -566,7 +542,7 @@ class TestInboundInterceptor:
         return GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=MagicMock(),
+            state=TemporalGovernanceState(),
             config=GovernanceConfig(),
         )
 
@@ -975,11 +951,11 @@ class TestInboundInterceptor:
         mock_next.handle_signal.assert_called_once_with(signal_input)
 
     @pytest.mark.asyncio
-    async def test_handle_signal_stores_verdict_in_span_processor_if_block(
+    async def test_handle_signal_stores_verdict_in_state_if_block(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal stores verdict in span_processor if BLOCK verdict."""
-        mock_span_processor = MagicMock()
+        """Test handle_signal records a run-scoped signal verdict on BLOCK."""
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "block",
@@ -990,7 +966,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1007,20 +983,18 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # Check that set_verdict was called on span_processor
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        # The next activity in THIS run enforces the recorded verdict.
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.BLOCK,
             "High risk signal",
-            "run-456",  # run_id
         )
 
     @pytest.mark.asyncio
-    async def test_handle_signal_stores_verdict_in_span_processor_if_halt(
+    async def test_handle_signal_stores_verdict_in_state_if_halt(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal stores verdict in span_processor if HALT verdict."""
-        mock_span_processor = MagicMock()
+        """Test handle_signal records a run-scoped signal verdict on HALT."""
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "halt",
@@ -1031,7 +1005,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1048,11 +1022,9 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.HALT,
             "Critical alert",
-            "run-456",
         )
 
     @pytest.mark.asyncio
@@ -1060,7 +1032,7 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal does not store verdict if ALLOW verdict."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "allow",
@@ -1071,7 +1043,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1088,14 +1060,14 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # set_verdict should NOT be called for ALLOW
-        mock_span_processor.set_verdict.assert_not_called()
+        # No verdict should be recorded for ALLOW.
+        assert state.get_signal_verdict("wf-123", "run-456") is None
 
     @pytest.mark.asyncio
-    async def test_handle_signal_does_not_store_verdict_if_no_span_processor(
+    async def test_handle_signal_does_not_fail_if_no_state(
         self, mock_workflow_module, mock_workflow_info
     ):
-        """Test handle_signal does not fail if no span_processor."""
+        """Test handle_signal does not fail if state is None."""
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "verdict": "block",
@@ -1106,7 +1078,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=None,  # No span processor
+            state=None,  # No governance state
             config=GovernanceConfig(),
         )
 
@@ -1121,7 +1093,7 @@ class TestInboundInterceptor:
         signal_input.signal = "test_signal"
         signal_input.args = []
 
-        # Should not raise even though verdict is BLOCK and no span_processor
+        # Should not raise even though verdict is BLOCK and there is no state.
         await inbound.handle_signal(signal_input)
 
         mock_next.handle_signal.assert_called_once()
@@ -1131,7 +1103,7 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal uses action field if verdict not present (v1.0 compat)."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(
             return_value={
                 "action": "stop",  # v1.0 style
@@ -1142,7 +1114,7 @@ class TestInboundInterceptor:
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1160,11 +1132,9 @@ class TestInboundInterceptor:
         await inbound.handle_signal(signal_input)
 
         # "stop" should map to HALT
-        mock_span_processor.set_verdict.assert_called_once_with(
-            "wf-123",
+        assert state.get_signal_verdict("wf-123", "run-456") == (
             Verdict.HALT,
             "Blocked by v1 policy",
-            "run-456",
         )
 
     @pytest.mark.asyncio
@@ -1172,13 +1142,13 @@ class TestInboundInterceptor:
         self, mock_workflow_module, mock_workflow_info
     ):
         """Test handle_signal defaults to ALLOW if result is None."""
-        mock_span_processor = MagicMock()
+        state = TemporalGovernanceState()
         mock_workflow_module.execute_activity = AsyncMock(return_value=None)
 
         interceptor = GovernanceInterceptor(
             api_url="https://api.openbox.ai",
             api_key="test-key",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
@@ -1195,13 +1165,8 @@ class TestInboundInterceptor:
 
         await inbound.handle_signal(signal_input)
 
-        # Should not store verdict since default is ALLOW
-        mock_span_processor.set_verdict.assert_not_called()
-
-
-# =============================================================================
-# Integration-style tests (testing closures and captured variables)
-# =============================================================================
+        # Should not store verdict since default is ALLOW.
+        assert state.get_signal_verdict("wf-123", "run-456") is None
 
 
 class TestInterceptorClosures:
@@ -1210,7 +1175,9 @@ class TestInterceptorClosures:
     @pytest.mark.asyncio
     async def test_interceptor_captures_config_values(self):
         """Test that the inner _Inbound class captures config values via closures."""
-        with patch("openbox.workflow_interceptor.workflow") as mock_workflow:
+        with patch("openbox.workflow_interceptor.workflow") as mock_workflow, patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
             mock_info = MagicMock()
             mock_info.workflow_id = "wf-closure-test"
             mock_info.run_id = "run-closure"
@@ -1272,11 +1239,6 @@ class TestInterceptorClosures:
         assert interceptor2.skip_workflow_types == {"Skip2"}
 
 
-# =============================================================================
-# Edge Cases
-# =============================================================================
-
-
 class TestEdgeCases:
     """Tests for edge cases and boundary conditions."""
 
@@ -1301,7 +1263,9 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_execute_workflow_handles_none_result(self):
         """Test execute_workflow handles None result."""
-        with patch("openbox.workflow_interceptor.workflow") as mock_workflow:
+        with patch("openbox.workflow_interceptor.workflow") as mock_workflow, patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
             mock_info = MagicMock()
             mock_info.workflow_id = "wf-none"
             mock_info.run_id = "run-none"
@@ -1342,7 +1306,9 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_handle_signal_with_empty_args(self):
         """Test handle_signal with empty args list."""
-        with patch("openbox.workflow_interceptor.workflow") as mock_workflow:
+        with patch("openbox.workflow_interceptor.workflow") as mock_workflow, patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
             mock_info = MagicMock()
             mock_info.workflow_id = "wf-signal"
             mock_info.run_id = "run-signal"
@@ -1383,3 +1349,177 @@ class TestEdgeCases:
             api_key="test-key",
         )
         assert isinstance(interceptor, Interceptor)
+
+
+class TestMultiAgentSessionPropagation:
+    """Workflow interceptor tags events + stamps header from the memo session id."""
+
+    def _interceptor(self):
+        return GovernanceInterceptor(
+            api_url="https://api.openbox.ai",
+            api_key="test-key",
+            state=TemporalGovernanceState(),
+            config=GovernanceConfig(),
+        )
+
+    def _mock_info(self):
+        info = MagicMock()
+        info.workflow_id = "wf-ma"
+        info.run_id = "run-ma"
+        info.workflow_type = "MaWorkflow"
+        info.task_queue = "ma-queue"
+        return info
+
+    @pytest.mark.asyncio
+    async def test_workflow_events_tagged_when_memo_set(self):
+        """Memo set → WorkflowStarted/Completed payloads carry multi_agent_session_id."""
+        with patch("openbox.workflow_interceptor.workflow") as mock_wf, patch(
+            "openbox.workflow_interceptor.read_session_from_memo",
+            return_value="sess-abc",
+        ):
+            mock_wf.info.return_value = self._mock_info()
+            mock_wf.patched.return_value = True
+            mock_wf.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+            mock_next = AsyncMock()
+            mock_next.execute_workflow = AsyncMock(return_value="ok")
+            inbound = inbound_class(mock_next)
+
+            await inbound.execute_workflow(MagicMock())
+
+            payloads = [
+                c.kwargs["args"][0]["payload"]
+                for c in mock_wf.execute_activity.call_args_list
+            ]
+            assert payloads, "expected at least one governance event"
+            for payload in payloads:
+                assert payload["multi_agent_session_id"] == "sess-abc"
+
+    @pytest.mark.asyncio
+    async def test_workflow_failed_tagged_when_memo_set(self):
+        """Memo set → WorkflowFailed payload carries multi_agent_session_id."""
+        with patch("openbox.workflow_interceptor.workflow") as mock_wf, patch(
+            "openbox.workflow_interceptor.read_session_from_memo",
+            return_value="sess-abc",
+        ):
+            mock_wf.info.return_value = self._mock_info()
+            mock_wf.patched.return_value = True
+            mock_wf.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+            mock_next = AsyncMock()
+            mock_next.execute_workflow = AsyncMock(side_effect=ValueError("boom"))
+            inbound = inbound_class(mock_next)
+
+            with pytest.raises(ValueError):
+                await inbound.execute_workflow(MagicMock())
+
+            failed = [
+                c.kwargs["args"][0]["payload"]
+                for c in mock_wf.execute_activity.call_args_list
+                if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowFailed"
+            ]
+            assert failed and failed[0]["multi_agent_session_id"] == "sess-abc"
+
+    @pytest.mark.asyncio
+    async def test_signal_tagged_when_memo_set(self):
+        """Memo set → SignalReceived payload carries multi_agent_session_id."""
+        with patch("openbox.workflow_interceptor.workflow") as mock_wf, patch(
+            "openbox.workflow_interceptor.read_session_from_memo",
+            return_value="sess-abc",
+        ):
+            mock_wf.info.return_value = self._mock_info()
+            mock_wf.patched.return_value = True
+            mock_wf.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+            mock_next = AsyncMock()
+            mock_next.handle_signal = AsyncMock()
+            inbound = inbound_class(mock_next)
+
+            signal_input = MagicMock()
+            signal_input.signal = "sig"
+            signal_input.args = []
+            await inbound.handle_signal(signal_input)
+
+            payload = mock_wf.execute_activity.call_args_list[0].kwargs["args"][0][
+                "payload"
+            ]
+            assert payload["multi_agent_session_id"] == "sess-abc"
+
+    @pytest.mark.asyncio
+    async def test_events_not_tagged_when_memo_absent(self):
+        """Memo absent → no multi_agent_session_id key in any payload."""
+        with patch("openbox.workflow_interceptor.workflow") as mock_wf, patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
+            mock_wf.info.return_value = self._mock_info()
+            mock_wf.patched.return_value = True
+            mock_wf.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+            mock_next = AsyncMock()
+            mock_next.execute_workflow = AsyncMock(return_value="ok")
+            inbound = inbound_class(mock_next)
+
+            await inbound.execute_workflow(MagicMock())
+
+            for c in mock_wf.execute_activity.call_args_list:
+                payload = c.kwargs["args"][0]["payload"]
+                assert "multi_agent_session_id" not in payload
+
+    @pytest.mark.asyncio
+    async def test_outbound_stamps_header_when_memo_set(self):
+        """Outbound interceptor stamps HEADER_KEY on scheduled activities."""
+        from temporalio.converter import default as _default_converter
+        from openbox.multi_agent import HEADER_KEY
+
+        conv = _default_converter().payload_converter
+        with patch("openbox.workflow_interceptor.workflow") as mock_wf, patch(
+            "openbox.workflow_interceptor.read_session_from_memo",
+            return_value="sess-out",
+        ):
+            mock_wf.payload_converter.return_value = conv
+
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+
+            # Capture the _Outbound instance the inbound wraps during init().
+            captured = {}
+            mock_next = MagicMock()
+            mock_next.init = lambda outbound: captured.__setitem__("outbound", outbound)
+            inbound = inbound_class(mock_next)
+            inbound.init(MagicMock())
+            outbound = captured["outbound"]
+
+            activity_input = MagicMock()
+            activity_input.headers = {}
+            outbound.start_activity(activity_input)
+
+            assert HEADER_KEY in activity_input.headers
+            assert (
+                conv.from_payload(activity_input.headers[HEADER_KEY], str)
+                == "sess-out"
+            )
+
+    @pytest.mark.asyncio
+    async def test_outbound_no_header_when_memo_absent(self):
+        """Outbound interceptor leaves headers untouched when no session id."""
+        from openbox.multi_agent import HEADER_KEY
+
+        with patch("openbox.workflow_interceptor.workflow"), patch(
+            "openbox.workflow_interceptor.read_session_from_memo", return_value=None
+        ):
+            inbound_class = self._interceptor().workflow_interceptor_class(MagicMock())
+            captured = {}
+            mock_next = MagicMock()
+            mock_next.init = lambda outbound: captured.__setitem__("outbound", outbound)
+            inbound = inbound_class(mock_next)
+            inbound.init(MagicMock())
+            outbound = captured["outbound"]
+
+            activity_input = MagicMock()
+            activity_input.headers = {}
+            outbound.start_activity(activity_input)
+
+            assert HEADER_KEY not in activity_input.headers

@@ -1,4 +1,3 @@
-# tests/test_activities.py
 """
 Comprehensive pytest tests for the OpenBox SDK activities module.
 
@@ -25,10 +24,6 @@ from openbox.activities import (
     _terminate_workflow_for_halt,
     send_governance_event,
 )
-
-# =============================================================================
-# Tests for _rfc3339_now()
-# =============================================================================
 
 
 class TestRfc3339Now:
@@ -90,11 +85,6 @@ class TestRfc3339Now:
         assert len(fractional) == 3, f"Expected 3 decimal places, got {len(fractional)}"
 
 
-# =============================================================================
-# Tests for GovernanceAPIError
-# =============================================================================
-
-
 class TestGovernanceAPIError:
     """Tests for the GovernanceAPIError exception class."""
 
@@ -126,11 +116,6 @@ class TestGovernanceAPIError:
             raise GovernanceAPIError("Test error")
         except Exception as e:
             assert isinstance(e, GovernanceAPIError)
-
-
-# =============================================================================
-# Tests for raise_governance_block()
-# =============================================================================
 
 
 class TestRaiseGovernanceBlock:
@@ -178,11 +163,6 @@ class TestRaiseGovernanceBlock:
         assert details[0]["risk_score"] is None
 
 
-# =============================================================================
-# Tests for _terminate_workflow_for_halt()
-# =============================================================================
-
-
 class TestTerminateWorkflowForHalt:
     """Tests for the _terminate_workflow_for_halt() function."""
 
@@ -219,11 +199,6 @@ class TestTerminateWorkflowForHalt:
             await _terminate_workflow_for_halt("wf-123", "policy violation")
         assert exc_info.value.type == "GovernanceHalt"
         assert exc_info.value.non_retryable is True
-
-
-# =============================================================================
-# Tests for send_governance_event() activity
-# =============================================================================
 
 
 class TestSendGovernanceEvent:
@@ -589,8 +564,9 @@ class TestSendGovernanceEvent:
             assert headers["Authorization"] == "Bearer test-api-key"
             from openbox import __version__
 
-            assert headers["User-Agent"] == f"OpenBox-SDK/{__version__}"
-            assert headers["X-OpenBox-SDK-Version"] == __version__
+            sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"
+            assert headers["User-Agent"] == f"OpenBox-SDK/{sdk_identifier}"
+            assert headers["X-OpenBox-SDK-Version"] == sdk_identifier
 
     # -------------------------------------------------------------------------
     # Verdict types tests
