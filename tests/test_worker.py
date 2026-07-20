@@ -13,12 +13,11 @@ Bootstrap model under test (base-SDK instrumentation):
 """
 
 import functools
-from datetime import timedelta
-from unittest.mock import Mock, MagicMock, patch
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+from unittest.mock import MagicMock, Mock, patch
 
 from openbox.governance_state import TemporalGovernanceState
-
 
 # Shared patch stack
 #
@@ -39,7 +38,10 @@ _PATCH_TARGETS = [
     ("mock_validate_api_key", "openbox.worker.validate_api_key"),
     ("mock_governance_config", "openbox.worker.GovernanceConfig"),
     ("mock_create_core_runtime", "openbox.core_adapter.create_core_runtime"),
-    ("mock_governance_interceptor", "openbox.workflow_interceptor.GovernanceInterceptor"),
+    (
+        "mock_governance_interceptor",
+        "openbox.workflow_interceptor.GovernanceInterceptor",
+    ),
     (
         "mock_activity_interceptor",
         "openbox.activity_interceptor.ActivityGovernanceInterceptor",
@@ -194,6 +196,25 @@ class TestCreateOpenboxWorkerWithConfig:
             skip_activity_types={"activity_a", "send_governance_event"},
             skip_signals={"signal_a"},
             hitl_enabled=False,
+            max_retryable_block_restarts=3,
+        )
+
+    @with_worker_patches
+    def test_max_retryable_block_restarts_passed_to_config(self, **m):
+        """A custom restart budget reaches GovernanceConfig."""
+        from openbox.worker import create_openbox_worker
+
+        create_openbox_worker(
+            client=Mock(),
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+            max_retryable_block_restarts=7,
+        )
+
+        assert (
+            m["mock_governance_config"].call_args.kwargs["max_retryable_block_restarts"]
+            == 7
         )
 
     @with_worker_patches
@@ -883,6 +904,7 @@ class TestLogOutput:
     def test_logs_initialization_messages(self, mock_print, caplog, **m):
         """Initialization status is logged via the module logger (not print())."""
         import logging
+
         from openbox.worker import create_openbox_worker
 
         with caplog.at_level(logging.INFO, logger="openbox.worker"):
@@ -915,6 +937,7 @@ class TestLogOutput:
     def test_logs_disabled_status_messages(self, mock_print, caplog, **m):
         """Disabled-status values surface in the logger output."""
         import logging
+
         from openbox.worker import create_openbox_worker
 
         with caplog.at_level(logging.INFO, logger="openbox.worker"):

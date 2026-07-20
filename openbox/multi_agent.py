@@ -41,8 +41,6 @@ def _to_rfc3339(ts: datetime) -> str:
     return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-
-
 def build_handoff_payload(
     from_agent_did: str,
     multi_agent_session_id: str,
@@ -58,7 +56,9 @@ def build_handoff_payload(
     server-side from the authenticated signed identity, never sent.
     """
     if not from_agent_did or not from_agent_did.strip():
-        raise ValueError("emit_handoff: from_agent_did is required and must be non-empty")
+        raise ValueError(
+            "emit_handoff: from_agent_did is required and must be non-empty"
+        )
     if not multi_agent_session_id or not multi_agent_session_id.strip():
         raise ValueError(
             "emit_handoff: multi_agent_session_id is required and must be non-empty"
@@ -101,15 +101,45 @@ async def emit_handoff(
 
     Raises:
         ValueError: if required fields are missing/empty.
+        RetryableBlockControl: when governance returns a valid retryable BLOCK —
+            an SDK-owned control signal that unwinds user code so the inbound
+            interceptor can Continue-As-New. Like cancellation, application code
+            must not catch/suppress it (it subclasses ``BaseException``).
     """
+    from temporalio import workflow
+
     payload = build_handoff_payload(from_agent_did, multi_agent_session_id, ts)
 
     # Reuse the workflow-sandbox-safe activity dispatcher (no signing here).
-    from .workflow_interceptor import _send_governance_event
+    from .retryable_block import RetryableBlockRequest
+    from .workflow_interceptor import _RETRYABLE_BLOCK_PATCH, _send_governance_event
 
-    return await _send_governance_event(payload, timeout, on_api_error)
+    rb_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
+    outcome = await _send_governance_event(
+        payload, timeout, on_api_error, retryable_block_enabled=rb_enabled
+    )
+    if rb_enabled and isinstance(outcome, RetryableBlockRequest):
+        from .retry_coordinator import RetryableBlockControl, get_coordinator
 
+        coordinator = get_coordinator()
+        if coordinator is None:
+            # No run-local coordinator bound (should not happen in a patched run):
+            # fail safe as a plain governance block rather than silently continuing.
+            from temporalio.exceptions import ApplicationError
 
+            from .errors import GOVERNANCE_BLOCK_ERROR_TYPE
+
+            raise ApplicationError(
+                "Governance blocked",
+                type=GOVERNANCE_BLOCK_ERROR_TYPE,
+                non_retryable=True,
+            )
+        coordinator.submit(outcome)  # first-wins; the interceptor performs CAN
+        # Raise (not return): unwind user code immediately so no statement after
+        # `await emit_handoff(...)` runs before the workflow Continue-As-News.
+        raise RetryableBlockControl("handoff requested workflow restart")
+
+    return outcome  # ALLOW dict / fail-open None unchanged
 
 
 def read_session_from_memo() -> Optional[str]:

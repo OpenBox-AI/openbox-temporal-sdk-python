@@ -11,8 +11,9 @@ object holds ONLY the Temporal effects the base runtime cannot express itself:
   the next attempt must POLL approval status instead of re-evaluating.
 - **completed-hook stop bridge** — a completed-hook BLOCK/HALT resolved by the
   base runtime is recorded here (keyed by workflow/run/activity) so the activity
-  interceptor can skip a duplicate completed event (BLOCK) or reach Temporal's
-  terminate path (HALT) after user code returns, then clear it.
+  interceptor can skip a duplicate completed event (BLOCK), reach Temporal's
+  terminate path (HALT), or raise a retryable-BLOCK restart request (BLOCK with
+  a valid retry plan) after user code returns, then clear it.
 
 All keys are RUN-SCOPED: state from a prior run with the same ``workflow_id`` is
 ignored and cleared. Thread-safe — activities run on worker threads.
@@ -21,14 +22,32 @@ ignored and cleared. Thread-safe — activities run on worker threads.
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
+from .retryable_block import RetryableBlockRequest
 from .types import Verdict
 
-__all__ = ["TemporalGovernanceState"]
+__all__ = ["TemporalGovernanceState", "CompletedStop"]
 
 # (workflow_id, run_id, activity_id)
 _RunActivityKey = Tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class CompletedStop:
+    """A completed-hook BLOCK/HALT resolved by the base runtime, recorded for the
+    activity interceptor to consume after user code returns.
+
+    ``request`` carries the full retryable-BLOCK directive when the completed
+    verdict is an exact BLOCK with a valid retry plan; it is ``None`` for HALT
+    (the base contract never attaches a retry plan to HALT) and for a plain
+    BLOCK without one.
+    """
+
+    verdict: Verdict
+    reason: Optional[str]
+    request: Optional[RetryableBlockRequest] = None
 
 
 class TemporalGovernanceState:
@@ -40,11 +59,15 @@ class TemporalGovernanceState:
         self._signal_verdicts: dict[str, Tuple[Verdict, Optional[str], str]] = {}
         # (workflow_id, run_id, activity_id) awaiting a HITL decision
         self._pending_approval: set[_RunActivityKey] = set()
-        # (workflow_id, run_id, activity_id) -> (verdict, reason) from a completed hook
-        self._completed_stop: dict[_RunActivityKey, Tuple[Verdict, Optional[str]]] = {}
+        # (workflow_id, run_id, activity_id) -> CompletedStop from a completed hook
+        self._completed_stop: dict[_RunActivityKey, CompletedStop] = {}
 
     def set_signal_verdict(
-        self, workflow_id: str, run_id: str, verdict: Verdict, reason: Optional[str] = None
+        self,
+        workflow_id: str,
+        run_id: str,
+        verdict: Verdict,
+        reason: Optional[str] = None,
     ) -> None:
         """Record a SignalReceived BLOCK/HALT that must fail the next activity."""
         with self._lock:
@@ -65,15 +88,21 @@ class TemporalGovernanceState:
                 return None
             return verdict, reason
 
-    def mark_pending_approval(self, workflow_id: str, run_id: str, activity_id: str) -> None:
+    def mark_pending_approval(
+        self, workflow_id: str, run_id: str, activity_id: str
+    ) -> None:
         with self._lock:
             self._pending_approval.add((workflow_id, run_id, activity_id))
 
-    def has_pending_approval(self, workflow_id: str, run_id: str, activity_id: str) -> bool:
+    def has_pending_approval(
+        self, workflow_id: str, run_id: str, activity_id: str
+    ) -> bool:
         with self._lock:
             return (workflow_id, run_id, activity_id) in self._pending_approval
 
-    def clear_pending_approval(self, workflow_id: str, run_id: str, activity_id: str) -> None:
+    def clear_pending_approval(
+        self, workflow_id: str, run_id: str, activity_id: str
+    ) -> None:
         with self._lock:
             self._pending_approval.discard((workflow_id, run_id, activity_id))
 
@@ -84,15 +113,20 @@ class TemporalGovernanceState:
         activity_id: str,
         verdict: Verdict,
         reason: Optional[str] = None,
+        request: Optional[RetryableBlockRequest] = None,
     ) -> None:
         """A completed-hook BLOCK/HALT resolved by the base runtime. Affects only
-        FUTURE execution — the operation already ran."""
+        FUTURE execution — the operation already ran. ``request`` carries the
+        full retryable-BLOCK directive when the completed verdict is an exact
+        BLOCK with a valid retry plan."""
         with self._lock:
-            self._completed_stop[(workflow_id, run_id, activity_id)] = (verdict, reason)
+            self._completed_stop[(workflow_id, run_id, activity_id)] = CompletedStop(
+                verdict, reason, request
+            )
 
     def take_completed_stop(
         self, workflow_id: str, run_id: str, activity_id: str
-    ) -> Optional[Tuple[Verdict, Optional[str]]]:
+    ) -> Optional[CompletedStop]:
         """Return AND clear the completed-hook stop for this exact run/activity.
 
         Consumed on EVERY activity exit path (success in _handle_completion,
