@@ -9,21 +9,23 @@ Tests cover:
 """
 
 import re
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 from temporalio.exceptions import ApplicationError
-from .conftest import posted_payload
 
 from openbox.activities import (
-    _rfc3339_now,
     GovernanceAPIError,
-    raise_governance_block,
+    _rfc3339_now,
     _terminate_workflow_for_halt,
+    raise_governance_block,
     send_governance_event,
 )
+from openbox.retryable_block import GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+
+from .conftest import posted_payload
 
 
 class TestRfc3339Now:
@@ -801,3 +803,158 @@ class TestSendGovernanceEvent:
             assert "verdict" in result
             assert "action" in result
             assert result["verdict"] == result["action"]
+
+    # -------------------------------------------------------------------------
+    # Retryable-BLOCK restart transport tests
+    # -------------------------------------------------------------------------
+
+    RETRY_EVENT_TYPES = [
+        "WorkflowStarted",
+        "WorkflowCompleted",
+        "WorkflowFailed",
+        "SignalReceived",
+        "Handoff",
+    ]
+
+    @staticmethod
+    def _mock_response(data: dict):
+        """Build a 200 OK mock response carrying the given governance JSON body."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = data
+        return response
+
+    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
+    async def test_block_with_valid_retry_plan_raises_retryable_block_error(
+        self, base_input, event_type
+    ):
+        """A BLOCK verdict carrying a valid retry_plan raises the versioned restart
+        error for every workflow-sourced event type, never the plain GovernanceBlock
+        (SignalReceived included — the retry check runs before the signal-return
+        special case)."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "block",
+                "reason": "retry with corrected input",
+                "policy_id": "policy-retry",
+                "risk_score": 0.8,
+                "governance_event_id": "evt_retry_1",
+                "retry_plan": {"new_input": {"query": "corrected"}},
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert exc_info.value.type == "GovernanceRetryableBlock"
+            assert exc_info.value.non_retryable is True
+            details = exc_info.value.details
+            assert len(details) == 1
+            detail = details[0]
+            assert detail["schema_version"] == GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+            assert detail["new_input"] == {"query": "corrected"}
+            assert detail["event_type"] == event_type
+            assert detail["governance_event_id"] == "evt_retry_1"
+            assert detail["reason"] == "retry with corrected input"
+            assert detail["hook_trigger"] is False
+            assert detail["hook_stage"] is None
+
+    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
+    async def test_plain_block_without_retry_plan_preserves_existing_behavior(
+        self, base_input, event_type
+    ):
+        """A BLOCK verdict with no retry_plan is unaffected by the restart transport:
+        SignalReceived still returns the result dict, every other event type still
+        raises the plain GovernanceBlock."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "block",
+                "reason": "High risk detected",
+                "policy_id": "policy-002",
+                "risk_score": 0.9,
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            if event_type == "SignalReceived":
+                result = await send_governance_event(base_input)
+                assert result["success"] is True
+                assert result["verdict"] == "block"
+                assert result["reason"] == "High risk detected"
+            else:
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
+                assert exc_info.value.type == "GovernanceBlock"
+
+    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
+    async def test_halt_with_retry_plan_never_raises_retryable_block_error(
+        self, base_input, event_type
+    ):
+        """HALT keeps its existing stop handling even when a retry_plan is present —
+        the restart transport gates on an exact BLOCK verdict and never fires for
+        HALT, regardless of event type."""
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)  # No client → HALT falls back to ApplicationError
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "halt",
+                "reason": "Emergency halt",
+                "policy_id": "emergency-policy",
+                "risk_score": 1.0,
+                "retry_plan": {"new_input": {"query": "corrected"}},
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            if event_type == "SignalReceived":
+                result = await send_governance_event(base_input)
+                assert result["success"] is True
+                assert result["verdict"] == "halt"
+            else:
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
+                assert exc_info.value.type == "GovernanceHalt"
+
+    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
+    @pytest.mark.parametrize("verdict", ["allow", "constrain"])
+    async def test_allow_and_constrain_success_dict_unaffected_by_retry_support(
+        self, base_input, event_type, verdict
+    ):
+        """ALLOW / CONSTRAIN keep returning the plain success dict — the restart
+        transport only ever inspects an exact BLOCK verdict."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": verdict,
+                "reason": "Policy evaluated",
+                "policy_id": "policy-001",
+                "risk_score": 0.1,
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == verdict
