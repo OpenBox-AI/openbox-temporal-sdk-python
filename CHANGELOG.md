@@ -2,7 +2,9 @@
 
 All notable changes to OpenBox SDK for Temporal Workflows.
 
-## [Unreleased] - openbox-core base SDK migration branch
+## [Unreleased]
+
+## [1.2.0] - 2026-07-20
 
 ### Changed
 
@@ -33,13 +35,13 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   (previously verdict-first), and a response with NEITHER field stays PENDING
   (previously implicit ALLOW). Pinned by `tests/test_approval_action_precedence.py`.
 
-### Known divergences of the OPT-IN core runtime (documented, not defaults)
+### Known behavior differences in the core runtime
 
 - **Completed-hook semantics:** core completed hooks never raise to the caller —
   stop verdicts mark FUTURE execution blocked (abort/halt flags). Some legacy
   completed hooks could raise after the operation ran (HTTP response hook, file
   close); raising post-hoc cannot undo the operation, so the core model drops it
-  by design. Applies only once instrumentation flips to core.
+  by design.
 - **Fail-closed shaping:** core maps started-hook evaluation failures under
   `on_api_error="fail_closed"` (and started-hook contract errors, always) to a
   non-retryable `GovernanceHalt` via the adapter — same terminal effect as
@@ -103,9 +105,9 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   redacted at the span-data builder choke point. Same redaction added to the
   base SDK instrumentation. **Rotate any API keys that appeared in payloads.**
 
-### Migration status
+### Migration notes
 
-- The flip is COMPLETE: base-runtime instrumentation is the sole hook governance path
+- Base-runtime instrumentation is the sole hook governance path
   and the legacy in-repo hook stack is removed. Approval-retry, signal BLOCK/HALT, and
   completed-hook BLOCK/HALT behavior are preserved (run-scoped, cleaned after use).
 - Dropped coverage vs the legacy stack: direct raw-driver DB queries (psycopg2/mysql/
@@ -113,8 +115,6 @@ All notable changes to OpenBox SDK for Temporal Workflows.
   backends), asyncpg, Redis, and MongoDB; activating raw dbapi driver instrumentors
   interferes with SQLAlchemy's own dialect queries, so raw-driver-only governance is a
   base-SDK follow-up.
-- Release gate: the base SDK `0.2.0` must be published before a clean install (without
-  the local editable checkout) can resolve the dependency floor.
 
 ## [1.1.2] - 2026-04-22
 
