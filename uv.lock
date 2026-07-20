@@ -772,7 +772,7 @@ dev = [
 
 [[package]]
 name = "openbox-temporal-sdk-python"
-version = "1.1.2"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },

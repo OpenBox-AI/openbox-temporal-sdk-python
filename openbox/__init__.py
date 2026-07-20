@@ -6,7 +6,7 @@
 # it crashes the workflow sandbox as a circular import, lazily it recurses
 # unboundedly from build_auth_headers on every evaluate. Keep in sync with
 # pyproject.toml on release.
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 from .worker import create_openbox_worker
 
