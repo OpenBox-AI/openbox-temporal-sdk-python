@@ -61,12 +61,29 @@ OPENBOX_AGENT_PRIVATE_KEY=<base64 raw 32-byte Ed25519 seed>
 | `agent_name` | `str` | `None` | Agent name for governance context (optional) |
 | `tool_type_map` | `dict` | `{}` | Mapping of tool names to types for governance evaluation |
 
+## Multi-Agent Sessions
+
+No worker/plugin parameters. Your application supplies the shared
+`multi_agent_session_id` per workflow via the Temporal **workflow memo**; the SDK
+only propagates it. The SDK never invents a session id.
+
+| Mechanism | Key | Set by |
+|-----------|-----|--------|
+| Workflow memo | `openbox_multi_agent_session_id` | App, at `start_workflow(memo={...})` |
+
+When the memo is present, the id is attached to every workflow, activity, and
+hook governance event, and is propagated from the workflow to its activities
+internally. Emit an explicit handoff from workflow code with
+`emit_handoff(multi_agent_session_id=..., from_agent_did=...)`. See the README
+"Multi-Agent Sessions" section for usage.
+
 ## Instrumentation
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `instrument_databases` | `bool` | `True` | Capture database queries (includes sqlite3) |
-| `db_libraries` | `set` | `None` | `"psycopg2"`, `"asyncpg"`, `"mysql"`, `"pymysql"`, `"pymongo"`, `"redis"`, `"sqlalchemy"`, `"sqlite3"` |
+| `instrument_databases` | `bool` | `True` | Capture database queries (the base runtime installs every available DB instrumentor, including sqlite3) |
+| `db_libraries` | `set` | `None` | Accepted for backward compatibility; no effect. The base runtime installs all available DB instrumentors regardless. |
+| `sqlalchemy_engine` | `Any` | `None` | Accepted for backward compatibility; no effect. SQLAlchemy is governed globally via an `Engine` event listener, so pre-existing engines are covered automatically. |
 | `instrument_file_io` | `bool` | `False` | Capture file operations |
 
 ## Example
@@ -92,7 +109,6 @@ worker = create_openbox_worker(
     hitl_enabled=True,
     skip_workflow_types={"InternalWorkflow"},
     instrument_databases=True,
-    db_libraries={"psycopg2", "redis"},
     instrument_file_io=False,
 )
 ```

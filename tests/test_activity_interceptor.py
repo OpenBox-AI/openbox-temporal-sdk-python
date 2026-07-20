@@ -1,11 +1,9 @@
-# tests/test_activity_interceptor.py
 """Comprehensive tests for the OpenBox SDK activity_interceptor module."""
 
 import base64
-import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 import sys
 
@@ -21,17 +19,11 @@ from openbox.activity_interceptor import (
 )
 from openbox.types import (
     Verdict,
-    WorkflowSpanBuffer,
     GovernanceVerdictResponse,
-    GuardrailsCheckResult,
-    GovernanceBlockedError,
 )
 from openbox.config import GovernanceConfig
-
-# =============================================================================
-# Helper Fixtures and Dataclasses for Testing
-# =============================================================================
-
+from openbox.governance_state import TemporalGovernanceState
+from openbox.core_adapter import get_core_context_store
 
 @dataclass
 class NestedData:
@@ -84,6 +76,19 @@ class NonSerializableObject:
         return f"NonSerializable({self._value})"
 
 
+@pytest.fixture(autouse=True)
+def reset_core_context_store():
+    """Isolate the process-wide core ContextStore between tests.
+
+    ``core_adapter`` binds one module-global ContextStore that the interceptor
+    reads for the within-activity abort flag. Reset it so a completed-stop /
+    abort flag set in one test never bleeds into the next.
+    """
+    get_core_context_store().clear()
+    yield
+    get_core_context_store().clear()
+
+
 @pytest.fixture
 def mock_activity_info():
     """Create a mock activity.info() return value."""
@@ -99,16 +104,9 @@ def mock_activity_info():
 
 
 @pytest.fixture
-def mock_span_processor():
-    """Create a mock WorkflowSpanProcessor."""
-    processor = MagicMock()
-    processor.get_buffer.return_value = None
-    processor.get_verdict.return_value = None
-    processor.get_pending_body.return_value = None
-    processor.get_activity_abort.return_value = None
-    processor.get_halt_requested.return_value = None
-    processor.clear_halt_requested = MagicMock()
-    return processor
+def state():
+    """A real TemporalGovernanceState shared across interceptors."""
+    return TemporalGovernanceState()
 
 
 @pytest.fixture
@@ -117,8 +115,57 @@ def governance_config():
     return GovernanceConfig()
 
 
+def make_verdict_client(
+    verdict_response=None, approval_response=None
+) -> MagicMock:
+    """Build a mock GovernanceClient.
+
+    evaluate_event returns ``verdict_response`` (a GovernanceVerdictResponse or
+    None); poll_approval returns ``approval_response`` (a dict or None). Both
+    default to a plain ALLOW / None so activities run without governance stops.
+    """
+    client = MagicMock()
+    if verdict_response is None:
+        verdict_response = GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+    client.evaluate_event = AsyncMock(return_value=verdict_response)
+    client.poll_approval = AsyncMock(return_value=approval_response)
+    return client
+
+
+def make_interceptor(state, config=None, *, next_result="result", client=None):
+    """Build an _ActivityInterceptor with a mock next + mock client."""
+    config = config or GovernanceConfig()
+    mock_next = AsyncMock()
+    mock_next.execute_activity = AsyncMock(return_value=next_result)
+    return _ActivityInterceptor(
+        next_interceptor=mock_next,
+        api_url="http://localhost:8086",
+        api_key="obx_test_key123",
+        state=state,
+        config=config,
+        client=client or make_verdict_client(),
+    )
+
+
+def make_input(args=None):
+    """Build an ExecuteActivityInput-like mock with empty headers.
+
+    Empty headers => read_session_from_header returns None (no session tag), so
+    payload assertions stay free of a spurious multi_agent_session_id.
+    """
+    mock_input = MagicMock()
+    mock_input.args = args if args is not None else []
+    mock_input.headers = {}
+    return mock_input
+
+
 def create_mock_httpx_client(response_data, status_code=200):
-    """Create a mock httpx async client with specified response."""
+    """Create a mock httpx async client with specified response.
+
+    Used only by the low-level GovernanceClient HTTP tests
+    (_send_activity_event / poll_approval), which exercise the real client's
+    transport via a patched httpx module.
+    """
     mock_response = MagicMock()
     mock_response.status_code = status_code
     mock_response.json.return_value = response_data
@@ -133,9 +180,13 @@ def create_mock_httpx_client(response_data, status_code=200):
     return mock_client, mock_client_instance
 
 
-# =============================================================================
-# Tests for _rfc3339_now()
-# =============================================================================
+def patched_activity(mock_activity_info):
+    """Patch the interceptor's ``activity`` module with info + logger."""
+    ctx = patch("openbox.activity_interceptor.activity")
+    mock_activity = ctx.start()
+    mock_activity.info.return_value = mock_activity_info
+    mock_activity.logger = MagicMock()
+    return ctx, mock_activity
 
 
 class TestRfc3339Now:
@@ -168,7 +219,7 @@ class TestRfc3339Now:
 
     def test_returns_recent_time(self):
         """Test that returned time is within recent timeframe."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
 
         result = _rfc3339_now()
 
@@ -190,11 +241,6 @@ class TestRfc3339Now:
 
         # The result should be within 1 second of now
         assert abs((now - result_time).total_seconds()) < 1
-
-
-# =============================================================================
-# Tests for _deep_update_dataclass()
-# =============================================================================
 
 
 class TestDeepUpdateDataclass:
@@ -327,11 +373,6 @@ class TestDeepUpdateDataclass:
 
         # List items should be replaced in-place
         assert data.items == ["x", "y", "z"]
-
-
-# =============================================================================
-# Tests for _serialize_value()
-# =============================================================================
 
 
 class TestSerializeValue:
@@ -484,480 +525,232 @@ class TestSerializeValue:
         }
 
 
-# =============================================================================
-# Tests for ActivityGovernanceInterceptor class
-# =============================================================================
+class TestSignalVerdictRunScoping:
+    """Signal verdicts are run-scoped: a verdict left by a PRIOR run with the
+    same workflow_id must be ignored (and cleared) rather than enforced on a
+    new run. This replaces the legacy span-processor stale-buffer/stale-verdict
+    cleanup that the interceptor used to do explicitly."""
+
+    def test_current_run_verdict_returned(self):
+        state = TemporalGovernanceState()
+        state.set_signal_verdict("wf", "run-1", Verdict.BLOCK, "blocked")
+
+        entry = state.get_signal_verdict("wf", "run-1")
+        assert entry is not None
+        verdict, reason = entry
+        assert verdict == Verdict.BLOCK
+        assert reason == "blocked"
+
+    def test_stale_run_verdict_ignored_and_cleared(self):
+        state = TemporalGovernanceState()
+        state.set_signal_verdict("wf", "old-run", Verdict.BLOCK, "old")
+
+        # A new run asks — stale verdict is ignored.
+        assert state.get_signal_verdict("wf", "new-run") is None
+        # And cleared, so even the original run no longer sees it.
+        assert state.get_signal_verdict("wf", "old-run") is None
 
 
 class TestActivityGovernanceInterceptor:
     """Tests for ActivityGovernanceInterceptor class."""
 
-    def test_initialization(self, mock_span_processor):
+    def test_initialization(self, state):
         """Test interceptor initialization with all parameters."""
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=GovernanceConfig(),
         )
 
         assert interceptor.api_url == "http://localhost:8086"
         assert interceptor.api_key == "obx_test_key123"
-        assert interceptor.span_processor is mock_span_processor
+        assert interceptor.state is state
         assert isinstance(interceptor.config, GovernanceConfig)
 
-    def test_initialization_with_default_config(self, mock_span_processor):
+    def test_initialization_with_default_config(self, state):
         """Test interceptor initialization with default config."""
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
         )
 
         assert isinstance(interceptor.config, GovernanceConfig)
 
-    def test_api_url_trailing_slash_stripped(self, mock_span_processor):
+    def test_api_url_trailing_slash_stripped(self, state):
         """Test that trailing slash is stripped from api_url."""
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086/",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
         )
 
         assert interceptor.api_url == "http://localhost:8086"
 
-    def test_api_url_multiple_trailing_slashes_stripped(self, mock_span_processor):
+    def test_api_url_multiple_trailing_slashes_stripped(self, state):
         """Test that multiple trailing slashes are stripped."""
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086///",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
         )
 
         assert interceptor.api_url == "http://localhost:8086"
 
-    def test_intercept_activity_returns_activity_interceptor(self, mock_span_processor):
+    def test_intercept_activity_returns_activity_interceptor(self, state):
         """Test that intercept_activity returns _ActivityInterceptor."""
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
         )
         mock_next = MagicMock()
 
         result = interceptor.intercept_activity(mock_next)
 
         assert isinstance(result, _ActivityInterceptor)
-
-
-# =============================================================================
-# Tests for _ActivityInterceptor class
-# =============================================================================
+        # The shared state flows into the per-activity interceptor.
+        assert result._state is state
 
 
 class TestActivityInterceptor:
     """Tests for _ActivityInterceptor class."""
 
-    @pytest.fixture
-    def interceptor(self, mock_span_processor, governance_config):
-        """Create an _ActivityInterceptor instance."""
-        mock_next = AsyncMock()
-        return _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=governance_config,
-        )
-
-    # =========================================================================
-    # Tests for execute_activity()
-    # =========================================================================
-
     @pytest.mark.asyncio
     async def test_skips_if_activity_type_in_skip_list(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that activity is skipped if activity_type is in skip_activity_types."""
         config = GovernanceConfig(skip_activity_types={"test_activity"})
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="activity_result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        interceptor = make_interceptor(
+            state, config, next_result="activity_result"
         )
 
-        mock_input = MagicMock()
-        mock_input.args = ["arg1"]
+        mock_input = make_input(["arg1"])
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity:
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
         assert result == "activity_result"
-        mock_next.execute_activity.assert_called_once_with(mock_input)
+        interceptor.next.execute_activity.assert_called_once_with(mock_input)
 
     @pytest.mark.asyncio
-    async def test_checks_pending_verdict_raises_governance_stop(
-        self, mock_span_processor, mock_activity_info
+    async def test_checks_pending_signal_verdict_raises_governance_block(
+        self, state, mock_activity_info
     ):
-        """Test that pending BLOCK verdict raises GovernanceBlock."""
-        mock_span_processor.get_verdict.return_value = {
-            "verdict": "block",
-            "reason": "Blocked by policy",
-            "run_id": "test-run-id",
-        }
-
-        config = GovernanceConfig()
-        mock_next = AsyncMock()
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        """A SignalReceived BLOCK recorded for this run fails the next activity
+        with a non-retryable GovernanceBlock (via _check_pending_verdicts)."""
+        state.set_signal_verdict(
+            "test-workflow-id", "test-run-id", Verdict.BLOCK, "Blocked by policy"
         )
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        interceptor = make_interceptor(state, GovernanceConfig())
+        mock_input = make_input([])
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity:
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "GovernanceBlock"
-            assert "Governance blocked" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_clears_stale_buffer_from_previous_run(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """Test that stale buffer from previous run is cleared."""
-        stale_buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="old-run-id",  # Different from current
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        mock_span_processor.get_buffer.return_value = stale_buffer
-        mock_span_processor.get_verdict.return_value = None
-
-        config = GovernanceConfig(send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        # Create mock httpx module
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
-            await interceptor.execute_activity(mock_input)
-
-        # Verify stale buffer was cleared
-        mock_span_processor.unregister_workflow.assert_called_with("test-workflow-id")
+        assert exc_info.value.type == "GovernanceBlock"
+        assert exc_info.value.non_retryable is True
+        assert "Governance blocked" in str(exc_info.value)
+        # Blocked before running user code.
+        interceptor.next.execute_activity.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_clears_stale_verdict_from_previous_run(
-        self, mock_span_processor, mock_activity_info
+    async def test_signal_verdict_halt_terminates_workflow(
+        self, state, mock_activity_info
     ):
-        """Test that stale verdict from previous run is cleared."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = {
-            "verdict": "block",
-            "reason": "Old verdict",
-            "run_id": "old-run-id",  # Different from current
-        }
-
-        config = GovernanceConfig(send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        """A SignalReceived HALT recorded for this run terminates the workflow
+        (GovernanceHalt) before the activity runs."""
+        state.set_signal_verdict(
+            "test-workflow-id", "test-run-id", Verdict.HALT, "Workflow halted by policy"
         )
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        interceptor = make_interceptor(state, GovernanceConfig())
+        mock_input = make_input([])
 
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
-            await interceptor.execute_activity(mock_input)
-
-        mock_span_processor.clear_verdict.assert_called_with("test-workflow-id")
-
-    @pytest.mark.asyncio
-    async def test_registers_buffer_if_not_exists(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """Test that buffer is registered if it doesn't exist."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
-        config = GovernanceConfig(send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
-            await interceptor.execute_activity(mock_input)
-
-        mock_span_processor.register_workflow.assert_called()
-        call_args = mock_span_processor.register_workflow.call_args
-        assert call_args[0][0] == "test-workflow-id"
-        assert isinstance(call_args[0][1], WorkflowSpanBuffer)
+        assert exc_info.value.type == "GovernanceHalt"
+        assert "Workflow halted by policy" in str(exc_info.value)
+        interceptor.next.execute_activity.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_sends_activity_started_event_if_enabled(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that ActivityStarted event is sent if send_activity_start_event=True."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
         config = GovernanceConfig(send_activity_start_event=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
+        client = make_verdict_client()
+        interceptor = make_interceptor(state, config, client=client)
 
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
+        mock_input = make_input(["test_arg"])
 
-        mock_input = MagicMock()
-        mock_input.args = ["test_arg"]
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-        # Verify API was called at least twice (ActivityStarted + ActivityCompleted)
-        assert mock_client_instance.post.call_count >= 2
-        calls = mock_client_instance.post.call_args_list
-        # First call should be ActivityStarted
-        first_call = calls[0]
-        payload = posted_payload(first_call)
-        assert payload["event_type"] == "ActivityStarted"
+        # Two events: ActivityStarted + ActivityCompleted.
+        assert client.evaluate_event.call_count >= 2
+        first_payload = client.evaluate_event.call_args_list[0].args[0]
+        assert first_payload["event_type"] == "ActivityStarted"
+        assert first_payload["activity_input"] == ["test_arg"]
 
     @pytest.mark.asyncio
     async def test_raises_governance_block_on_block_verdict(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that GovernanceBlock is raised for BLOCK verdict."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
+        """Test that GovernanceBlock is raised for BLOCK verdict on ActivityStarted."""
         config = GovernanceConfig(send_activity_start_event=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {
-                "verdict": "block",
-                "reason": "Policy violation",
-            }
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
+        client = make_verdict_client(
+            GovernanceVerdictResponse(
+                verdict=Verdict.BLOCK, reason="Policy violation"
             )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
+        )
+        interceptor = make_interceptor(state, config, client=client)
 
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "GovernanceBlock"
-            assert "Policy violation" in str(exc_info.value)
+        assert exc_info.value.type == "GovernanceBlock"
+        assert exc_info.value.non_retryable is True
+        assert "Policy violation" in str(exc_info.value)
+        interceptor.next.execute_activity.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_raises_guardrails_validation_failed_if_validation_passed_false(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that GuardrailsValidationFailed is raised when validation_passed=False."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
         config = GovernanceConfig(send_activity_start_event=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
+        verdict = GovernanceVerdictResponse.from_dict(
             {
                 "verdict": "allow",
                 "guardrails_result": {
@@ -968,614 +761,294 @@ class TestActivityInterceptor:
                 },
             }
         )
-        mock_httpx.AsyncClient.return_value = mock_client
+        client = make_verdict_client(verdict)
+        interceptor = make_interceptor(state, config, client=client)
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
+        mock_input = make_input([])
 
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "GuardrailsValidationFailed"
-            assert "PII detected" in str(exc_info.value)
+        assert exc_info.value.type == "GuardrailsValidationFailed"
+        assert "PII detected" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_applies_guardrails_redaction_to_dataclass_input(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that guardrails redaction is applied to dataclass input."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
+        """Test that guardrails redaction is applied to dataclass input in place."""
         config = GovernanceConfig(send_activity_start_event=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
 
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        started_verdict = GovernanceVerdictResponse.from_dict(
+            {
+                "verdict": "allow",
+                "guardrails_result": {
+                    "redacted_input": [
+                        {
+                            "prompt": "[REDACTED]",
+                            "user_id": "user123",
+                            "metadata": {},
+                        }
+                    ],
+                    "input_type": "activity_input",
+                    "validation_passed": True,
+                },
+            }
         )
+        completed_verdict = GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=[started_verdict, completed_verdict]
+        )
+        client.poll_approval = AsyncMock(return_value=None)
+        interceptor = make_interceptor(state, config, client=client)
 
-        # Create dataclass input
         input_data = ActivityInput(
             prompt="original prompt with PII",
             user_id="user123",
         )
-        mock_input = MagicMock()
-        mock_input.args = [input_data]
+        mock_input = make_input([input_data])
 
-        # Track call count for different responses
-        call_count = [0]
-
-        async def mock_post(*args, **kwargs):
-            call_count[0] += 1
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            if call_count[0] == 1:  # ActivityStarted
-                mock_response.json.return_value = {
-                    "verdict": "allow",
-                    "guardrails_result": {
-                        "redacted_input": [
-                            {
-                                "prompt": "[REDACTED]",
-                                "user_id": "user123",
-                                "metadata": {},
-                            }
-                        ],
-                        "input_type": "activity_input",
-                        "validation_passed": True,
-                    },
-                }
-            else:  # ActivityCompleted
-                mock_response.json.return_value = {"verdict": "allow"}
-            return mock_response
-
-        mock_httpx = MagicMock()
-        mock_client_instance = MagicMock()
-        mock_client_instance.post = mock_post
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-        # Verify the dataclass was updated in place
+        # The dataclass was updated in place.
         assert input_data.prompt == "[REDACTED]"
         assert input_data.user_id == "user123"
 
     @pytest.mark.asyncio
     async def test_applies_guardrails_redaction_to_dict_input(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that guardrails redaction is applied to dict input for completed event."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
+        """Test that redacted input flows into the ActivityCompleted event payload."""
         config = GovernanceConfig(send_activity_start_event=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
 
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        started_verdict = GovernanceVerdictResponse.from_dict(
+            {
+                "verdict": "allow",
+                "guardrails_result": {
+                    "redacted_input": [{"prompt": "[REDACTED]", "user_id": "user123"}],
+                    "input_type": "activity_input",
+                    "validation_passed": True,
+                },
+            }
         )
+        completed_verdict = GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=[started_verdict, completed_verdict]
+        )
+        client.poll_approval = AsyncMock(return_value=None)
+        interceptor = make_interceptor(state, config, client=client)
 
-        # Create dict input (not dataclass)
         input_data = {"prompt": "original", "user_id": "user123"}
-        mock_input = MagicMock()
-        mock_input.args = [input_data]
+        mock_input = make_input([input_data])
 
-        call_count = [0]
-        captured_payloads = []
-
-        async def mock_post(*args, **kwargs):
-            call_count[0] += 1
-            # Extract payload transparently (json= or content= kwarg)
-            import json as _json
-            body = kwargs.get("json")
-            if body is None:
-                raw = kwargs.get("content")
-                if raw is not None:
-                    body = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-                else:
-                    body = {}
-            captured_payloads.append(body)
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            if call_count[0] == 1:
-                mock_response.json.return_value = {
-                    "verdict": "allow",
-                    "guardrails_result": {
-                        "redacted_input": [
-                            {"prompt": "[REDACTED]", "user_id": "user123"}
-                        ],
-                        "input_type": "activity_input",
-                        "validation_passed": True,
-                    },
-                }
-            else:
-                mock_response.json.return_value = {"verdict": "allow"}
-            return mock_response
-
-        mock_httpx = MagicMock()
-        mock_client_instance = MagicMock()
-        mock_client_instance.post = mock_post
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-        # The ActivityCompleted event (second call) should have redacted input
-        assert len(captured_payloads) >= 2
-        completed_payload = captured_payloads[1]
+        # Second event = ActivityCompleted, carrying the redacted input.
+        assert client.evaluate_event.call_count >= 2
+        completed_payload = client.evaluate_event.call_args_list[1].args[0]
         assert completed_payload["event_type"] == "ActivityCompleted"
-        # The activity_input in the completed event should show redacted values
         assert completed_payload["activity_input"] == [
             {"prompt": "[REDACTED]", "user_id": "user123"}
         ]
 
     @pytest.mark.asyncio
     async def test_sends_activity_completed_event(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that ActivityCompleted event is sent with input/output."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
         config = GovernanceConfig(send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value={"result": "success"})
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        client = make_verdict_client()
+        interceptor = make_interceptor(
+            state, config, next_result={"result": "success"}, client=client
         )
 
-        mock_input = MagicMock()
-        mock_input.args = [{"input": "data"}]
+        mock_input = make_input([{"input": "data"}])
 
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-        # Verify ActivityCompleted event was sent
-        call_args = mock_client_instance.post.call_args
-        payload = posted_payload(call_args)
+        # send_activity_start_event=False, so the only event is ActivityCompleted.
+        payload = client.evaluate_event.call_args.args[0]
         assert payload["event_type"] == "ActivityCompleted"
         assert payload["activity_input"] == [{"input": "data"}]
         assert payload["activity_output"] == {"result": "success"}
         assert payload["status"] == "completed"
 
     @pytest.mark.asyncio
-    async def test_require_approval_sets_pending_and_raises_retryable(
-        self, mock_span_processor, mock_activity_info
+    async def test_require_approval_marks_pending_and_raises_retryable(
+        self, state, mock_activity_info
     ):
-        """Test that REQUIRE_APPROVAL sets pending_approval and raises retryable error."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        mock_span_processor.get_buffer.return_value = buffer
-        mock_span_processor.get_verdict.return_value = None
-
+        """REQUIRE_APPROVAL marks pending approval in state and raises retryable
+        ApprovalPending."""
         config = GovernanceConfig(send_activity_start_event=True, hitl_enabled=True)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {
-                "verdict": "require_approval",
-                "reason": "Needs human review",
-            }
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
+        client = make_verdict_client(
+            GovernanceVerdictResponse(
+                verdict=Verdict.REQUIRE_APPROVAL, reason="Needs human review"
             )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
+        )
+        interceptor = make_interceptor(state, config, client=client)
 
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "ApprovalPending"
-            assert exc_info.value.non_retryable is False  # Retryable
-            assert buffer.pending_approval is True
+        assert exc_info.value.type == "ApprovalPending"
+        assert exc_info.value.non_retryable is False  # Retryable
+        assert state.has_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
+        )
 
     @pytest.mark.asyncio
     async def test_approval_polling_on_retry_when_pending(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test approval polling on retry when pending_approval=True."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-            pending_approval=True,
+        """On retry with a pending marker, the interceptor polls approval; an
+        ALLOW clears the marker and the activity proceeds."""
+        state.mark_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
         )
-        mock_span_processor.get_buffer.return_value = buffer
-        mock_span_processor.get_verdict.return_value = None
 
         config = GovernanceConfig(hitl_enabled=True, send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
+        client = make_verdict_client(approval_response={"verdict": "allow"})
+        interceptor = make_interceptor(state, config, client=client)
 
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
+        mock_input = make_input([])
 
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        async def mock_post(url, *args, **kwargs):
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            if "approval" in url:
-                mock_response.json.return_value = {"verdict": "allow"}
-            else:
-                mock_response.json.return_value = {"verdict": "allow"}
-            return mock_response
-
-        mock_httpx = MagicMock()
-        mock_client_instance = MagicMock()
-        mock_client_instance.post = mock_post
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
         assert result == "result"
-        assert buffer.pending_approval is False
+        client.poll_approval.assert_called_once()
+        assert not state.has_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
+        )
 
     @pytest.mark.asyncio
     async def test_approval_rejected_raises_non_retryable(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that rejected approval raises non-retryable error."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-            pending_approval=True,
+        """A polled BLOCK verdict (human rejection) raises non-retryable
+        ApprovalRejected."""
+        state.mark_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
         )
-        mock_span_processor.get_buffer.return_value = buffer
-        mock_span_processor.get_verdict.return_value = None
 
         config = GovernanceConfig(hitl_enabled=True, send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        client = make_verdict_client(
+            approval_response={
+                "verdict": "block",
+                "reason": "Request denied by admin",
+            }
         )
+        interceptor = make_interceptor(state, config, client=client)
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        mock_input = make_input([])
 
-        async def mock_post(url, *args, **kwargs):
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            if "approval" in url:
-                mock_response.json.return_value = {
-                    "verdict": "block",
-                    "reason": "Request denied by admin",
-                }
-            return mock_response
-
-        mock_httpx = MagicMock()
-        mock_client_instance = MagicMock()
-        mock_client_instance.post = mock_post
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "ApprovalRejected"
-            assert exc_info.value.non_retryable is True
-            assert "Request denied by admin" in str(exc_info.value)
+        assert exc_info.value.type == "ApprovalRejected"
+        assert exc_info.value.non_retryable is True
+        assert "Request denied by admin" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_approval_expired_raises_non_retryable(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that expired approval raises non-retryable error."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-            pending_approval=True,
+        """A polled response flagged expired raises non-retryable ApprovalExpired."""
+        state.mark_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
         )
-        mock_span_processor.get_buffer.return_value = buffer
-        mock_span_processor.get_verdict.return_value = None
 
         config = GovernanceConfig(hitl_enabled=True, send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        client = make_verdict_client(
+            approval_response={"verdict": "require_approval", "expired": True}
         )
+        interceptor = make_interceptor(state, config, client=client)
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        mock_input = make_input([])
 
-        async def mock_post(url, *args, **kwargs):
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            if "approval" in url:
-                mock_response.json.return_value = {
-                    "verdict": "require_approval",
-                    "expired": True,
-                }
-            return mock_response
-
-        mock_httpx = MagicMock()
-        mock_client_instance = MagicMock()
-        mock_client_instance.post = mock_post
-        mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "ApprovalExpired"
-            assert exc_info.value.non_retryable is True
-
-    # =========================================================================
-    # Tests for _send_activity_event()
-    # =========================================================================
+        assert exc_info.value.type == "ApprovalExpired"
+        assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
     async def test_send_activity_event_correct_payload(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
-        """Test that _send_activity_event sends correct payload."""
+        """_send_activity_event builds the correct payload and posts it via the
+        real GovernanceClient (signed transport -> content= bytes)."""
         config = GovernanceConfig()
-        mock_next = AsyncMock()
-
+        # Real client so the HTTP transport/headers are genuinely exercised.
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
         mock_httpx = MagicMock()
         mock_client, mock_client_instance = create_mock_httpx_client(
-            {
-                "verdict": "allow",
-                "reason": "OK",
-            }
+            {"verdict": "allow", "reason": "OK"}
         )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                result = await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityStarted",
+                    activity_input=["test"],
+                )
+        finally:
+            ctx.stop()
 
-            result = await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityStarted",
-                activity_input=["test"],
-            )
-
-        # Verify the call
+        # Verify the request target + payload.
         call_args = mock_client_instance.post.call_args
         assert call_args[0][0] == "http://localhost:8086/api/v1/governance/evaluate"
         payload = posted_payload(call_args)
@@ -1588,27 +1061,25 @@ class TestActivityInterceptor:
         assert payload["activity_input"] == ["test"]
         assert "timestamp" in payload
 
-        # Verify headers
+        # Verify auth header.
         headers = call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer obx_test_key123"
 
-        # Verify result
+        # Verify parsed result.
         assert isinstance(result, GovernanceVerdictResponse)
         assert result.verdict == Verdict.ALLOW
 
     @pytest.mark.asyncio
     async def test_send_activity_event_serializes_extra_fields(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that extra fields are serialized properly."""
         config = GovernanceConfig()
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
@@ -1618,21 +1089,18 @@ class TestActivityInterceptor:
         )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            # Pass complex extra fields
-            extra_data = NestedData(value="test", count=42)
-            await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityCompleted",
-                activity_output=extra_data,
-                spans=[{"name": "span1"}],
-            )
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                extra_data = NestedData(value="test", count=42)
+                await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityCompleted",
+                    activity_output=extra_data,
+                    spans=[{"name": "span1"}],
+                )
+        finally:
+            ctx.stop()
 
         payload = posted_payload(mock_client_instance.post.call_args)
         assert payload["activity_output"] == {"value": "test", "count": 42}
@@ -1640,73 +1108,61 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_send_activity_event_returns_none_on_fail_open(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that None is returned on API error with fail_open policy."""
         config = GovernanceConfig(on_api_error="fail_open")
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {}, status_code=500
-        )
+        mock_client, _ = create_mock_httpx_client({}, status_code=500)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            result = await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityStarted",
-            )
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                result = await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityStarted",
+                )
+        finally:
+            ctx.stop()
 
         assert result is None
 
     @pytest.mark.asyncio
     async def test_send_activity_event_returns_halt_on_fail_closed(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that HALT verdict is returned on API error with fail_closed policy."""
         config = GovernanceConfig(on_api_error="fail_closed")
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {}, status_code=503
-        )
+        mock_client, _ = create_mock_httpx_client({}, status_code=503)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            result = await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityStarted",
-            )
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                result = await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityStarted",
+                )
+        finally:
+            ctx.stop()
 
         assert isinstance(result, GovernanceVerdictResponse)
         assert result.verdict == Verdict.HALT
@@ -1714,17 +1170,15 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_send_activity_event_handles_exception_fail_open(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that exceptions are handled with fail_open policy."""
         config = GovernanceConfig(on_api_error="fail_open")
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
@@ -1733,33 +1187,29 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            result = await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityStarted",
-            )
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                result = await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityStarted",
+                )
+        finally:
+            ctx.stop()
 
         assert result is None
 
     @pytest.mark.asyncio
     async def test_send_activity_event_handles_exception_fail_closed(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that exceptions return HALT with fail_closed policy."""
         config = GovernanceConfig(on_api_error="fail_closed")
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
         )
 
@@ -1768,56 +1218,40 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            result = await interceptor._send_activity_event(
-                mock_activity_info,
-                "ActivityStarted",
-            )
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
+                result = await interceptor._send_activity_event(
+                    mock_activity_info,
+                    "ActivityStarted",
+                )
+        finally:
+            ctx.stop()
 
         assert isinstance(result, GovernanceVerdictResponse)
         assert result.verdict == Verdict.HALT
         assert "Connection error" in result.reason
 
-    # =========================================================================
-    # Tests for poll_approval (via GovernanceClient — replaces _poll_approval_status)
-    # =========================================================================
-
     @pytest.mark.asyncio
     async def test_poll_approval_status_returns_status(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that _client.poll_approval returns approval status dict."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
         mock_httpx = MagicMock()
         mock_client, mock_client_instance = create_mock_httpx_client(
-            {
-                "verdict": "allow",
-                "reason": "Approved by admin",
-            }
+            {"verdict": "allow", "reason": "Approved by admin"}
         )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.logger = MagicMock()
-
+        with patch.dict(sys.modules, {"httpx": mock_httpx}):
             result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
@@ -1826,7 +1260,7 @@ class TestActivityInterceptor:
 
         assert result == {"verdict": "allow", "reason": "Approved by admin"}
 
-        # Verify the request
+        # Verify the request target + payload.
         call_args = mock_client_instance.post.call_args
         assert call_args[0][0] == "http://localhost:8086/api/v1/governance/approval"
         payload = posted_payload(call_args)
@@ -1836,21 +1270,19 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_checks_expiration(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that _client.poll_approval checks expiration and sets expired=True."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
+        mock_client, _ = create_mock_httpx_client(
             {
                 "verdict": "require_approval",
                 "approval_expiration_time": "2020-01-01T00:00:00Z",  # Past date
@@ -1858,12 +1290,7 @@ class TestActivityInterceptor:
         )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.logger = MagicMock()
-
+        with patch.dict(sys.modules, {"httpx": mock_httpx}):
             result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
@@ -1874,16 +1301,14 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_handles_various_timestamp_formats(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that _client.poll_approval handles various timestamp formats."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
@@ -1895,7 +1320,7 @@ class TestActivityInterceptor:
 
         for timestamp in test_cases:
             mock_httpx = MagicMock()
-            mock_client, mock_client_instance = create_mock_httpx_client(
+            mock_client, _ = create_mock_httpx_client(
                 {
                     "verdict": "require_approval",
                     "approval_expiration_time": timestamp,
@@ -1903,12 +1328,7 @@ class TestActivityInterceptor:
             )
             mock_httpx.AsyncClient.return_value = mock_client
 
-            with (
-                patch("openbox.activity_interceptor.activity") as mock_activity,
-                patch.dict(sys.modules, {"httpx": mock_httpx}),
-            ):
-                mock_activity.logger = MagicMock()
-
+            with patch.dict(sys.modules, {"httpx": mock_httpx}):
                 result = await interceptor._client.poll_approval(
                     workflow_id="wf-123",
                     run_id="run-456",
@@ -1919,31 +1339,22 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_returns_none_on_api_error(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that _client.poll_approval returns None on API error."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {}, status_code=500
-        )
+        mock_client, _ = create_mock_httpx_client({}, status_code=500)
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.logger = MagicMock()
-
+        with patch.dict(sys.modules, {"httpx": mock_httpx}):
             result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
@@ -1954,16 +1365,14 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_returns_none_on_exception(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that _client.poll_approval returns None on exception."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
@@ -1972,12 +1381,7 @@ class TestActivityInterceptor:
         mock_client.__aenter__ = AsyncMock(side_effect=Exception("Network error"))
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.logger = MagicMock()
-
+        with patch.dict(sys.modules, {"httpx": mock_httpx}):
             result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
@@ -1988,21 +1392,19 @@ class TestActivityInterceptor:
 
     @pytest.mark.asyncio
     async def test_poll_approval_status_null_expiration_not_expired(
-        self, mock_span_processor, governance_config
+        self, state, governance_config
     ):
         """Test that null/empty expiration time does not set expired."""
-        mock_next = AsyncMock()
-
         interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
+            next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=governance_config,
         )
 
         mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
+        mock_client, _ = create_mock_httpx_client(
             {
                 "verdict": "require_approval",
                 "approval_expiration_time": None,  # No expiration
@@ -2010,12 +1412,7 @@ class TestActivityInterceptor:
         )
         mock_httpx.AsyncClient.return_value = mock_client
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.logger = MagicMock()
-
+        with patch.dict(sys.modules, {"httpx": mock_httpx}):
             result = await interceptor._client.poll_approval(
                 workflow_id="wf-123",
                 run_id="run-456",
@@ -2023,11 +1420,6 @@ class TestActivityInterceptor:
             )
 
         assert "expired" not in result or result.get("expired") is not True
-
-
-# =============================================================================
-# Additional Edge Case Tests
-# =============================================================================
 
 
 class TestEdgeCases:
@@ -2059,181 +1451,166 @@ class TestEdgeCases:
 
     @pytest.mark.asyncio
     async def test_execute_activity_with_none_args(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test execute_activity with None args."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
         config = GovernanceConfig(send_activity_start_event=False)
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value="result")
+        interceptor = make_interceptor(state, config)
 
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
-        )
+        mock_input = make_input(None)  # args = None
 
-        mock_input = MagicMock()
-        mock_input.args = None
-
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
         assert result == "result"
 
     @pytest.mark.asyncio
     async def test_execute_activity_handles_activity_exception(
-        self, mock_span_processor, mock_activity_info
+        self, state, mock_activity_info
     ):
         """Test that activity exceptions are properly propagated."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
         config = GovernanceConfig(send_activity_start_event=False)
         mock_next = AsyncMock()
         mock_next.execute_activity = AsyncMock(
             side_effect=ValueError("Activity failed")
         )
-
         interceptor = _ActivityInterceptor(
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
+            client=make_verdict_client(),
         )
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        mock_input = make_input([])
 
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
-            {"verdict": "allow"}
-        )
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             with pytest.raises(ValueError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert str(exc_info.value) == "Activity failed"
+        assert str(exc_info.value) == "Activity failed"
 
     @pytest.mark.asyncio
-    async def test_buffer_verdict_blocks_activity(
-        self, mock_span_processor, mock_activity_info
+    async def test_completed_hook_halt_terminates_workflow(
+        self, state, mock_activity_info
     ):
-        """Test that buffer.verdict blocks activity execution."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-            verdict=Verdict.HALT,
-            verdict_reason="Workflow halted by policy",
-        )
-        mock_span_processor.get_buffer.return_value = buffer
-        mock_span_processor.get_verdict.return_value = None
+        """A completed-hook HALT recorded by the adapter reaches Temporal's
+        terminate path after user code returns (GovernanceHalt)."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        client = make_verdict_client()
+        interceptor = make_interceptor(state, config, client=client)
 
-        config = GovernanceConfig()
-        mock_next = AsyncMock()
-
-        interceptor = _ActivityInterceptor(
-            next_interceptor=mock_next,
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+        # The base adapter records a completed-hook stop run-scoped; simulate that
+        # by seeding the state the way on_completed_hook_result would.
+        state.record_completed_stop(
+            "test-workflow-id",
+            "test-run-id",
+            "test-activity-id",
+            Verdict.HALT,
+            "Workflow halted by policy",
         )
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        mock_input = make_input([])
 
-        with patch("openbox.activity_interceptor.activity") as mock_activity:
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             from temporalio.exceptions import ApplicationError
 
             with pytest.raises(ApplicationError) as exc_info:
                 await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-            assert exc_info.value.type == "GovernanceHalt"
-            assert "Workflow halted by policy" in str(exc_info.value)
+        assert exc_info.value.type == "GovernanceHalt"
+        assert "Workflow halted by policy" in str(exc_info.value)
 
     @pytest.mark.asyncio
-    async def test_output_redaction_applied(
-        self, mock_span_processor, mock_activity_info
+    async def test_completed_hook_block_skips_completed_event(
+        self, state, mock_activity_info
     ):
-        """Test that output redaction is applied from ActivityCompleted verdict."""
-        mock_span_processor.get_buffer.return_value = None
-        mock_span_processor.get_verdict.return_value = None
-
+        """A completed-hook BLOCK recorded by the adapter suppresses the duplicate
+        ActivityCompleted event (the operation already ran)."""
         config = GovernanceConfig(send_activity_start_event=False)
-        output_data = ActivityInput(prompt="secret data", user_id="user123")
-        mock_next = AsyncMock()
-        mock_next.execute_activity = AsyncMock(return_value=output_data)
+        client = make_verdict_client()
+        interceptor = make_interceptor(state, config, client=client)
 
+        state.record_completed_stop(
+            "test-workflow-id",
+            "test-run-id",
+            "test-activity-id",
+            Verdict.BLOCK,
+            "post-hoc block",
+        )
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert result == "result"
+        # No ActivityCompleted event sent (aborted by hook governance).
+        client.evaluate_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_base_abort_flag_skips_completed_event(
+        self, state, mock_activity_info
+    ):
+        """A within-activity abort flag (started-hook BLOCK the user swallowed)
+        suppresses the ActivityCompleted event and is cleared afterward."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        client = make_verdict_client()
+
+        async def mark_abort_then_return(input):
+            # Simulate a base started-hook BLOCK the user code caught + swallowed.
+            get_core_context_store().mark_activity_aborted(
+                "test-workflow-id", "test-activity-id"
+            )
+            return "result"
+
+        mock_next = AsyncMock()
+        mock_next.execute_activity = AsyncMock(side_effect=mark_abort_then_return)
         interceptor = _ActivityInterceptor(
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
+            state=state,
             config=config,
+            client=client,
         )
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        mock_input = make_input([])
 
-        mock_httpx = MagicMock()
-        mock_client, mock_client_instance = create_mock_httpx_client(
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert result == "result"
+        client.evaluate_event.assert_not_called()
+        # Abort flag cleared so it doesn't bleed into a retry.
+        assert not get_core_context_store().is_activity_aborted(
+            "test-workflow-id", "test-activity-id"
+        )
+
+    @pytest.mark.asyncio
+    async def test_output_redaction_applied(
+        self, state, mock_activity_info
+    ):
+        """Test that output redaction is applied from ActivityCompleted verdict."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        output_data = ActivityInput(prompt="secret data", user_id="user123")
+        completed_verdict = GovernanceVerdictResponse.from_dict(
             {
                 "verdict": "allow",
                 "guardrails_result": {
@@ -2247,47 +1624,129 @@ class TestEdgeCases:
                 },
             }
         )
-        mock_httpx.AsyncClient.return_value = mock_client
+        client = make_verdict_client(completed_verdict)
+        interceptor = make_interceptor(
+            state, config, next_result=output_data, client=client
+        )
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
+        mock_input = make_input([])
 
-            mock_span = MagicMock()
-            mock_span.get_span_context.return_value.trace_id = 123
-            mock_span.get_span_context.return_value.span_id = 456
-            mock_tracer = MagicMock()
-            mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-                return_value=mock_span
-            )
-            mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-                return_value=False
-            )
-            mock_trace.get_tracer.return_value = mock_tracer
-
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
             result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
 
-        # Verify output was redacted in place
+        # Output redacted in place + returned.
         assert output_data.prompt == "[REDACTED]"
         assert result.prompt == "[REDACTED]"
 
 
-# =============================================================================
-# Tests for Hook-Level REQUIRE_APPROVAL → ApprovalPending
-# =============================================================================
+class TestActivityMultiAgentSession:
+    """Activity interceptor reads the session header and tags activity events,
+    and binds the session id onto the core ActivityContext so hook events
+    inherit it."""
+
+    def _converter(self):
+        from temporalio.converter import default as _default_converter
+
+        return _default_converter().payload_converter
+
+    async def _run(self, state, mock_activity_info, headers):
+        conv = self._converter()
+        client = make_verdict_client(verdict_response=None)
+        # verdict_response None => evaluate_event returns None (no governance stop).
+        client.evaluate_event = AsyncMock(return_value=None)
+        interceptor = make_interceptor(state, GovernanceConfig(), client=client)
+
+        mock_input = MagicMock()
+        mock_input.args = []
+        mock_input.headers = headers
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity:
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_activity.payload_converter.return_value = conv
+
+            await interceptor.execute_activity(mock_input)
+
+        event_payloads = {
+            call.args[0]["event_type"]: call.args[0]
+            for call in client.evaluate_event.call_args_list
+        }
+        return event_payloads
+
+    @pytest.mark.asyncio
+    async def test_events_tagged_when_header_present(
+        self, state, mock_activity_info
+    ):
+        """Header present -> ActivityStarted + ActivityCompleted carry the session id."""
+        conv = self._converter()
+        from openbox.multi_agent import HEADER_KEY
+
+        headers = {HEADER_KEY: conv.to_payload("sess-act")}
+        payloads = await self._run(state, mock_activity_info, headers)
+
+        assert payloads["ActivityStarted"]["multi_agent_session_id"] == "sess-act"
+        assert payloads["ActivityCompleted"]["multi_agent_session_id"] == "sess-act"
+
+    @pytest.mark.asyncio
+    async def test_events_not_tagged_when_header_absent(
+        self, state, mock_activity_info
+    ):
+        """Header absent -> multi_agent_session_id omitted from both events."""
+        payloads = await self._run(state, mock_activity_info, {})
+
+        assert "multi_agent_session_id" not in payloads["ActivityStarted"]
+        assert "multi_agent_session_id" not in payloads["ActivityCompleted"]
+
+    @pytest.mark.asyncio
+    async def test_core_context_carries_session_id_for_hooks(
+        self, state, mock_activity_info
+    ):
+        """The session id from the header is bound onto the core ActivityContext
+        so base hook events inherit it (replaces the legacy span-processor
+        activity-context stash)."""
+        conv = self._converter()
+        from openbox.multi_agent import HEADER_KEY
+
+        observed = {}
+
+        async def capture_context(input):
+            ctx = get_core_context_store().current_activity_context()
+            observed["session_id"] = ctx.multi_agent_session_id
+            return "activity_result"
+
+        client = make_verdict_client()
+        client.evaluate_event = AsyncMock(return_value=None)
+        mock_next = AsyncMock()
+        mock_next.execute_activity = AsyncMock(side_effect=capture_context)
+        interceptor = _ActivityInterceptor(
+            next_interceptor=mock_next,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key123",
+            state=state,
+            config=GovernanceConfig(),
+            client=client,
+        )
+
+        mock_input = MagicMock()
+        mock_input.args = []
+        mock_input.headers = {HEADER_KEY: conv.to_payload("sess-hook")}
+
+        with patch("openbox.activity_interceptor.activity") as mock_activity:
+            mock_activity.info.return_value = mock_activity_info
+            mock_activity.logger = MagicMock()
+            mock_activity.payload_converter.return_value = conv
+
+            await interceptor.execute_activity(mock_input)
+
+        assert observed["session_id"] == "sess-hook"
 
 
-class TestHookLevelRequireApproval:
-    """Tests for GovernanceBlockedError handling during activity execution.
-
-    When hook-level governance (HTTP/file/DB/function) returns REQUIRE_APPROVAL,
-    the activity interceptor should raise retryable ApprovalPending instead of
-    non-retryable GovernanceStop.
-    """
+class TestCoreContextBindingCarriesPolicyFields:
+    """The core ActivityContext bound around execution must carry the policy
+    context base hook payloads read (activity_input / multi_agent_session_id)."""
 
     @pytest.fixture
     def mock_activity_info(self):
@@ -2301,282 +1760,110 @@ class TestHookLevelRequireApproval:
         info.attempt = 1
         return info
 
-    @pytest.fixture
-    def mock_span_processor(self):
-        processor = MagicMock()
-        processor.get_buffer.return_value = None
-        processor.get_verdict.return_value = None
-        processor.get_pending_body.return_value = None
-        processor.get_halt_requested.return_value = None
-        processor.clear_halt_requested = MagicMock()
-        return processor
+    @pytest.mark.asyncio
+    async def test_run_activity_binds_input_and_session_id(
+        self, state, mock_activity_info
+    ):
+        observed = {}
 
-    def _make_interceptor(self, mock_span_processor, config=None, activity_raises=None):
-        """Helper: create interceptor with mock next that raises GovernanceBlockedError."""
-        config = config or GovernanceConfig(
-            send_activity_start_event=False, hitl_enabled=True
-        )
+        async def capture_context(input):
+            ctx = get_core_context_store().current_activity_context()
+            observed["activity_input"] = ctx.activity_input
+            observed["session_id"] = ctx.multi_agent_session_id
+            return "ok"
+
         mock_next = AsyncMock()
-        if activity_raises:
-            mock_next.execute_activity = AsyncMock(side_effect=activity_raises)
-        else:
-            mock_next.execute_activity = AsyncMock(return_value="result")
+        mock_next.execute_activity = AsyncMock(side_effect=capture_context)
         interceptor = _ActivityInterceptor(
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
-            span_processor=mock_span_processor,
-            config=config,
+            state=state,
+            config=GovernanceConfig(),
+            client=make_verdict_client(),
         )
-        return interceptor
 
-    def _mock_tracer_context(self):
-        """Helper: create mock trace/span context managers."""
-        mock_span = MagicMock()
-        mock_span.get_span_context.return_value.trace_id = 123
-        mock_span.get_span_context.return_value.span_id = 456
-        mock_tracer = MagicMock()
-        mock_tracer.start_as_current_span.return_value.__enter__ = MagicMock(
-            return_value=mock_span
-        )
-        mock_tracer.start_as_current_span.return_value.__exit__ = MagicMock(
-            return_value=False
-        )
-        return mock_tracer
-
-    @pytest.mark.asyncio
-    async def test_require_approval_raises_approval_pending(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """Hook REQUIRE_APPROVAL → retryable ApprovalPending error."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        mock_span_processor.get_buffer.return_value = buffer
-
-        error = GovernanceBlockedError(
-            "require_approval", "Needs human review", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
+        with patch("openbox.activity_interceptor.activity") as mock_activity:
             mock_activity.info.return_value = mock_activity_info
             mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
+            result, status, *_ = await interceptor._run_activity(
+                MagicMock(args=["a1"]),
+                mock_activity_info,
+                activity_input=["serialized-input"],
+                session_id="sid-42",
+            )
 
-            from temporalio.exceptions import ApplicationError
+        assert result == "ok"
+        assert status == "completed"
+        assert observed["activity_input"] == ["serialized-input"]
+        assert observed["session_id"] == "sid-42"
+        # Reset after the scope exits — no leak.
+        assert get_core_context_store().current_activity_context() is None
 
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
 
-            assert exc_info.value.type == "ApprovalPending"
-            assert exc_info.value.non_retryable is False
-            assert "Approval required" in str(exc_info.value)
-            assert buffer.pending_approval is True
+# Completed-hook HALT must terminate even when the activity also raises (H1)
 
-    @pytest.mark.asyncio
-    async def test_block_verdict_raises_governance_block(
-        self, mock_span_processor, mock_activity_info
+
+class TestCompletedHaltReachesTerminateOnActivityRaise:
+    """A completed-hook HALT is a kill-switch: it must reach the terminate path
+    even when the activity itself raises AFTER the hook recorded the stop (so
+    _handle_completion is skipped). Failing the activity does not halt the run."""
+
+    _WF, _RUN, _ACT = "test-workflow-id", "test-run-id", "test-activity-id"
+
+    async def test_completed_halt_terminates_despite_activity_exception(
+        self, mock_activity_info
     ):
-        """Hook BLOCK → non-retryable GovernanceBlock."""
-        mock_span_processor.get_buffer.return_value = None
+        state = TemporalGovernanceState()
+        interceptor = make_interceptor(state)  # ActivityStarted -> ALLOW
 
-        error = GovernanceBlockedError(
-            "block", "Policy violation", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
+        async def raising_next(_input):
+            # Simulate a completed hook recording HALT during user code, then the
+            # activity raising for an unrelated reason.
+            state.record_completed_stop(
+                self._WF, self._RUN, self._ACT, Verdict.HALT, "kill switch"
+            )
+            raise RuntimeError("activity boom")
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        interceptor.next.execute_activity = raising_next
+        terminate = AsyncMock()
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch(
+                "openbox.activity_interceptor._terminate_workflow_for_halt", terminate
+            ):
+                with pytest.raises(RuntimeError, match="activity boom"):
+                    await interceptor.execute_activity(make_input())
+        finally:
+            ctx.stop()
 
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
+        terminate.assert_awaited_once_with(self._WF, "kill switch")
+        # Consumed on the exception path — nothing stranded.
+        assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
-
-            from temporalio.exceptions import ApplicationError
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
-
-            assert exc_info.value.type == "GovernanceBlock"
-            assert exc_info.value.non_retryable is True
-
-    @pytest.mark.asyncio
-    async def test_require_approval_hitl_disabled_raises_governance_block(
-        self, mock_span_processor, mock_activity_info
+    async def test_completed_block_on_raise_does_not_terminate_but_is_cleared(
+        self, mock_activity_info
     ):
-        """When HITL disabled, REQUIRE_APPROVAL falls through to GovernanceBlock."""
-        config = GovernanceConfig(send_activity_start_event=False, hitl_enabled=False)
-        error = GovernanceBlockedError(
-            "require_approval", "Needs review", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(
-            mock_span_processor, config=config, activity_raises=error
-        )
+        state = TemporalGovernanceState()
+        interceptor = make_interceptor(state)
 
-        mock_input = MagicMock()
-        mock_input.args = []
+        async def raising_next(_input):
+            state.record_completed_stop(
+                self._WF, self._RUN, self._ACT, Verdict.BLOCK, "no"
+            )
+            raise RuntimeError("boom")
 
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
+        interceptor.next.execute_activity = raising_next
+        terminate = AsyncMock()
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch(
+                "openbox.activity_interceptor._terminate_workflow_for_halt", terminate
+            ):
+                with pytest.raises(RuntimeError):
+                    await interceptor.execute_activity(make_input())
+        finally:
+            ctx.stop()
 
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
-
-            from temporalio.exceptions import ApplicationError
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
-
-            assert exc_info.value.type == "GovernanceBlock"
-            assert exc_info.value.non_retryable is True
-
-    @pytest.mark.asyncio
-    async def test_require_approval_skip_hitl_activity_raises_governance_block(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """When activity is in skip_hitl_activity_types, REQUIRE_APPROVAL → GovernanceBlock."""
-        config = GovernanceConfig(
-            send_activity_start_event=False,
-            hitl_enabled=True,
-            skip_hitl_activity_types={"test_activity"},
-        )
-        error = GovernanceBlockedError(
-            "require_approval", "Needs review", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(
-            mock_span_processor, config=config, activity_raises=error
-        )
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
-
-            from temporalio.exceptions import ApplicationError
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
-
-            assert exc_info.value.type == "GovernanceBlock"
-            assert exc_info.value.non_retryable is True
-
-    @pytest.mark.asyncio
-    async def test_request_approval_alias_raises_approval_pending(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """Verify 'request_approval' alias also triggers ApprovalPending path."""
-        buffer = WorkflowSpanBuffer(
-            workflow_id="test-workflow-id",
-            run_id="test-run-id",
-            workflow_type="TestWorkflow",
-            task_queue="test-queue",
-        )
-        mock_span_processor.get_buffer.return_value = buffer
-
-        error = GovernanceBlockedError(
-            "request_approval", "Needs review", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
-
-            from temporalio.exceptions import ApplicationError
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
-
-            assert exc_info.value.type == "ApprovalPending"
-            assert exc_info.value.non_retryable is False
-            assert buffer.pending_approval is True
-
-    @pytest.mark.asyncio
-    async def test_require_approval_no_buffer_still_raises_approval_pending(
-        self, mock_span_processor, mock_activity_info
-    ):
-        """When get_buffer returns None, ApprovalPending still raised (pending_approval not set)."""
-        mock_span_processor.get_buffer.return_value = None
-
-        error = GovernanceBlockedError(
-            "require_approval", "Needs review", "https://api.example.com"
-        )
-        interceptor = self._make_interceptor(mock_span_processor, activity_raises=error)
-
-        mock_input = MagicMock()
-        mock_input.args = []
-
-        mock_httpx = MagicMock()
-        mock_client, _ = create_mock_httpx_client({"verdict": "allow"})
-        mock_httpx.AsyncClient.return_value = mock_client
-
-        with (
-            patch("openbox.activity_interceptor.activity") as mock_activity,
-            patch("openbox.activity_interceptor.trace") as mock_trace,
-            patch.dict(sys.modules, {"httpx": mock_httpx}),
-        ):
-            mock_activity.info.return_value = mock_activity_info
-            mock_activity.logger = MagicMock()
-            mock_trace.get_tracer.return_value = self._mock_tracer_context()
-
-            from temporalio.exceptions import ApplicationError
-
-            with pytest.raises(ApplicationError) as exc_info:
-                await interceptor.execute_activity(mock_input)
-
-            assert exc_info.value.type == "ApprovalPending"
-            assert exc_info.value.non_retryable is False
+        terminate.assert_not_awaited()  # BLOCK never terminates
+        assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None

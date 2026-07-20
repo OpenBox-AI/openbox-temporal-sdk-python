@@ -62,11 +62,11 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - `requests` - full body capture via hooks
   - `urllib3` - full body capture via hooks
   - `urllib` - request body only
-- **Implementation**: `otel_setup.py` with instrumentation hooks and `WorkflowSpanProcessor` buffering
+- **Implementation**: Owned by the `openbox_core` base runtime, installed by the worker/plugin via `create_core_runtime()`
 - **Acceptance Criteria**:
   - Only text content types captured (JSON, XML, text/*)
-  - Bodies stored separately from OTel spans (privacy)
-  - Ignored URLs configurable (e.g., OpenBox Core API)
+  - Bodies kept out of exported OTel span attributes (privacy)
+  - The base runtime never governs its own evaluation traffic
 
 #### FR-4: Database Query Capture
 - **Requirement**: Capture database queries as spans for policy evaluation
@@ -77,7 +77,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - MongoDB (`pymongo`)
   - Redis (`redis`)
   - SQLAlchemy ORM
-- **Implementation**: `setup_database_instrumentation()` in `otel_setup.py`
+- **Implementation**: Owned by the `openbox_core` base runtime (installs every available DB instrumentor; governs SQLAlchemy via a global `Engine` listener)
 - **Acceptance Criteria**:
   - Query statement captured in `db.statement` attribute
   - Database system identified in `db.system` attribute
@@ -87,7 +87,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 #### FR-5: File I/O Capture (Optional)
 - **Requirement**: Capture file operations as spans
 - **Operations**: `open()`, `read()`, `write()`, `readline()`, `readlines()`, `writelines()`
-- **Implementation**: Monkey-patches `builtins.open` in `otel_setup.py`
+- **Implementation**: Owned by the `openbox_core` base runtime (file instrumentation)
 - **Acceptance Criteria**:
   - File path, mode, operation type, and bytes read/written captured
   - System paths skipped (`/dev/`, `/proc/`, `/sys/`, `__pycache__`)
@@ -95,11 +95,11 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 #### FR-6: Function Tracing Decorator
 - **Requirement**: Allow developers to trace custom functions as spans with optional hook-level governance
-- **Usage**: `@traced` decorator in `tracing.py`
+- **Usage**: `@traced` decorator in `tracing.py` (wraps the base SDK's `governed()` decorator)
 - **Governance Integration**:
   - Functions evaluated at `started` stage (before execution) — can be blocked
   - Functions evaluated at `completed` stage (after execution or error) — can be blocked
-  - Triggered automatically when `hook_governance` is configured, zero overhead otherwise
+  - Active automatically when a worker/plugin has installed the base runtime; transparent passthrough otherwise
 - **Acceptance Criteria**:
   - Supports sync and async functions
   - Captures function arguments and return values (configurable)
@@ -114,8 +114,8 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - Database queries (started/completed stages)
   - File operations (open, read, write; started/completed stages)
   - Traced function calls (started/completed stages)
-- **Implementation**: `hook_governance.py` with hooks in `otel_setup.py`, `db_governance_hooks.py`, `tracing.py`
-- **Payload Structure**:
+- **Implementation**: Owned by the `openbox_core` base runtime (payload building, evaluation, enforcement). The Temporal SDK builds/owns the runtime and maps its verdicts to Temporal effects.
+- **Payload Structure** (owned by the base SDK):
   - `hook_trigger`: Simple boolean `true` (replaces dict with type/stage/data)
   - Span data at root level: type-specific fields (`http_method`, `db_system`, `file_path`) at root, NOT in attributes
   - `attributes` field: Contains ONLY original OTel attributes (no custom fields)
@@ -165,7 +165,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
   - If expired, terminates workflow immediately
 - **Implementation**: `_poll_approval_status()` in `activity_interceptor.py`
 - **Acceptance Criteria**:
-  - Pending approval stored in `WorkflowSpanBuffer.pending_approval`
+  - Pending approval tracked in `TemporalGovernanceState` (per workflow/run/activity)
   - Approval expiration time checked against current UTC time
   - Expired approvals terminate with `ApprovalExpired` error type
   - Configurable via `hitl_enabled` flag (default: True)
@@ -297,11 +297,11 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 - **Version**: Temporal SDK 1.8+
 - **Interceptor Chain**: `GovernanceInterceptor` → `ActivityGovernanceInterceptor` → user interceptors
 
-#### INT-3: OpenTelemetry
-- **TracerProvider**: SDK creates and registers `WorkflowSpanProcessor`
-- **Instrumentors**: HTTP, database, file I/O (via OTel community packages)
-- **Span Export**: Optional fallback processor for external tracing systems
-- **Hook-Level Governance**: Integrated into HTTP/DB/File/Function hooks before OTel span creation
+#### INT-3: OpenTelemetry & Base Runtime (`openbox_core`)
+- **Runtime ownership**: The worker/plugin builds and owns an `openbox_core` runtime and calls `runtime.install_instrumentation()`
+- **Instrumentors**: HTTP, database, file I/O, and function hooks installed by the base runtime
+- **Hook-Level Governance**: Payload building, evaluation, and enforcement live in the base SDK; the Temporal SDK maps verdicts to Temporal-native effects
+- **Trace propagation**: W3C traceparent/baggage propagated via Temporal's built-in `TracingInterceptor` so caller spans stitch to workflow/activity spans
 
 ---
 
@@ -327,24 +327,36 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 ---
 
-### 6. Recent Changes (v1.1.0)
+### 6. Recent Changes
 
-#### Hook-Level Governance Simplification
+#### Hook Governance Owned by the Base SDK (`openbox_core`)
 
-**Key Changes:**
-1. **hook_trigger simplified to boolean `true`** — was a dict with type/stage/data, now just `true`
-2. **All span data at root level** — type-specific fields (`http_method`, `db_system`, `file_path`, `function`, etc.) are at span root, not in attributes or hook_trigger
-3. **`attributes` is OTel-original only** — no custom fields injected
-4. **`hook_type` field** discriminates operation type: `http_request`, `db_query`, `file_operation`, `function_call`
-5. **Single span per evaluation** — no accumulated history
-6. **`duration_ns` now computed** for all hook types (HTTP, file, function — DB already had it)
-7. **Removed from span_processor**: `mark_governed`, `store_body`, `get_pending_body`, `_extract_span_data`, `_governed_span_ids`, `_body_data`
+Hook governance (HTTP/DB/file/function instrumentation) now lives entirely in the
+base SDK. The Temporal worker/plugin builds and owns an `openbox_core` runtime that
+installs all instrumentation, and it maps the base SDK's verdicts onto
+Temporal-native behavior.
 
-**Files Updated:**
-- `hook_governance.py` (new module for per-operation evaluation)
-- `otel_setup.py` (span data builders, hook integration)
-- `db_governance_hooks.py` (span data builder, hook integration)
-- `tracing.py` (span data builder, hook integration)
+**Responsibility split:**
+- **Base SDK (`openbox_core`)**: hook instrumentation, hook payload shape,
+  evaluation, and enforcement.
+- **Temporal SDK (this package)**: lifecycle governance (workflow/activity/signal
+  events via workflow-safe activities), HITL retry, signal-verdict bridging, and
+  completed-hook stop/halt propagation via `TemporalGovernanceState`.
+
+**Bootstrap (worker and plugin):** create a `TemporalGovernanceState` →
+`create_core_runtime(...)` → `runtime.install_instrumentation()` → both
+interceptors share the same `state`.
+
+**Compatibility:**
+- `create_openbox_worker(...)` and `OpenBoxPlugin(...)` signatures are unchanged.
+- `@traced` now wraps the base SDK's `governed()` decorator.
+- `db_libraries` / `sqlalchemy_engine` are still accepted but no longer have any
+  effect — the base runtime installs every available DB instrumentor and governs
+  SQLAlchemy globally.
+- There is no Temporal-local OpenTelemetry / span-processor setup to configure.
+
+**Removed public exports:** `WorkflowSpanProcessor`, `WorkflowSpanBuffer` (and the
+`setup_opentelemetry_for_governance` entry point). Everything else is retained.
 
 ---
 

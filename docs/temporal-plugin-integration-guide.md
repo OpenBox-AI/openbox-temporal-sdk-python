@@ -59,20 +59,24 @@ await worker.run()
 | `skip_activity_types` | Set[str] | None | Activity types to skip (default: `send_governance_event`) |
 | `skip_signals` | Set[str] | None | Signal names to skip governance |
 | `hitl_enabled` | bool | True | Enable human-in-the-loop approval polling |
-| `instrument_databases` | bool | True | Instrument database libraries |
-| `db_libraries` | set | None | Specific DB libraries to instrument (None = all) |
-| `sqlalchemy_engine` | Any | None | Pre-existing SQLAlchemy engine to instrument |
+| `instrument_databases` | bool | True | Instrument database libraries (the base runtime installs all available instrumentors) |
+| `db_libraries` | set | None | Accepted for backward compatibility; no effect |
+| `sqlalchemy_engine` | Any | None | Accepted for backward compatibility; no effect (SQLAlchemy is governed globally, covering pre-existing engines) |
 | `instrument_file_io` | bool | True | Instrument file I/O operations |
 
 ---
 
 ## How It Works
 
-The plugin composes existing OpenBox SDK components via Temporal's `SimplePlugin` base class:
+The plugin composes OpenBox SDK components via Temporal's `SimplePlugin` base class:
 
-1. **Constructor** — validates API key, sets up OTel instrumentation, creates governance interceptors
-2. **`configure_worker()`** — stores Temporal client reference (for HALT terminate calls), delegates to `SimplePlugin` to append interceptors and activities
-3. **`workflow_runner`** — adds sandbox passthrough for `opentelemetry` module
+1. **Constructor** — validates the API key, builds and owns an `openbox_core` runtime and installs its hook instrumentation (HTTP/DB/file/function), then creates the governance interceptors (backed by a shared `TemporalGovernanceState`)
+2. **`configure_worker()`** — stores the Temporal client reference (for HALT terminate calls), delegates to `SimplePlugin` to append interceptors and the `send_governance_event` activity
+3. **`workflow_runner`** — adds sandbox passthrough for the `opentelemetry` module
+
+Hook payload building, evaluation, and enforcement are owned by the base SDK
+(`openbox_core`); the plugin maps the resulting verdicts onto Temporal-native
+effects (non-retryable errors, retry-based approval, workflow termination).
 
 ### Interceptor Ordering
 
@@ -94,12 +98,12 @@ Plugin interceptors are appended (innermost). This means user-provided intercept
 
 ## Hook-Level Governance
 
-Every HTTP request, database query, and file operation during an activity is evaluated in real-time:
+Every HTTP request, database query, and file operation during an activity is evaluated in real-time. Hook instrumentation is installed and owned by the base SDK (`openbox_core`):
 
-- **HTTP** — request/response hooks via OTel instrumentation (httpx, requests, urllib3)
-- **Database** — per-query hooks (psycopg2, asyncpg, pymysql, pymongo, redis, sqlalchemy)
+- **HTTP** — request/response hooks (httpx, requests, urllib3, urllib)
+- **Database** — per-query hooks (psycopg2, asyncpg, pymysql, pymongo, redis, sqlalchemy, sqlite3)
 - **File I/O** — per-operation hooks (open, read, write, close)
-- **Function tracing** — `@traced` decorator for governed function calls
+- **Function tracing** — `@traced` decorator (wraps the base SDK's `governed()` decorator)
 
 Each operation is evaluated at `started` (pre-execution, can block) and `completed` (post-execution).
 
