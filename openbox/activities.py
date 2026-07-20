@@ -21,18 +21,16 @@ executes. This ensures timestamps are generated in activity context (non-determi
 code allowed) rather than workflow context (must be deterministic).
 """
 
-import httpx
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
-
-from .types import rfc3339_now as _rfc3339_now
-
+import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from .types import Verdict
+from .types import GovernanceVerdictResponse, Verdict
+from .types import rfc3339_now as _rfc3339_now
 
 logger = logging.getLogger(__name__)
 
@@ -201,12 +199,26 @@ class GovernanceActivities:
                     )
 
                 data = response.json()
-                verdict = Verdict.from_string(
-                    data.get("verdict") or data.get("action", "continue")
-                )
-                reason = data.get("reason")
-                policy_id = data.get("policy_id")
-                risk_score = data.get("risk_score", 0.0)
+                parsed = GovernanceVerdictResponse.from_dict(data)
+                verdict = parsed.verdict
+                reason = parsed.reason
+                policy_id = parsed.policy_id
+                risk_score = parsed.risk_score
+
+                # A BLOCK carrying a valid retry plan restarts the workflow run
+                # instead of merely failing this activity — check for it before
+                # the plain BLOCK/HALT stop handling below ever sees the verdict.
+                from .errors import GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
+                from .retryable_block import retryable_block_request
+
+                retry_req = retryable_block_request(parsed, event_type=event_type)
+                if retry_req is not None:
+                    raise ApplicationError(
+                        "Governance requested workflow restart",
+                        retry_req.to_dict(),
+                        type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+                        non_retryable=True,
+                    )
 
                 if verdict.should_stop():
                     result = await _handle_stop_verdict(

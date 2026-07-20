@@ -8,43 +8,41 @@
 # pyproject.toml on release.
 __version__ = "1.2.0"
 
-from .worker import create_openbox_worker
-
-from .config import (
-    initialize,
-    get_global_config,
-    GovernanceConfig,
-)
-
+from .config import GovernanceConfig, get_global_config, initialize
 from .errors import (
-    OpenBoxError,
-    OpenBoxConfigError,
-    OpenBoxAuthError,
-    OpenBoxNetworkError,
-    OpenBoxInsecureURLError,
-    OpenBoxSigningError,
-    GovernanceBlockedError,
-    GovernanceHaltError,
-    GovernanceAPIError,
-    GuardrailsValidationError,
     ApprovalExpiredError,
     ApprovalRejectedError,
     ApprovalTimeoutError,
+    GovernanceAPIError,
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GuardrailsValidationError,
+    OpenBoxAuthError,
+    OpenBoxConfigError,
+    OpenBoxError,
+    OpenBoxInsecureURLError,
+    OpenBoxNetworkError,
+    OpenBoxSigningError,
     extract_governance_error,
     map_signing_error,
-)
-
-from .types import (
-    Verdict,
-    WorkflowEventType,
-    GovernanceVerdictResponse,
-    GuardrailsCheckResult,
 )
 
 # Multi-agent primitives (sandbox-safe — only imports temporalio.workflow eagerly;
 # signing/HTTP routed lazily through the governance activity).
 from .multi_agent import emit_handoff
 
+# Retryable-BLOCK restart envelope (sandbox-safe: pure stdlib + base contracts).
+from .retryable_block import (
+    GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+    RetryableBlockRequest,
+)
+from .types import (
+    GovernanceVerdictResponse,
+    GuardrailsCheckResult,
+    Verdict,
+    WorkflowEventType,
+)
+from .worker import create_openbox_worker
 from .workflow_interceptor import GovernanceInterceptor
 
 try:
@@ -54,11 +52,9 @@ try:
 except ImportError:
     pass  # temporalio < 1.23.0, plugin not available
 
-from .verdict_handler import enforce_verdict, VerdictEnforcementResult
-
-from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
-
 from .client import GovernanceClient
+from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
+from .verdict_handler import VerdictEnforcementResult, enforce_verdict
 
 # NOTE: ActivityGovernanceInterceptor is NOT imported here because it imports
 # OpenTelemetry which uses importlib_metadata -> os.stat, causing sandbox issues.
@@ -114,6 +110,8 @@ __all__ = [
     "WorkflowEventType",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
+    "RetryableBlockRequest",
+    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
     "emit_handoff",
     "GovernanceInterceptor",
     "enforce_verdict",

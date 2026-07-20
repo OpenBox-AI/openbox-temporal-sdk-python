@@ -2,28 +2,31 @@
 
 import base64
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
-import sys
 
 import pytest
-from .conftest import posted_payload
 
 from openbox.activity_interceptor import (
-    _rfc3339_now,
-    _deep_update_dataclass,
-    _serialize_value,
     ActivityGovernanceInterceptor,
     _ActivityInterceptor,
-)
-from openbox.types import (
-    Verdict,
-    GovernanceVerdictResponse,
+    _deep_update_dataclass,
+    _rfc3339_now,
+    _serialize_value,
 )
 from openbox.config import GovernanceConfig
-from openbox.governance_state import TemporalGovernanceState
 from openbox.core_adapter import get_core_context_store
+from openbox.governance_state import TemporalGovernanceState
+from openbox.retryable_block import (
+    GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+    RetryableBlockRequest,
+)
+from openbox.types import GovernanceVerdictResponse, Verdict
+
+from .conftest import posted_payload
+
 
 @dataclass
 class NestedData:
@@ -115,9 +118,7 @@ def governance_config():
     return GovernanceConfig()
 
 
-def make_verdict_client(
-    verdict_response=None, approval_response=None
-) -> MagicMock:
+def make_verdict_client(verdict_response=None, approval_response=None) -> MagicMock:
     """Build a mock GovernanceClient.
 
     evaluate_event returns ``verdict_response`` (a GovernanceVerdictResponse or
@@ -157,6 +158,23 @@ def make_input(args=None):
     mock_input.args = args if args is not None else []
     mock_input.headers = {}
     return mock_input
+
+
+def make_retry_request(**overrides) -> RetryableBlockRequest:
+    """Build a RetryableBlockRequest for seeding a completed-hook stop entry
+    directly (bypassing the normalizer — these tests target the interceptor's
+    OWN priority handling of an already-produced request)."""
+    base = dict(
+        schema_version=GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+        new_input={"query": "retry"},
+        governance_event_id="evt_completed",
+        reason="post-hoc retry",
+        event_type="ActivityStarted",
+        hook_trigger=True,
+        hook_stage="completed",
+    )
+    base.update(overrides)
+    return RetryableBlockRequest(**base)
 
 
 def create_mock_httpx_client(response_data, status_code=200):
@@ -423,6 +441,37 @@ class TestSerializeValue:
 
         assert result == {"value": "test", "count": 42}
 
+    def test_pydantic_style_model_dump_converts_to_dict(self):
+        """Pydantic v2 models retain their structure instead of using str()."""
+
+        class RefundExecutionInput:
+            def model_dump(self, *, mode):
+                assert mode == "json"
+                return {
+                    "item": {"id": "game-001", "price": 300, "price_unit": "cent"},
+                    "refund": {
+                        "amount": 300,
+                        "currency": "USD",
+                        "amount_unit": "dollar",
+                    },
+                }
+
+            def __str__(self):
+                return "item=Item(...) refund=Refund(...)"
+
+        result = _serialize_value([RefundExecutionInput()])
+
+        assert result == [
+            {
+                "item": {"id": "game-001", "price": 300, "price_unit": "cent"},
+                "refund": {
+                    "amount": 300,
+                    "currency": "USD",
+                    "amount_unit": "dollar",
+                },
+            }
+        ]
+
     def test_nested_dataclass_converts_to_nested_dict(self):
         """Test that nested dataclass converts to nested dict."""
         data = OuterData(
@@ -618,14 +667,10 @@ class TestActivityInterceptor:
     """Tests for _ActivityInterceptor class."""
 
     @pytest.mark.asyncio
-    async def test_skips_if_activity_type_in_skip_list(
-        self, state, mock_activity_info
-    ):
+    async def test_skips_if_activity_type_in_skip_list(self, state, mock_activity_info):
         """Test that activity is skipped if activity_type is in skip_activity_types."""
         config = GovernanceConfig(skip_activity_types={"test_activity"})
-        interceptor = make_interceptor(
-            state, config, next_result="activity_result"
-        )
+        interceptor = make_interceptor(state, config, next_result="activity_result")
 
         mock_input = make_input(["arg1"])
 
@@ -722,9 +767,7 @@ class TestActivityInterceptor:
         """Test that GovernanceBlock is raised for BLOCK verdict on ActivityStarted."""
         config = GovernanceConfig(send_activity_start_event=True)
         client = make_verdict_client(
-            GovernanceVerdictResponse(
-                verdict=Verdict.BLOCK, reason="Policy violation"
-            )
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="Policy violation")
         )
         interceptor = make_interceptor(state, config, client=client)
 
@@ -868,9 +911,7 @@ class TestActivityInterceptor:
         ]
 
     @pytest.mark.asyncio
-    async def test_sends_activity_completed_event(
-        self, state, mock_activity_info
-    ):
+    async def test_sends_activity_completed_event(self, state, mock_activity_info):
         """Test that ActivityCompleted event is sent with input/output."""
         config = GovernanceConfig(send_activity_start_event=False)
         client = make_verdict_client()
@@ -1016,9 +1057,46 @@ class TestActivityInterceptor:
         assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
-    async def test_send_activity_event_correct_payload(
+    async def test_approval_retryable_block_raises_governance_retryable_block(
         self, state, mock_activity_info
     ):
+        """A non-expired exact BLOCK with a valid retry plan on the approval
+        poll requests a workflow restart instead of the plain ApprovalRejected."""
+        state.mark_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
+        )
+
+        config = GovernanceConfig(hitl_enabled=True, send_activity_start_event=False)
+        client = make_verdict_client(
+            approval_response={
+                "verdict": "block",
+                "reason": "admin retry",
+                "id": "evt_a",
+                "retry_plan": {"new_input": {"k": "v"}},
+            }
+        )
+        interceptor = make_interceptor(state, config, client=client)
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.non_retryable is True
+        details = exc_info.value.details[0]
+        assert details["new_input"] == {"k": "v"}
+        assert details["governance_event_id"] == "evt_a"
+        assert details["event_type"] == "ActivityStarted"
+
+    @pytest.mark.asyncio
+    async def test_send_activity_event_correct_payload(self, state, mock_activity_info):
         """_send_activity_event builds the correct payload and posts it via the
         real GovernanceClient (signed transport -> content= bytes)."""
         config = GovernanceConfig()
@@ -1233,9 +1311,7 @@ class TestActivityInterceptor:
         assert "Connection error" in result.reason
 
     @pytest.mark.asyncio
-    async def test_poll_approval_status_returns_status(
-        self, state, governance_config
-    ):
+    async def test_poll_approval_status_returns_status(self, state, governance_config):
         """Test that _client.poll_approval returns approval status dict."""
         interceptor = _ActivityInterceptor(
             next_interceptor=AsyncMock(),
@@ -1422,6 +1498,140 @@ class TestActivityInterceptor:
         assert "expired" not in result or result.get("expired") is not True
 
 
+class TestActivityLifecycleRetryableBlockRestart:
+    """``_enforce_verdict`` checks the retryable-BLOCK normalizer BEFORE the
+    generic BLOCK/HALT/guardrails mapping, for both the ActivityStarted and
+    ActivityCompleted lifecycle verdicts (real activity events — hook_trigger
+    stays False)."""
+
+    @pytest.mark.asyncio
+    async def test_started_block_with_valid_plan_raises_governance_retryable_block(
+        self, state, mock_activity_info
+    ):
+        config = GovernanceConfig(send_activity_start_event=True)
+        verdict = GovernanceVerdictResponse.from_dict(
+            {
+                "verdict": "block",
+                "reason": "retry with corrected input",
+                "governance_event_id": "evt_1",
+                "retry_plan": {"new_input": {"query": "corrected"}},
+            }
+        )
+        client = make_verdict_client(verdict)
+        interceptor = make_interceptor(state, config, client=client)
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.non_retryable is True
+        details = exc_info.value.details[0]
+        assert details["schema_version"] == GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+        assert details["new_input"] == {"query": "corrected"}
+        assert details["governance_event_id"] == "evt_1"
+        assert details["event_type"] == "ActivityStarted"
+        assert details["hook_trigger"] is False
+        # Blocked before running user code.
+        interceptor.next.execute_activity.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_completed_block_with_valid_plan_raises_governance_retryable_block(
+        self, state, mock_activity_info
+    ):
+        """ActivityCompleted verdict with a retry plan raises the retryable
+        error tagged with event_type=ActivityCompleted; new_input=None is the
+        valid 'reuse current input' directive."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        verdict = GovernanceVerdictResponse.from_dict(
+            {"verdict": "block", "retry_plan": {"new_input": None}}
+        )
+        client = make_verdict_client(verdict)
+        interceptor = make_interceptor(state, config, client=client)
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceRetryableBlock"
+        details = exc_info.value.details[0]
+        assert details["new_input"] is None
+        assert details["event_type"] == "ActivityCompleted"
+        assert details["hook_trigger"] is False
+
+    @pytest.mark.asyncio
+    async def test_plain_block_without_plan_still_raises_governance_block(
+        self, state, mock_activity_info
+    ):
+        """No retry_plan -> unchanged plain GovernanceBlock mapping (regression
+        guard for the retryable-first check added in front of enforce_verdict)."""
+        config = GovernanceConfig(send_activity_start_event=True)
+        verdict = GovernanceVerdictResponse.from_dict(
+            {"verdict": "block", "reason": "no plan here"}
+        )
+        client = make_verdict_client(verdict)
+        interceptor = make_interceptor(state, config, client=client)
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceBlock"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_halt_with_synthetic_plan_never_produces_retryable_block(
+        self, state, mock_activity_info
+    ):
+        """Defense-in-depth: a HALT verdict carrying a retry_plan never
+        produces a retryable request — the base normalizer gates strictly on
+        verdict == BLOCK, so HALT always terminates instead."""
+        config = GovernanceConfig(send_activity_start_event=True)
+        verdict = GovernanceVerdictResponse.from_dict(
+            {
+                "verdict": "halt",
+                "reason": "emergency",
+                "retry_plan": {"new_input": "x"},
+            }
+        )
+        client = make_verdict_client(verdict)
+        interceptor = make_interceptor(state, config, client=client)
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceHalt"
+
+
 class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
@@ -1450,9 +1660,7 @@ class TestEdgeCases:
         assert data.count == 42
 
     @pytest.mark.asyncio
-    async def test_execute_activity_with_none_args(
-        self, state, mock_activity_info
-    ):
+    async def test_execute_activity_with_none_args(self, state, mock_activity_info):
         """Test execute_activity with None args."""
         config = GovernanceConfig(send_activity_start_event=False)
         interceptor = make_interceptor(state, config)
@@ -1604,9 +1812,7 @@ class TestEdgeCases:
         )
 
     @pytest.mark.asyncio
-    async def test_output_redaction_applied(
-        self, state, mock_activity_info
-    ):
+    async def test_output_redaction_applied(self, state, mock_activity_info):
         """Test that output redaction is applied from ActivityCompleted verdict."""
         config = GovernanceConfig(send_activity_start_event=False)
         output_data = ActivityInput(prompt="secret data", user_id="user123")
@@ -1677,9 +1883,7 @@ class TestActivityMultiAgentSession:
         return event_payloads
 
     @pytest.mark.asyncio
-    async def test_events_tagged_when_header_present(
-        self, state, mock_activity_info
-    ):
+    async def test_events_tagged_when_header_present(self, state, mock_activity_info):
         """Header present -> ActivityStarted + ActivityCompleted carry the session id."""
         conv = self._converter()
         from openbox.multi_agent import HEADER_KEY
@@ -1866,4 +2070,152 @@ class TestCompletedHaltReachesTerminateOnActivityRaise:
             ctx.stop()
 
         terminate.assert_not_awaited()  # BLOCK never terminates
+        assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
+
+
+class TestCompletedHookRetryablePriority:
+    """Completed-hook priority: HALT > retryable BLOCK > original activity
+    exception > plain completed BLOCK — on both the success path
+    (_handle_completion) and the exception path (_consume_completed_halt)."""
+
+    _WF, _RUN, _ACT = "test-workflow-id", "test-run-id", "test-activity-id"
+
+    # ---- success path (_handle_completion) --------------------------------
+
+    @pytest.mark.asyncio
+    async def test_success_retryable_request_raises_after_user_code_returns(
+        self, state, mock_activity_info
+    ):
+        """A retryable completed-hook stop raises GovernanceRetryableBlock
+        AFTER the activity returned, replacing the skip-completed-event path."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        client = make_verdict_client()
+        interceptor = make_interceptor(state, config, client=client)
+
+        req = make_retry_request()
+        state.record_completed_stop(
+            self._WF, self._RUN, self._ACT, Verdict.BLOCK, "post-hoc retry", req
+        )
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == req.to_dict()
+        # No duplicate ActivityCompleted event sent — the operation already ran.
+        client.evaluate_event.assert_not_called()
+        # Consumed on the success path — nothing stranded.
+        assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
+
+    @pytest.mark.asyncio
+    async def test_success_halt_wins_over_a_synthetic_retryable_request(
+        self, state, mock_activity_info
+    ):
+        """HALT is checked before the retryable request regardless of what else
+        the stop entry carries — the real normalizer never pairs the two (HALT
+        never yields a retry directive), but the interceptor's own priority
+        order must not depend on that."""
+        config = GovernanceConfig(send_activity_start_event=False)
+        client = make_verdict_client()
+        interceptor = make_interceptor(state, config, client=client)
+
+        state.record_completed_stop(
+            self._WF,
+            self._RUN,
+            self._ACT,
+            Verdict.HALT,
+            "kill switch",
+            make_retry_request(),
+        )
+
+        mock_input = make_input([])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceHalt"
+
+    # ---- exception path (_consume_completed_halt) --------------------------
+
+    async def test_exception_path_retryable_request_replaces_original_exception(
+        self, mock_activity_info
+    ):
+        """The activity itself raises, but a retryable completed-hook stop was
+        recorded during user code — the retryable request wins and REPLACES
+        the original exception (governance's remediation route takes over)."""
+        state = TemporalGovernanceState()
+        interceptor = make_interceptor(state)  # ActivityStarted -> ALLOW
+
+        req = make_retry_request()
+
+        async def raising_next(_input):
+            state.record_completed_stop(
+                self._WF, self._RUN, self._ACT, Verdict.BLOCK, "retry me", req
+            )
+            raise RuntimeError("activity boom")
+
+        interceptor.next.execute_activity = raising_next
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            from temporalio.exceptions import ApplicationError
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(make_input())
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == req.to_dict()
+        # Consumed on the exception path — nothing stranded.
+        assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
+
+    async def test_exception_path_halt_wins_over_synthetic_retryable_request(
+        self, mock_activity_info
+    ):
+        """Same defense-in-depth as the success-path equivalent: HALT still
+        terminates (and the original exception still re-raises after) even if
+        the stop entry also carries a request."""
+        state = TemporalGovernanceState()
+        interceptor = make_interceptor(state)
+
+        async def raising_next(_input):
+            state.record_completed_stop(
+                self._WF,
+                self._RUN,
+                self._ACT,
+                Verdict.HALT,
+                "kill switch",
+                make_retry_request(),
+            )
+            raise RuntimeError("activity boom")
+
+        interceptor.next.execute_activity = raising_next
+        terminate = AsyncMock()
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with patch(
+                "openbox.activity_interceptor._terminate_workflow_for_halt", terminate
+            ):
+                with pytest.raises(RuntimeError, match="activity boom"):
+                    await interceptor.execute_activity(make_input())
+        finally:
+            ctx.stop()
+
+        terminate.assert_awaited_once_with(self._WF, "kill switch")
         assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None

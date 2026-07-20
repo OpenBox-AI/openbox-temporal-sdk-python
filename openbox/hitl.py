@@ -65,6 +65,10 @@ def handle_approval_response(
             Response is None (poll failed) or verdict is still pending.
         ApplicationError(type="ApprovalExpired", non_retryable=True):
             Approval window has expired.
+        ApplicationError(type="GovernanceRetryableBlock", non_retryable=True):
+            A non-expired exact BLOCK verdict carries a valid retry plan — the
+            workflow interceptor catches this and restarts with the
+            replacement input instead of rejecting the approval outright.
         ApplicationError(type="ApprovalRejected", non_retryable=True):
             A human explicitly rejected the request (BLOCK/HALT verdict).
     """
@@ -86,6 +90,27 @@ def handle_approval_response(
     from .types import Verdict
 
     approval = ApprovalResult.from_dict(response)
+
+    # A non-expired exact BLOCK with a valid retry plan requests a workflow
+    # restart instead of a plain rejection — checked before the ALLOW/stop
+    # branches below so a retry request is never first turned into
+    # ApprovalRejected. Expiry above still takes precedence. Approvals gate a
+    # specific activity, so ActivityStarted is the origin tag (metadata only).
+    from .retryable_block import retryable_block_request
+
+    retry_request = retryable_block_request(approval, event_type="ActivityStarted")
+    if retry_request is not None:
+        from temporalio.exceptions import ApplicationError
+
+        from .errors import GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
+
+        raise ApplicationError(
+            "Governance requested workflow restart",
+            retry_request.to_dict(),
+            type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+            non_retryable=True,
+        )
+
     verdict = approval.verdict
 
     if verdict is None:

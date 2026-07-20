@@ -11,12 +11,11 @@ IMPORTANT: Activities CAN use datetime/time and make HTTP calls directly.
 This is different from workflow interceptors which must maintain determinism.
 """
 
-from typing import Optional, Any, List
 import dataclasses
-from dataclasses import asdict, is_dataclass, fields
-import time
 import json
-
+import time
+from dataclasses import asdict, fields, is_dataclass
+from typing import Any, List, NoReturn, Optional
 
 from .types import rfc3339_now as _rfc3339_now
 
@@ -63,27 +62,44 @@ def _update_list_items(current_list: list, new_list: list, _logger=None) -> None
             current_list[i] = new_item
 
 
+from opentelemetry import trace
 from temporalio import activity
 from temporalio.worker import (
-    Interceptor,
     ActivityInboundInterceptor,
     ExecuteActivityInput,
+    Interceptor,
 )
-from opentelemetry import trace
 
+from .activities import _terminate_workflow_for_halt
+from .client import GovernanceClient
 from .config import GovernanceConfig
 from .core_adapter import core_activity_scope, get_core_context_store
-from .governance_state import TemporalGovernanceState
-from .types import (
-    WorkflowEventType,
-    GovernanceVerdictResponse,
-    Verdict,
+from .errors import (
+    GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GuardrailsValidationError,
 )
+from .governance_state import TemporalGovernanceState
 from .multi_agent import read_session_from_header
-from .activities import _terminate_workflow_for_halt
+from .retryable_block import RetryableBlockRequest, retryable_block_request
+from .types import GovernanceVerdictResponse, Verdict, WorkflowEventType
 from .verdict_handler import enforce_verdict
-from .errors import GovernanceBlockedError, GovernanceHaltError, GuardrailsValidationError
-from .client import GovernanceClient
+
+
+def _raise_retryable_block(req: RetryableBlockRequest) -> NoReturn:
+    """Raise the stable, versioned ``GovernanceRetryableBlock`` ApplicationError
+    for a valid retryable-BLOCK directive. Non-retryable — the workflow
+    interceptor catches this stable type and Continue-As-News with the
+    replacement input."""
+    from temporalio.exceptions import ApplicationError
+
+    raise ApplicationError(
+        "Governance requested workflow restart",
+        req.to_dict(),
+        type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+        non_retryable=True,
+    )
 
 
 def _serialize_value(value: Any) -> Any:
@@ -94,6 +110,12 @@ def _serialize_value(value: Any) -> Any:
         return value
     if isinstance(value, bytes):
         return _serialize_bytes(value)
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except Exception:
+            pass
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, (list, tuple)):
@@ -111,6 +133,7 @@ def _serialize_bytes(value: bytes) -> str:
         return value.decode("utf-8")
     except Exception:
         import base64
+
         return base64.b64encode(value).decode("ascii")
 
 
@@ -238,35 +261,56 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             )
         except Exception:
             # The activity (or a hook) raised, so _handle_completion is skipped. A
-            # completed-hook HALT recorded during user code is a kill-switch and
-            # must STILL reach the terminate path — failing the activity does not
-            # halt the workflow. Consume the completed-stop here too (also clears
-            # it, so it can never strand/leak on the exception path).
+            # completed-hook stop recorded during user code must still be enforced:
+            # HALT reaches the terminate path and raises GovernanceHalt, and a
+            # retryable request raises GovernanceRetryableBlock — either REPLACES
+            # the original exception (completed-hook priority HALT > retryable >
+            # original exception). A plain completed BLOCK is a no-op, so the
+            # `raise` below re-propagates the original exception unchanged. Consume
+            # the completed-stop either way (also clears it, so it can never
+            # strand/leak on the exception path).
             await self._consume_completed_halt(info)
             raise
 
         result = await self._handle_completion(
-            info, status, error, start_time, end_time,
-            activity_input, activity_output, result,
+            info,
+            status,
+            error,
+            start_time,
+            end_time,
+            activity_input,
+            activity_output,
+            result,
             session_id,
         )
 
         return result
 
     async def _consume_completed_halt(self, info) -> None:
-        """Exception-path safety net: a completed-hook HALT recorded during user
-        code must terminate the workflow even when the activity itself raised.
-        Clears the completed-stop and the base abort flag so nothing strands."""
+        """Exception-path safety net: a completed-hook stop recorded during user
+        code must still be enforced even though the activity itself raised, so
+        _handle_completion (the success path) never runs. Priority: HALT raises
+        GovernanceHalt (terminating the workflow and REPLACING the original
+        exception); a retryable request raises GovernanceRetryableBlock (also
+        replacing the original exception with the restart request); a plain
+        completed BLOCK is a no-op here, so the caller's re-raise propagates the
+        original exception unchanged. Clears the completed-stop and the base abort
+        flag so nothing strands."""
         stop = self._state.take_completed_stop(
             info.workflow_id, info.workflow_run_id, info.activity_id
         )
         get_core_context_store().clear_activity_aborted(
             info.workflow_id, info.activity_id
         )
-        if stop is not None and stop[0] is Verdict.HALT:
+        if stop is None:
+            return
+        if stop.verdict is Verdict.HALT:
             await _terminate_workflow_for_halt(
-                info.workflow_id, stop[1] or "Governance halt"
+                info.workflow_id, stop.reason or "Governance halt"
             )
+            return
+        if stop.request is not None:
+            _raise_retryable_block(stop.request)
 
     async def _check_pending_verdicts(self, info) -> None:
         """Enforce a SignalReceived BLOCK/HALT recorded for this run by the
@@ -292,6 +336,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             await _terminate_workflow_for_halt(workflow_id, reason)
         else:
             from temporalio.exceptions import ApplicationError
+
             raise ApplicationError(
                 f"Governance blocked: {reason}",
                 type="GovernanceBlock",
@@ -329,9 +374,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             info.activity_id,
         )
         if approved:
-            activity.logger.info(
-                f"Approval granted for workflow_id={info.workflow_id}"
-            )
+            activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}")
             self._state.clear_pending_approval(
                 info.workflow_id, info.workflow_run_id, info.activity_id
             )
@@ -362,7 +405,21 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         self, verdict_response: GovernanceVerdictResponse, info, context: str
     ) -> None:
         """Enforce a governance verdict (HITL, BLOCK, HALT, guardrails)."""
-        from .hitl import should_skip_hitl, raise_approval_pending
+        from .hitl import raise_approval_pending, should_skip_hitl
+
+        # An exact BLOCK with a valid retry plan requests a workflow restart and
+        # takes priority over the generic BLOCK/HALT/guardrails mapping below —
+        # checked before enforce_verdict() so it is never first converted to a
+        # plain GovernanceBlockedError. These are REAL activity-lifecycle events
+        # (not hooks), so hook_trigger stays the default False.
+        event_type = (
+            WorkflowEventType.ACTIVITY_STARTED.value
+            if context == "activity_start"
+            else WorkflowEventType.ACTIVITY_COMPLETED.value
+        )
+        req = retryable_block_request(verdict_response, event_type=event_type)
+        if req is not None:
+            _raise_retryable_block(req)
 
         try:
             verdict_result = enforce_verdict(verdict_response, context)
@@ -384,6 +441,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             await _terminate_workflow_for_halt(info.workflow_id, str(e))
         except GovernanceBlockedError as e:
             from temporalio.exceptions import ApplicationError
+
             raise ApplicationError(
                 f"Governance blocked: {e.reason}",
                 type="GovernanceBlock",
@@ -391,6 +449,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             )
         except GuardrailsValidationError as e:
             from temporalio.exceptions import ApplicationError
+
             activity.logger.info(f"Guardrails validation failed: {e}")
             raise ApplicationError(
                 f"Guardrails validation failed: {e}",
@@ -510,8 +569,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         return result, status, error, activity_output, end_time
 
     async def _handle_completion(
-        self, info, status, error, start_time, end_time,
-        activity_input, activity_output, result, multi_agent_session_id=None,
+        self,
+        info,
+        status,
+        error,
+        start_time,
+        end_time,
+        activity_input,
+        activity_output,
+        result,
+        multi_agent_session_id=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
         store = get_core_context_store()
@@ -525,10 +592,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         base_aborted = store.is_activity_aborted(info.workflow_id, info.activity_id)
         store.clear_activity_aborted(info.workflow_id, info.activity_id)
 
-        if completed_stop is not None and completed_stop[0] is Verdict.HALT:
-            await _terminate_workflow_for_halt(
-                info.workflow_id, completed_stop[1] or "Governance halt"
-            )
+        if completed_stop is not None:
+            if completed_stop.verdict is Verdict.HALT:
+                await _terminate_workflow_for_halt(
+                    info.workflow_id, completed_stop.reason or "Governance halt"
+                )
+            elif completed_stop.request is not None:
+                # A retryable request outranks the plain skip-completed-event
+                # behavior below — raise the restart request now that user code
+                # has already returned.
+                _raise_retryable_block(completed_stop.request)
 
         was_aborted = base_aborted or completed_stop is not None
 

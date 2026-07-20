@@ -13,34 +13,48 @@ IMPORTANT: No logging inside workflow code! Python's logging module uses
 linecache -> os.stat which triggers Temporal sandbox restrictions.
 """
 
+import asyncio
 import json
 from dataclasses import asdict, is_dataclass
 from datetime import timedelta
 from typing import Any, Optional, Type
 
+from openbox_core.contracts import events as _events
 from temporalio import workflow
 from temporalio.exceptions import ActivityError, ApplicationError
 from temporalio.worker import (
-    Interceptor,
-    WorkflowInboundInterceptor,
-    WorkflowOutboundInterceptor,
-    WorkflowInterceptorClassInput,
     ExecuteWorkflowInput,
     HandleSignalInput,
+    Interceptor,
     StartActivityInput,
     StartLocalActivityInput,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
 )
 
 from .errors import (
     GOVERNANCE_API_ERROR_TYPE,
     GOVERNANCE_BLOCK_ERROR_TYPE,
     GOVERNANCE_HALT_ERROR_TYPE,
+    GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
 )
-from openbox_core.contracts import events as _events
-
+from .multi_agent import inject_session_header, read_session_from_memo
+from .retry_coordinator import (
+    RetryableBlockControl,
+    RetryableBlockCoordinator,
+    bind_coordinator,
+    next_restart_memo,
+    unbind_coordinator,
+)
+from .retryable_block import RetryableBlockRequest, extract_retryable_block_request
 from .types import Verdict
-from .multi_agent import read_session_from_memo, inject_session_header
+
+# Patch marker gating ALL retryable-BLOCK workflow behavior (coordinator wrap +
+# Continue-As-New). An old history predating this marker replays the exact
+# pre-feature control flow (patched(...) → False), taking no new branch.
+_RETRYABLE_BLOCK_PATCH = "openbox-retryable-block-v1"
 
 
 def _application_error_type(exc: BaseException) -> Optional[str]:
@@ -76,7 +90,11 @@ def _safe_error_type(exc) -> Optional[str]:
 
 def _extract_cause_info(exc) -> Optional[dict]:
     """Extract cause info dict from an exception's cause chain."""
-    cause = getattr(exc, "cause", None) or getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    cause = (
+        getattr(exc, "cause", None)
+        or getattr(exc, "__cause__", None)
+        or getattr(exc, "__context__", None)
+    )
     if not cause:
         return None
 
@@ -91,7 +109,11 @@ def _extract_cause_info(exc) -> Optional[dict]:
 
 def _extract_root_cause_info(exc) -> Optional[dict]:
     """Extract root cause info from an exception's deeper cause chain."""
-    cause = getattr(exc, "cause", None) or getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    cause = (
+        getattr(exc, "cause", None)
+        or getattr(exc, "__cause__", None)
+        or getattr(exc, "__context__", None)
+    )
     if not cause:
         return None
     deeper = getattr(cause, "cause", None) or getattr(cause, "__cause__", None)
@@ -135,6 +157,12 @@ def _serialize_value(value: Any) -> Any:
             import base64
 
             return base64.b64encode(value).decode("ascii")
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except Exception:
+            pass
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
     if isinstance(value, (list, tuple)):
@@ -150,17 +178,44 @@ def _serialize_value(value: Any) -> Any:
 from .errors import GovernanceHaltError  # noqa: F401
 
 
+def _legacy_block_degrade(payload: dict) -> Optional[dict]:
+    """Pre-feature BLOCK result shape, keyed by event origin.
+
+    A retryable BLOCK degrades HERE — when the caller has the feature disabled
+    (an old unpatched history) OR its envelope failed extraction — never to ALLOW.
+    Signals read ``result.get(...)`` so they need a dict that still BLOCKS;
+    lifecycle/handoff legacy mapping is ``None`` (== the pre-feature
+    GovernanceBlock→None conversion).
+    """
+    if payload.get("event_type") == "SignalReceived":
+        return {"success": True, "verdict": "block", "reason": "Governance blocked"}
+    return None
+
+
 async def _send_governance_event(
     payload: dict,
     timeout: float,
     on_api_error: str = "fail_open",
-) -> Optional[dict]:
+    *,
+    retryable_block_enabled: bool = False,
+) -> Any:
     """
     Send governance event via activity.
 
     Args:
         on_api_error: "fail_open" (default) = continue on error
                       "fail_closed" = halt workflow if governance API fails
+        retryable_block_enabled: when True (set by callers running inside the
+            retryable-block-patched path), a raised ``GovernanceRetryableBlock``
+            is converted to a ``RetryableBlockRequest`` return value; when False
+            (legacy/unpatched callers) it degrades to the exact pre-feature result
+            shape by event_type, so an old open history never receives the new
+            type or crashes.
+
+    Returns ``dict | None`` for the existing verdict paths, or a
+    ``RetryableBlockRequest`` when a valid retryable BLOCK is surfaced on an
+    enabled caller. Callers disambiguate with ``isinstance(result,
+    RetryableBlockRequest)``.
 
     Credentials (api_url, api_key) are held by the activity instance itself —
     never passed through activity inputs, so they never land in workflow
@@ -191,6 +246,17 @@ async def _send_governance_event(
         ):
             raise GovernanceHaltError(str(e))
 
+        if app_error_type == GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE:
+            if retryable_block_enabled:
+                req = extract_retryable_block_request(e)
+                if req is not None:
+                    return req
+                # Extraction failed (missing/invalid schema / malformed details).
+                # The verdict was still BLOCK, so fail safe as plain BLOCK via the
+                # same event-specific degrade — NOT None, which a patched signal
+                # would read as ALLOW and run the user handler.
+            return _legacy_block_degrade(payload)
+
         if app_error_type == GOVERNANCE_BLOCK_ERROR_TYPE:
             return None
 
@@ -198,6 +264,69 @@ async def _send_governance_event(
             raise GovernanceHaltError(str(e))
 
         return None
+
+
+def _is_halt(exc: Optional[BaseException]) -> bool:
+    """True when the exception chain carries a governance HALT.
+
+    Walks cause / __cause__ / __context__ (mirrors ``_application_error_type``)
+    and matches a typed ``GovernanceHaltError`` or an ``ApplicationError`` whose
+    ``type`` is HALT/STOP. A ``None`` exception → False. Used for HALT dominance
+    over a concurrent coordinator retry request (priority: HALT > retryable BLOCK).
+    """
+    if exc is None:
+        return False
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, GovernanceHaltError):
+            return True
+        if isinstance(current, ApplicationError) and getattr(current, "type", None) in (
+            GOVERNANCE_HALT_ERROR_TYPE,
+            GOVERNANCE_STOP_ERROR_TYPE,
+        ):
+            return True
+        current = (
+            getattr(current, "cause", None)
+            or getattr(current, "__cause__", None)
+            or getattr(current, "__context__", None)
+        )
+    return False
+
+
+def _dispose_user_task(user_task: "asyncio.Task") -> None:
+    """Retire the user workflow task when the coordinator wins and the run is about
+    to be replaced by Continue-As-New.
+
+    If the task already finished, retrieve its exception so asyncio does not warn
+    about an unretrieved exception we are intentionally superseding; otherwise
+    cancel it (best-effort, deterministic). Continue-As-New ends the run
+    regardless, so this is cleanliness, not correctness.
+    """
+    if user_task.done():
+        if not user_task.cancelled():
+            user_task.exception()  # mark retrieved (returns exception or None)
+    else:
+        user_task.cancel()
+
+
+async def _continue_as_new(
+    req: RetryableBlockRequest, current_args: list, max_restarts: int
+) -> Any:
+    """The ONLY place that calls ``workflow.continue_as_new``.
+
+    Enforces the restart budget first (raises ``GovernanceRetryLimitExceeded`` at
+    the cap), then maps ``new_input``: ``None`` reuses the current run's args
+    exactly; any other value is passed as ONE workflow argument.
+    ``continue_as_new`` raises ``ContinueAsNewError`` (control flow) — never caught
+    or suppressed by the interceptor.
+    """
+    memo = next_restart_memo(max_restarts)
+    if req.new_input is None:
+        workflow.continue_as_new(args=current_args, memo=memo)
+    else:
+        workflow.continue_as_new(req.new_input, memo=memo)
 
 
 class GovernanceInterceptor(Interceptor):
@@ -224,6 +353,9 @@ class GovernanceInterceptor(Interceptor):
             getattr(config, "skip_workflow_types", set()) if config else set()
         )
         self.skip_signals = getattr(config, "skip_signals", set()) if config else set()
+        self.max_retryable_block_restarts = (
+            getattr(config, "max_retryable_block_restarts", 3) if config else 3
+        )
 
     def workflow_interceptor_class(
         self, input: WorkflowInterceptorClassInput
@@ -234,6 +366,7 @@ class GovernanceInterceptor(Interceptor):
         send_start = self.send_start_event
         skip_types = self.skip_workflow_types
         skip_sigs = self.skip_signals
+        max_restarts = self.max_retryable_block_restarts
 
         class _Outbound(WorkflowOutboundInterceptor):
             """Stamps the multi-agent session id onto every scheduled activity."""
@@ -255,6 +388,11 @@ class GovernanceInterceptor(Interceptor):
                 return super().start_local_activity(input)
 
         class _Inbound(WorkflowInboundInterceptor):
+            # Run-local coordinator, set at the top of the retryable execute path
+            # and read by handle_signal (same instance). None until bound / on the
+            # legacy path.
+            _coordinator: Optional[RetryableBlockCoordinator] = None
+
             def init(self, outbound: WorkflowOutboundInterceptor) -> None:
                 super().init(_Outbound(outbound))
 
@@ -264,6 +402,16 @@ class GovernanceInterceptor(Interceptor):
                 if info.workflow_type in skip_types:
                     return await super().execute_workflow(input)
 
+                if workflow.patched(_RETRYABLE_BLOCK_PATCH):
+                    return await self._execute_workflow_retryable(info, input)
+                return await self._execute_workflow_legacy(info, input)
+
+            async def _execute_workflow_legacy(
+                self, info, input: ExecuteWorkflowInput
+            ) -> Any:
+                """Exact pre-feature control flow. Taken when replaying a history
+                that predates the retryable-block patch marker — no coordinator,
+                no Continue-As-New."""
                 sid = read_session_from_memo()
 
                 if send_start and workflow.patched("openbox-v2-start"):
@@ -318,7 +466,10 @@ class GovernanceInterceptor(Interceptor):
                                     workflow_id=info.workflow_id,
                                     run_id=info.run_id,
                                     workflow_type=info.workflow_type,
-                                    error=error,
+                                    # Base event types `error` as str|None; the
+                                    # SDK sends the structured error dict (runtime
+                                    # contract). Pre-existing shape, unchanged.
+                                    error=error,  # type: ignore[arg-type]
                                     multi_agent_session_id=sid,
                                 ).to_payload_dict(),
                                 timeout,
@@ -329,6 +480,155 @@ class GovernanceInterceptor(Interceptor):
 
                     raise
 
+            async def _execute_workflow_retryable(
+                self, info, input: ExecuteWorkflowInput
+            ) -> Any:
+                """Retryable-block control flow: own the run-local coordinator, race
+                the user workflow against the coordinator wake condition, and
+                Continue-As-New on a valid retry request from any origin. This is
+                the ONLY path that calls ``workflow.continue_as_new`` (via
+                ``_continue_as_new``)."""
+                sid = read_session_from_memo()
+                coordinator = RetryableBlockCoordinator()
+                self._coordinator = coordinator  # signals read this instance field
+                token = bind_coordinator(
+                    coordinator
+                )  # emit_handoff reads the ContextVar
+                current_args = list(input.args) if input.args is not None else []
+
+                try:
+                    # WorkflowStarted — a retryable BLOCK restarts before user code.
+                    if send_start:
+                        started = await _send_governance_event(
+                            _events.workflow_started(
+                                workflow_id=info.workflow_id,
+                                run_id=info.run_id,
+                                workflow_type=info.workflow_type,
+                                task_queue=info.task_queue,
+                                multi_agent_session_id=sid,
+                            ).to_payload_dict(),
+                            timeout,
+                            on_error,
+                            retryable_block_enabled=True,
+                        )
+                        if isinstance(started, RetryableBlockRequest):
+                            return await _continue_as_new(
+                                started, current_args, max_restarts
+                            )
+
+                    # Race the user workflow against the coordinator wake condition.
+                    # No workflow.create_task in temporalio; asyncio.create_task runs
+                    # on the sandbox's deterministic loop.
+                    user_task = asyncio.create_task(super().execute_workflow(input))
+                    await workflow.wait_condition(
+                        lambda: coordinator.has_request() or user_task.done()
+                    )
+
+                    coordinator_request = coordinator.get_request()
+                    if coordinator_request is not None:
+                        # A signal / handoff / activity-origin retry arrived mid-run.
+                        await workflow.wait_condition(workflow.all_handlers_finished)
+                        # HALT dominates a concurrent retry (priority: HALT > BLOCK).
+                        if user_task.done() and _is_halt(user_task.exception()):
+                            raise user_task.exception()  # type: ignore[misc]
+                        _dispose_user_task(user_task)
+                        return await _continue_as_new(
+                            coordinator_request, current_args, max_restarts
+                        )
+
+                    # The user task finished first.
+                    try:
+                        result = user_task.result()
+                    except RetryableBlockControl:
+                        # A handoff unwound user code AND submitted to the coordinator.
+                        await workflow.wait_condition(workflow.all_handlers_finished)
+                        control_request = coordinator.get_request()
+                        if control_request is not None:
+                            return await _continue_as_new(
+                                control_request, current_args, max_restarts
+                            )
+                        raise  # unreachable: the control signal always follows a submit
+                    except Exception as e:
+                        # A genuine HALT surfacing through user code (e.g. a signal
+                        # or completed-hook HALT enforced by an activity) dominates:
+                        # never restart it (priority HALT > retryable BLOCK, §3.3;
+                        # acceptance: HALT never restarts). Mirrors the coordinator-
+                        # win path's HALT-dominance guard above.
+                        if _is_halt(e):
+                            raise
+                        # Activity / hook origin surfaced as an ActivityError chain.
+                        req = extract_retryable_block_request(e)
+                        if req is not None:
+                            return await _continue_as_new(
+                                req, current_args, max_restarts
+                            )
+                        # Genuine failure: evaluate WorkflowFailed. A valid retry
+                        # plan there overrides the original failure with a restart;
+                        # otherwise the original exception is rethrown unchanged.
+                        error = _build_error_dict(e)
+                        failed_outcome = None
+                        try:
+                            failed_outcome = await _send_governance_event(
+                                _events.workflow_failed(
+                                    workflow_id=info.workflow_id,
+                                    run_id=info.run_id,
+                                    workflow_type=info.workflow_type,
+                                    # Base event types `error` as str|None; the
+                                    # SDK sends the structured error dict (runtime
+                                    # contract). Pre-existing shape, unchanged.
+                                    error=error,  # type: ignore[arg-type]
+                                    multi_agent_session_id=sid,
+                                ).to_payload_dict(),
+                                timeout,
+                                on_error,
+                                retryable_block_enabled=True,
+                            )
+                        except Exception:
+                            # Swallow ALL failed-reporting errors (including a
+                            # fail_closed governance outage mapped to
+                            # GovernanceHaltError) so they never shadow the original
+                            # workflow exception. A genuine policy HALT still
+                            # terminates the workflow via the reporting activity's
+                            # client.terminate() before this point, so HALT remains
+                            # honored; a retryable BLOCK is returned (not raised) by
+                            # the dispatcher, so it is unaffected by this swallow.
+                            pass
+                        if isinstance(failed_outcome, RetryableBlockRequest):
+                            return await _continue_as_new(
+                                failed_outcome, current_args, max_restarts
+                            )
+                        raise
+
+                    # WorkflowCompleted — a retryable BLOCK restarts instead of
+                    # returning the user result.
+                    workflow_output = None
+                    try:
+                        workflow_output = _serialize_value(result)
+                    except Exception:
+                        workflow_output = str(result) if result is not None else None
+
+                    completed = await _send_governance_event(
+                        _events.workflow_completed(
+                            workflow_id=info.workflow_id,
+                            run_id=info.run_id,
+                            workflow_type=info.workflow_type,
+                            multi_agent_session_id=sid,
+                            extra={"workflow_output": workflow_output},
+                        ).to_payload_dict(),
+                        timeout,
+                        on_error,
+                        retryable_block_enabled=True,
+                    )
+                    if isinstance(completed, RetryableBlockRequest):
+                        return await _continue_as_new(
+                            completed, current_args, max_restarts
+                        )
+                    return result
+                finally:
+                    # Always reset the ContextVar so no coordinator leaks into a
+                    # sequential run on the same worker event loop.
+                    unbind_coordinator(token)
+
             async def handle_signal(self, input: HandleSignalInput) -> None:
                 info = workflow.info()
 
@@ -337,6 +637,7 @@ class GovernanceInterceptor(Interceptor):
 
                 if workflow.patched("openbox-v2-signal"):
                     sid = read_session_from_memo()
+                    rb_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
                     result = await _send_governance_event(
                         _events.signal_received(
                             workflow_id=info.workflow_id,
@@ -349,8 +650,30 @@ class GovernanceInterceptor(Interceptor):
                         ).to_payload_dict(),
                         timeout,
                         on_error,
+                        retryable_block_enabled=rb_enabled,
                     )
 
+                    if rb_enabled and isinstance(result, RetryableBlockRequest):
+                        # Never Continue-As-New inside the handler. Submit to the
+                        # run-local coordinator; the main execute path drains
+                        # handlers then Continue-As-News. Skip the user handler.
+                        if self._coordinator is not None:
+                            self._coordinator.submit(result)  # first-wins
+                        elif state:
+                            # Coordinator unbound (should not happen in a patched
+                            # run): never silently drop the retry — enforce it as a
+                            # plain block via the activity bridge (fail safe).
+                            state.set_signal_verdict(
+                                info.workflow_id,
+                                info.run_id,
+                                Verdict.BLOCK,
+                                result.reason,
+                            )
+                        return
+
+                    # Legacy/plain path: result is a dict (or None). Unpatched runs
+                    # reach here too (rb_enabled=False → dispatcher returns the
+                    # legacy dict shape), so a retryable signal still BLOCKS.
                     verdict = (
                         Verdict.from_string(
                             result.get("verdict") or result.get("action")
