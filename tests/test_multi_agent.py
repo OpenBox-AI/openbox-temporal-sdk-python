@@ -7,27 +7,23 @@ import pytest
 from temporalio.converter import default as _default_converter
 
 from openbox import emit_handoff
-from openbox.types import WorkflowEventType
 from openbox.multi_agent import (
-    MEMO_KEY,
     HEADER_KEY,
+    MEMO_KEY,
     build_handoff_payload,
     inject_session_header,
     read_session_from_header,
 )
+from openbox.types import WorkflowEventType
 
 
 def _converter():
     return _default_converter().payload_converter
 
 
-
-
 def test_handoff_event_type_value():
     assert WorkflowEventType.HANDOFF == "Handoff"
     assert WorkflowEventType.HANDOFF.value == "Handoff"
-
-
 
 
 def test_build_handoff_payload_minimal():
@@ -64,13 +60,12 @@ def test_build_handoff_payload_rejects_empty(from_did, session_id):
         build_handoff_payload(from_did, session_id)
 
 
-
-
 @pytest.mark.asyncio
 async def test_emit_handoff_routes_through_activity_dispatcher():
     sender = AsyncMock(return_value={"verdict": "allow"})
-    with patch(
-        "openbox.workflow_interceptor._send_governance_event", sender
+    with (
+        patch("openbox.workflow_interceptor._send_governance_event", sender),
+        patch("temporalio.workflow.patched", return_value=False),
     ):
         result = await emit_handoff(
             multi_agent_session_id="sess-123",
@@ -89,6 +84,84 @@ async def test_emit_handoff_routes_through_activity_dispatcher():
     assert on_api_error == "fail_closed"
 
 
+def _handoff_request(new_input="fixed"):
+    from openbox.retryable_block import RetryableBlockRequest
+
+    return RetryableBlockRequest(
+        schema_version=1,
+        new_input=new_input,
+        governance_event_id="evt",
+        reason="retry",
+        event_type="Handoff",
+        hook_trigger=False,
+        hook_stage=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_emit_handoff_retryable_submits_to_coordinator_and_raises_control():
+    """A retryable-BLOCK handoff submits to the run-local coordinator and unwinds
+    user code via RetryableBlockControl (CAN stays owned by the interceptor)."""
+    from openbox.retry_coordinator import (
+        RetryableBlockControl,
+        RetryableBlockCoordinator,
+        bind_coordinator,
+        unbind_coordinator,
+    )
+
+    req = _handoff_request("via-handoff")
+    sender = AsyncMock(return_value=req)
+    coord = RetryableBlockCoordinator()
+    token = bind_coordinator(coord)
+    try:
+        with (
+            patch("openbox.workflow_interceptor._send_governance_event", sender),
+            patch("temporalio.workflow.patched", return_value=True),
+        ):
+            with pytest.raises(RetryableBlockControl):
+                await emit_handoff(
+                    multi_agent_session_id="s", from_agent_did="did:aip:x"
+                )
+    finally:
+        unbind_coordinator(token)
+
+    assert coord.get_request() == req
+
+
+@pytest.mark.asyncio
+async def test_emit_handoff_retryable_without_coordinator_fails_safe_as_block():
+    """No coordinator bound (should not happen in a patched run) → fail safe as a
+    plain governance block, never a silent continuation."""
+    from temporalio.exceptions import ApplicationError
+
+    from openbox.errors import GOVERNANCE_BLOCK_ERROR_TYPE
+    from openbox.retry_coordinator import get_coordinator
+
+    assert get_coordinator() is None  # no active binding
+    sender = AsyncMock(return_value=_handoff_request())
+    with (
+        patch("openbox.workflow_interceptor._send_governance_event", sender),
+        patch("temporalio.workflow.patched", return_value=True),
+    ):
+        with pytest.raises(ApplicationError) as exc:
+            await emit_handoff(multi_agent_session_id="s", from_agent_did="did:aip:x")
+    assert exc.value.type == GOVERNANCE_BLOCK_ERROR_TYPE
+
+
+@pytest.mark.asyncio
+async def test_emit_handoff_allow_unchanged_on_patched_path():
+    """ALLOW returns the dict unchanged even when the retryable path is enabled."""
+    sender = AsyncMock(return_value={"verdict": "allow"})
+    with (
+        patch("openbox.workflow_interceptor._send_governance_event", sender),
+        patch("temporalio.workflow.patched", return_value=True),
+    ):
+        result = await emit_handoff(
+            multi_agent_session_id="s", from_agent_did="did:aip:x"
+        )
+    assert result == {"verdict": "allow"}
+
+
 @pytest.mark.asyncio
 async def test_emit_handoff_validates_before_network():
     sender = AsyncMock()
@@ -96,8 +169,6 @@ async def test_emit_handoff_validates_before_network():
         with pytest.raises(ValueError):
             await emit_handoff(multi_agent_session_id="", from_agent_did="did:aip:x")
     sender.assert_not_awaited()
-
-
 
 
 def test_inject_and_read_session_header_round_trip():

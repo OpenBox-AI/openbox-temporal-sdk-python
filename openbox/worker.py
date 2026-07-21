@@ -18,22 +18,15 @@ Usage:
 """
 
 import logging
-from datetime import timedelta
-from typing import (
-    Any,
-    Awaitable,
-    Callable,
-    Dict,
-    Optional,
-    Sequence,
-    Type,
-)
 from concurrent.futures import Executor, ThreadPoolExecutor
+from datetime import timedelta
+from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Type
 
 from temporalio.client import Client
-from temporalio.worker import Worker, Interceptor
+from temporalio.worker import Interceptor, Worker
 
-from .config import initialize as validate_api_key, GovernanceConfig
+from .config import GovernanceConfig
+from .config import initialize as validate_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +49,7 @@ def create_openbox_worker(
     skip_activity_types: Optional[set] = None,
     skip_signals: Optional[set] = None,
     hitl_enabled: bool = True,
+    max_retryable_block_restarts: int = 3,
     instrument_databases: bool = True,
     db_libraries: Optional[set] = None,
     sqlalchemy_engine: Optional[Any] = None,
@@ -207,11 +201,12 @@ def create_openbox_worker(
         skip_activity_types=skip_activity_types or {"send_governance_event"},
         skip_signals=skip_signals or set(),
         hitl_enabled=hitl_enabled,
+        max_retryable_block_restarts=max_retryable_block_restarts,
     )
 
-    from .workflow_interceptor import GovernanceInterceptor
     from .activity_interceptor import ActivityGovernanceInterceptor
     from .client import GovernanceClient
+    from .workflow_interceptor import GovernanceInterceptor
 
     workflow_interceptor = GovernanceInterceptor(
         api_url=openbox_url,

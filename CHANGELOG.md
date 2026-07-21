@@ -4,6 +4,18 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-21
+
+### Added
+
+- **Retryable BLOCK workflow restart:** A governance response carrying `BLOCK` with a valid `retry_plan` (containing `new_input`) now triggers a Continue-As-New restart of the workflow using the replacement input. The restart is event-agnostic (supports WorkflowStarted, WorkflowCompleted, WorkflowFailed, SignalReceived, ActivityStarted, ActivityCompleted, Handoff, hook evaluations, and approval polling) and is bounded by the `max_retryable_block_restarts` configuration (default: 3, minimum: 1). When the bound is exceeded, the workflow fails with a non-retryable `GovernanceRetryLimitExceeded` error. The restart count is tracked across the entire workflow chain via a durable memo counter. Plain BLOCK (without a retry plan), HALT, expired approvals, and malformed plans preserve existing behavior and do not restart.
+
+- **Workflow input capture in `WorkflowStarted`:** The `WorkflowStarted` governance event now carries the Temporal workflow arguments in the `activity_input` field, so OpenBox stores and displays workflow input the same way as activity input. The outer argument list is preserved verbatim (`workflow(a, b)` → `[a, b]`; a single list argument stays nested as `[[...]]`; no arguments → `[]`). Because this changes the `send_governance_event` activity input, it is version-gated by a dedicated patch marker (`openbox-workflow-start-input-v1`): new workflow histories include `activity_input`, while histories created before this change replay their original payload unchanged.
+
+### Changed
+
+- **`openbox-sdk-python` dependency raised to `>=1.1.0`, installed from PyPI.** The retryable-BLOCK restart requires `handle_retryable_block` from base SDK 1.1.0; now that 1.1.0 is published, the dependency resolves from PyPI and the temporary local editable source is removed.
+
 ## [1.2.1] - 2026-07-21
 
 ### Changed

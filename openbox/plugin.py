@@ -23,8 +23,9 @@ from temporalio.plugin import SimplePlugin
 from temporalio.worker import WorkerConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
-from .config import initialize as validate_api_key, GovernanceConfig
 from .client import GovernanceClient
+from .config import GovernanceConfig
+from .config import initialize as validate_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class OpenBoxPlugin(SimplePlugin):
         skip_activity_types: Optional[Set[str]] = None,
         skip_signals: Optional[Set[str]] = None,
         hitl_enabled: bool = True,
+        max_retryable_block_restarts: int = 3,
         instrument_databases: bool = True,
         db_libraries: Optional[Set[str]] = None,
         sqlalchemy_engine: Optional[Any] = None,
@@ -113,10 +115,11 @@ class OpenBoxPlugin(SimplePlugin):
             skip_activity_types=skip_activity_types or {"send_governance_event"},
             skip_signals=skip_signals or set(),
             hitl_enabled=hitl_enabled,
+            max_retryable_block_restarts=max_retryable_block_restarts,
         )
 
-        from .workflow_interceptor import GovernanceInterceptor
         from .activity_interceptor import ActivityGovernanceInterceptor
+        from .workflow_interceptor import GovernanceInterceptor
 
         governance_client = GovernanceClient(
             api_url=openbox_url,

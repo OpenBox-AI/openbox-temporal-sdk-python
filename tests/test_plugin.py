@@ -5,12 +5,11 @@ Tests the plugin class in isolation with mocked dependencies.
 Mirrors test patterns from test_worker.py.
 """
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
+import pytest
 from temporalio.plugin import SimplePlugin
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
-
 
 # All tests mock external calls — no real API or instrumentation install needed.
 PATCH_BASE = "openbox.plugin"
@@ -40,9 +39,7 @@ def _make_plugin(**overrides):
             "openbox.core_adapter.create_core_runtime", return_value=mock_runtime
         ) as mock_create_runtime,
         patch("openbox.workflow_interceptor.GovernanceInterceptor") as mock_wi,
-        patch(
-            "openbox.activity_interceptor.ActivityGovernanceInterceptor"
-        ) as mock_ai,
+        patch("openbox.activity_interceptor.ActivityGovernanceInterceptor") as mock_ai,
         patch(f"{PATCH_BASE}.GovernanceClient") as mock_gc,
     ):
         from openbox.plugin import OpenBoxPlugin
@@ -192,6 +189,29 @@ class TestPluginInit:
             )
             config_arg = mock_wi.call_args.kwargs["config"]
             assert "InternalWorkflow" in config_arg.skip_workflow_types
+
+    def test_max_retryable_block_restarts_passed_to_config(self):
+        """Verify max_retryable_block_restarts reaches GovernanceConfig."""
+        with (
+            patch(f"{PATCH_BASE}.validate_api_key"),
+            patch(
+                "openbox.core_adapter.create_core_runtime",
+                return_value=MagicMock(),
+            ),
+            patch("openbox.workflow_interceptor.GovernanceInterceptor") as mock_wi,
+            patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
+            patch(f"{PATCH_BASE}.GovernanceClient"),
+        ):
+            from openbox.plugin import OpenBoxPlugin
+
+            OpenBoxPlugin(
+                openbox_url="http://localhost:8086",
+                openbox_api_key="obx_test_key_123",
+                max_retryable_block_restarts=7,
+                enable_trace_propagation=False,
+            )
+            config_arg = mock_wi.call_args.kwargs["config"]
+            assert config_arg.max_retryable_block_restarts == 7
 
     def test_invalid_api_key_raises(self):
         """Validate that bad key format raises OpenBoxAuthError."""

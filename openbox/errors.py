@@ -36,6 +36,15 @@ GOVERNANCE_API_ERROR_TYPE: Final[str] = "GovernanceAPIError"
 # Legacy alias; kept for histories predating the rename.
 GOVERNANCE_STOP_ERROR_TYPE: Final[str] = "GovernanceStop"
 
+# Retryable-BLOCK restart transport. A governance BLOCK carrying a valid retry
+# plan crosses the activity/workflow boundary as a non-retryable ApplicationError
+# of this stable type; the workflow interceptor catches it and Continue-As-News.
+GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE: Final[str] = "GovernanceRetryableBlock"
+# Raised when the bounded restart chain would exceed max_retryable_block_restarts.
+GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE: Final[str] = "GovernanceRetryLimitExceeded"
+# Raised when replacement input cannot be converted for Continue-As-New.
+GOVERNANCE_RETRY_INPUT_INVALID_ERROR_TYPE: Final[str] = "GovernanceRetryInputInvalid"
+
 
 class OpenBoxError(Exception):
     """Base class for all OpenBox SDK errors."""
@@ -105,7 +114,9 @@ _SIGNING_REASON_MESSAGES: dict[str, str] = {
 }
 
 
-def map_signing_error(reason_code: str | None, fallback: str = "") -> OpenBoxSigningError:
+def map_signing_error(
+    reason_code: str | None, fallback: str = ""
+) -> OpenBoxSigningError:
     """Map a Core signing reason code to an actionable OpenBoxSigningError.
 
     Unknown/empty codes fall back to a generic message (optionally augmented with
