@@ -21,11 +21,13 @@ from openbox.governance_state import TemporalGovernanceState
 from openbox.types import Verdict
 from openbox.workflow_interceptor import (
     _RETRYABLE_BLOCK_PATCH,
+    _WORKFLOW_START_INPUT_PATCH,
     GovernanceHaltError,
     GovernanceInterceptor,
     _is_halt,
     _send_governance_event,
     _serialize_value,
+    _workflow_started_payload,
 )
 
 
@@ -2082,3 +2084,145 @@ class TestRetryableBlockWorkflowFailedAndCoordinator:
             for c in mock.execute_activity.call_args_list
         ]
         assert "WorkflowFailed" not in event_types
+
+
+# --------------------------------------------------------------------------- #
+# WorkflowStarted input capture — activity_input in the WorkflowStarted payload
+# --------------------------------------------------------------------------- #
+
+
+def _pre_input_patched(marker, *args, **kwargs):
+    """Simulate a history predating the workflow-start-input marker: the legacy
+    execute path (retryable-block marker absent) with the input marker also
+    absent, so WorkflowStarted reproduces the exact pre-feature payload."""
+    return marker not in (_RETRYABLE_BLOCK_PATCH, _WORKFLOW_START_INPUT_PATCH)
+
+
+def _built_started_payload(args, *, marker=True):
+    """Call _workflow_started_payload directly with the workflow-start-input patch
+    set to ``marker`` and the given workflow args; return the payload dict. Only
+    ``workflow`` is patched, so the real event factory + real _serialize_value run.
+    """
+    info = MagicMock(
+        workflow_id="wf-1",
+        run_id="run-1",
+        workflow_type="TestWorkflow",
+        task_queue="q",
+    )
+    with patch("openbox.workflow_interceptor.workflow") as mock_wf:
+        mock_wf.patched.return_value = marker
+        return _workflow_started_payload(info, None, MagicMock(args=args))
+
+
+async def _legacy_workflow_started_payloads(
+    args, *, patched_side_effect=_legacy_patched, send_start=True
+):
+    """Drive the legacy execute path with the given workflow args; return the list
+    of WorkflowStarted payloads sent to the send_governance_event activity."""
+    with (
+        patch("openbox.workflow_interceptor.workflow") as mock_wf,
+        patch("openbox.workflow_interceptor.read_session_from_memo", return_value=None),
+    ):
+        mock_wf.info.return_value = MagicMock(
+            workflow_id="wf-1",
+            run_id="run-1",
+            workflow_type="TestWorkflow",
+            task_queue="q",
+        )
+        mock_wf.patched.side_effect = patched_side_effect
+        mock_wf.execute_activity = AsyncMock(return_value={"verdict": "allow"})
+        inbound = _make_inbound(
+            AsyncMock(return_value="ok"),
+            config=GovernanceConfig(send_start_event=send_start),
+        )
+        await inbound.execute_workflow(MagicMock(args=args))
+        return [
+            c.kwargs["args"][0]["payload"]
+            for c in mock_wf.execute_activity.call_args_list
+            if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowStarted"
+        ]
+
+
+class TestWorkflowStartedInput:
+    """WorkflowStarted carries the Temporal workflow arguments in the generic
+    ``activity_input`` wire field, version-gated by the workflow-start-input patch
+    so histories predating the change replay their original payload."""
+
+    # --- payload builder: argument-shape preservation + serialization --------- #
+
+    def test_multiple_args_preserve_order_and_outer_list(self):
+        payload = _built_started_payload([{"query": "hello"}, 3])
+        assert payload["event_type"] == "WorkflowStarted"
+        assert payload["workflow_id"] == "wf-1"
+        assert payload["activity_input"] == [{"query": "hello"}, 3]
+
+    def test_single_list_arg_stays_nested(self):
+        """workflow([1, 2]) is ONE list argument → the outer list must not flatten."""
+        payload = _built_started_payload([[1, 2]])
+        assert payload["activity_input"] == [[1, 2]]
+
+    def test_no_args_produce_empty_list(self):
+        payload = _built_started_payload([])
+        assert payload["activity_input"] == []
+
+    def test_args_are_serialized_and_input_not_mutated(self):
+        original = [b"raw", {"k": 1}]
+        payload = _built_started_payload(original)
+        # bytes decoded, dict preserved → proves _serialize_value was applied.
+        assert payload["activity_input"] == ["raw", {"k": 1}]
+        # input.args is copied, never mutated.
+        assert original == [b"raw", {"k": 1}]
+
+    def test_marker_absent_omits_activity_input(self):
+        payload = _built_started_payload([1, 2], marker=False)
+        assert payload["event_type"] == "WorkflowStarted"
+        assert "activity_input" not in payload
+
+    # --- wiring: legacy execute path ------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_legacy_started_event_includes_serialized_activity_input(self):
+        payloads = await _legacy_workflow_started_payloads([b"raw", {"k": 1}])
+        assert len(payloads) == 1  # emitted exactly once
+        assert payloads[0]["activity_input"] == ["raw", {"k": 1}]
+
+    @pytest.mark.asyncio
+    async def test_legacy_replay_without_marker_reproduces_old_payload(self):
+        payloads = await _legacy_workflow_started_payloads(
+            [{"query": "hello"}, 3], patched_side_effect=_pre_input_patched
+        )
+        assert len(payloads) == 1
+        assert "activity_input" not in payloads[0]
+
+    @pytest.mark.asyncio
+    async def test_no_started_event_when_send_start_disabled(self):
+        payloads = await _legacy_workflow_started_payloads([1, 2], send_start=False)
+        assert payloads == []
+
+    # --- wiring: retryable execute path --------------------------------------- #
+
+    @pytest.mark.asyncio
+    async def test_retryable_started_event_includes_same_input_shape(self):
+        with _patched_retryable_workflow({}) as mock:
+            inbound = _make_inbound(AsyncMock(return_value="ok"))
+            await inbound.execute_workflow(MagicMock(args=[{"query": "hello"}, 3]))
+        started = [
+            c.kwargs["args"][0]["payload"]
+            for c in mock.execute_activity.call_args_list
+            if c.kwargs["args"][0]["payload"]["event_type"] == "WorkflowStarted"
+        ]
+        assert len(started) == 1
+        assert started[0]["activity_input"] == [{"query": "hello"}, 3]
+
+    # --- SignalReceived is untouched ------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_signal_received_unchanged_and_carries_no_activity_input(self):
+        script = {"SignalReceived": ("return", {"verdict": "allow"})}
+        with _patched_retryable_workflow(script) as mock:
+            inbound = _make_inbound(AsyncMock(return_value="ok"))
+            await inbound.handle_signal(MagicMock(signal="s", args=["a", {"k": 1}]))
+        payload = mock.execute_activity.call_args_list[0].kwargs["args"][0]["payload"]
+        assert payload["event_type"] == "SignalReceived"
+        assert payload["signal_args"] == ["a", {"k": 1}]
+        assert "activity_input" not in payload

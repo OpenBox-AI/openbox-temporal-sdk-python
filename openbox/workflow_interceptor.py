@@ -56,6 +56,12 @@ from .types import Verdict
 # pre-feature control flow (patched(...) → False), taking no new branch.
 _RETRYABLE_BLOCK_PATCH = "openbox-retryable-block-v1"
 
+# Patch marker gating inclusion of the workflow arguments in the WorkflowStarted
+# payload (as ``activity_input``). This changes the send_governance_event activity
+# input, so a history predating this marker replays the exact pre-feature payload
+# (patched(...) → False) and never attaches the field — replay stays deterministic.
+_WORKFLOW_START_INPUT_PATCH = "openbox-workflow-start-input-v1"
+
 
 def _application_error_type(exc: BaseException) -> Optional[str]:
     """Walk exception chain and return the ApplicationError.type if present.
@@ -329,6 +335,36 @@ async def _continue_as_new(
         workflow.continue_as_new(req.new_input, memo=memo)
 
 
+def _workflow_started_payload(
+    info, sid: Optional[str], input: ExecuteWorkflowInput
+) -> dict:
+    """Build the WorkflowStarted governance payload, shared by both execute paths.
+
+    Under the workflow-start-input patch (new histories), the Temporal workflow
+    arguments are serialized with the sandbox-safe ``_serialize_value`` and
+    attached as ``activity_input`` so OpenBox stores/displays them through the
+    generic input column. The outer argument list is preserved verbatim:
+    ``workflow(a, b)`` → ``[a, b]`` and ``workflow([1, 2])`` → ``[[1, 2]]``; no
+    arguments → ``[]``. ``input.args`` is copied, never mutated.
+
+    Histories predating the patch reproduce the exact pre-feature payload with no
+    ``activity_input`` key, keeping the send_governance_event activity input
+    replay-deterministic.
+    """
+    extra = None
+    if workflow.patched(_WORKFLOW_START_INPUT_PATCH):
+        args = list(input.args) if input.args is not None else []
+        extra = {"activity_input": _serialize_value(args)}
+    return _events.workflow_started(
+        workflow_id=info.workflow_id,
+        run_id=info.run_id,
+        workflow_type=info.workflow_type,
+        task_queue=info.task_queue,
+        multi_agent_session_id=sid,
+        extra=extra,
+    ).to_payload_dict()
+
+
 class GovernanceInterceptor(Interceptor):
     """Factory for workflow interceptor. Events sent via activity for determinism."""
 
@@ -416,13 +452,7 @@ class GovernanceInterceptor(Interceptor):
 
                 if send_start and workflow.patched("openbox-v2-start"):
                     await _send_governance_event(
-                        _events.workflow_started(
-                            workflow_id=info.workflow_id,
-                            run_id=info.run_id,
-                            workflow_type=info.workflow_type,
-                            task_queue=info.task_queue,
-                            multi_agent_session_id=sid,
-                        ).to_payload_dict(),
+                        _workflow_started_payload(info, sid, input),
                         timeout,
                         on_error,
                     )
@@ -500,13 +530,7 @@ class GovernanceInterceptor(Interceptor):
                     # WorkflowStarted — a retryable BLOCK restarts before user code.
                     if send_start:
                         started = await _send_governance_event(
-                            _events.workflow_started(
-                                workflow_id=info.workflow_id,
-                                run_id=info.run_id,
-                                workflow_type=info.workflow_type,
-                                task_queue=info.task_queue,
-                                multi_agent_session_id=sid,
-                            ).to_payload_dict(),
+                            _workflow_started_payload(info, sid, input),
                             timeout,
                             on_error,
                             retryable_block_enabled=True,
