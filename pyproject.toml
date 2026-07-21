@@ -1,6 +1,6 @@
 [project]
 name = "openbox-temporal-sdk-python"
-version = "1.2.0"
+version = "1.2.1"
 description = "OpenBox SDK - Governance and observability for Temporal workflows"
 authors = [
     { name = "OpenBox Team", email = "tino@openbox.ai" },
@@ -50,7 +50,10 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
     # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
     # client, context runtime, generic instrumentation, conformance kit.
-    "openbox-sdk-python>=0.2.0",
+    # Retryable-BLOCK restart needs handle_retryable_block (base SDK 1.1.0);
+    # 1.1.0 is not yet on PyPI, so resolve from the local editable checkout
+    # until it is published, then drop [tool.uv.sources] to install from PyPI.
+    "openbox-sdk-python>=1.1.0",
 ]
 
 [tool.uv.sources]
