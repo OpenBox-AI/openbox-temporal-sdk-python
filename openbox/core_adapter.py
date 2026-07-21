@@ -9,7 +9,10 @@ effects and never builds hook payloads or evaluates hook events itself:
   ``ApprovalPending`` (Temporal's native HITL retry loop) + a pending marker in
   ``TemporalGovernanceState``; completed-hook BLOCK/HALT -> recorded in
   ``TemporalGovernanceState`` (run-scoped) for the activity interceptor to
-  surface after user code returns.
+  surface after user code returns. An exact BLOCK carrying a valid retry plan
+  is checked FIRST at every one of these seams and raises the stable, versioned
+  ``GovernanceRetryableBlock`` instead — HALT still wins because the base
+  normalizer never surfaces a directive for it.
 - ``core_activity_scope`` binds the shared ``ActivityContext`` around activity
   execution with a GUARANTEED try/finally reset.
 
@@ -31,8 +34,10 @@ from openbox_core.contracts.results import EvaluationResult, Verdict
 from .errors import (
     GOVERNANCE_BLOCK_ERROR_TYPE,
     GOVERNANCE_HALT_ERROR_TYPE,
+    GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
 )
 from .governance_state import TemporalGovernanceState
+from .retryable_block import RetryableBlockRequest, retryable_block_request
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +83,9 @@ class TemporalFrameworkAdapter:
         self._state = state
         self._hitl_enabled = hitl_enabled
         self._skip_hitl_activity_types = skip_hitl_activity_types or set()
-        self._store = context_store if context_store is not None else _core_context_store
+        self._store = (
+            context_store if context_store is not None else _core_context_store
+        )
 
     async def handle_approval(self, result: EvaluationResult) -> None:
         """Async hook REQUIRE_APPROVAL -> Temporal's retry-based HITL loop.
@@ -125,9 +132,25 @@ class TemporalFrameworkAdapter:
         raise_approval_pending(result.reason or "Approval required")
 
     def raise_lifecycle_blocked(self, result: EvaluationResult) -> NoReturn:
+        # An exact BLOCK with a valid retry plan requests a workflow restart and
+        # is checked before the generic BLOCK/HALT mapping; HALT still wins
+        # because retryable_block_request never surfaces a directive for it.
+        req = retryable_block_request(result, event_type="ActivityStarted")
+        if req is not None:
+            self._raise_retryable_block(req)
         self._raise_application_error(result)
 
     def raise_hook_blocked(self, result: EvaluationResult) -> NoReturn:
+        # Started hooks are wire-represented as ActivityStarted + hook_trigger=
+        # True (the stage rides in hook_stage) — same retryable-first ordering.
+        req = retryable_block_request(
+            result,
+            event_type="ActivityStarted",
+            hook_trigger=True,
+            hook_stage="started",
+        )
+        if req is not None:
+            self._raise_retryable_block(req)
         self._raise_application_error(result)
 
     def on_completed_hook_result(
@@ -135,17 +158,31 @@ class TemporalFrameworkAdapter:
     ) -> None:
         """Completed verdicts affect FUTURE execution only (the operation already
         ran). Record a BLOCK/HALT run-scoped so the activity interceptor can skip
-        a duplicate completed event (BLOCK) or reach the terminate path (HALT)
-        after user code returns. Without a resolved context there is no run to key
-        on — the base ContextStore still carries the within-activity abort flag."""
+        a duplicate completed event (plain BLOCK), reach the terminate path
+        (HALT), or raise a retryable-BLOCK restart request (BLOCK with a valid
+        retry plan) after user code returns. Without a resolved context there is
+        no run to key on — the base ContextStore still carries the
+        within-activity abort flag.
+
+        Every hook is wire-represented as ``event_type="ActivityStarted"`` with
+        ``hook_trigger=True`` — the completed stage rides ONLY in ``hook_stage``,
+        never by flipping ``event_type`` to ``ActivityCompleted``.
+        """
         if not result.verdict.should_stop() or context is None:
             return
+        request = retryable_block_request(
+            result,
+            event_type="ActivityStarted",
+            hook_trigger=True,
+            hook_stage="completed",
+        )
         self._state.record_completed_stop(
             context.workflow_id or "",
             context.run_id or "",
             context.activity_id or "",
             result.verdict,
             result.reason,
+            request,
         )
 
     @staticmethod
@@ -162,6 +199,19 @@ class TemporalFrameworkAdapter:
         raise ApplicationError(
             f"Governance block: {reason}",
             type=GOVERNANCE_BLOCK_ERROR_TYPE,
+            non_retryable=True,
+        )
+
+    @staticmethod
+    def _raise_retryable_block(req: RetryableBlockRequest) -> NoReturn:
+        """Raise the stable, versioned ``GovernanceRetryableBlock`` the workflow
+        interceptor catches to Continue-As-New with the replacement input."""
+        from temporalio.exceptions import ApplicationError
+
+        raise ApplicationError(
+            "Governance requested workflow restart",
+            req.to_dict(),
+            type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
             non_retryable=True,
         )
 

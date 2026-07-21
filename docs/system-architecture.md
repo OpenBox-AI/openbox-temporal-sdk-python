@@ -289,32 +289,17 @@ OpenBoxError (base)
 
 #### TemporalGovernanceState
 
-**Responsibility:** Hold the small amount of Temporal semantics that must survive past a base-SDK hook callback — signal verdicts, HITL pending markers, and the completed-hook stop bridge. Workflow-safe, thread-safe, and shared by both interceptors.
+**Responsibility:** Hold the small amount of Temporal semantics that must survive past a base-SDK hook callback — signal verdicts, HITL pending markers, completed-hook stop bridge, and retryable-BLOCK requests. Workflow-safe, thread-safe, and shared by both interceptors.
 
 The base SDK (`openbox_core`) owns hook context, hook payload building, hook evaluation, and the within-activity abort short-circuit (its `ContextStore`). This object holds only the effects the base runtime cannot express itself. All keys are **run-scoped**: state from a prior run with the same `workflow_id` is ignored and cleared.
 
-**Methods:**
-```python
-class TemporalGovernanceState:
-    # Signal verdicts (workflow interceptor → next activity)
-    def set_signal_verdict(self, workflow_id, run_id, verdict, reason=None) -> None
-    def get_signal_verdict(self, workflow_id, run_id) -> Optional[(Verdict, reason)]  # clears stale run
-    def clear_signal_verdict(self, workflow_id) -> None
-
-    # HITL pending-approval markers
-    def mark_pending_approval(self, workflow_id, run_id, activity_id) -> None
-    def has_pending_approval(self, workflow_id, run_id, activity_id) -> bool
-    def clear_pending_approval(self, workflow_id, run_id, activity_id) -> None
-
-    # Completed-hook stop bridge (adapter → activity interceptor)
-    def record_completed_stop(self, workflow_id, run_id, activity_id, verdict, reason=None) -> None
-    def take_completed_stop(self, workflow_id, run_id, activity_id) -> Optional[(Verdict, reason)]
-
-    # Cleanup
-    def cleanup_run(self, workflow_id, run_id) -> None
-```
-
 **Code Location:** `openbox/governance_state.py`
+
+**Retryable BLOCK Restart Bridge:** The workflow interceptor receives retryable-BLOCK requests from governance responses (activity results, signals, hooks, approval polls) and submits them to a run-local `RetryableBlockCoordinator`. The coordinator stores the first request (first-wins semantics); the inbound workflow boundary later reads it, validates the restart budget (incrementing a memo counter bounded by `max_retryable_block_restarts`), and calls `continue_as_new(new_input, memo=...)` with the replacement input and updated counter.
+
+**Versioned Error Transport:** Activity-side retry requests use a stable, non-retryable `ApplicationError` with type `"GovernanceRetryableBlock"` carrying a versioned request envelope. The workflow boundary extracts and validates the envelope before attempting a restart. Unknown versions fail safely as plain BLOCK; Temporal-level failures (replay, malformed detail) do not trigger a Workflow Task loop.
+
+**Replay Safety (Patch Marker `"openbox-retryable-block-v1"`):** The Continue-As-New command is protected by a Temporal patch marker so old histories (pre-feature) skip the new branch and replay unchanged. New histories take the retryable-BLOCK path deterministically.
 
 ---
 
@@ -634,6 +619,71 @@ Authorization: Bearer {api_key}
 │Proceed     │          │              │   │              │
 └────────────┘          └──────────────┘   └──────────────┘
 ```
+
+### Retryable BLOCK Restart Flow
+
+```
+┌──────────────────────────────────────────┐
+│ Governance response from any event type  │
+│ (activity, signal, hook, approval, etc)  │
+└────────────┬─────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────────────────┐
+│ Base SDK handle_retryable_block() helper │
+│ (checks for valid BLOCK + retry_plan)    │
+└────────────┬─────────────────────────────┘
+             │
+      ┌──────┴──────────┐
+      │                 │
+      ▼                 ▼
+  ┌────────┐        ┌─────────────────┐
+  │No plan │        │RetryDirective   │
+  └────────┘        │(new_input)      │
+     │              └────────┬────────┘
+     ▼                       │
+Existing BLOCK/HALT    ┌─────┴────────────────┐
+behavior               │                      │
+                       ▼                      ▼
+                  Activity/hook      Workflow event/signal
+                  context            context
+                       │                      │
+                       ▼                      ▼
+              Non-retryable         Submit to run-local
+              ApplicationError      RetryableBlockCoordinator
+              (transport signal)    (first-wins)
+                       │                      │
+                       └──────┬───────────────┘
+                              │
+                              ▼
+                    Workflow inbound boundary
+                              │
+                    ┌─────────┴────────────┐
+                    │                      │
+              ┌─────▼──────┐      ┌─────────────┐
+              │Read memo   │      │Read request │
+              │counter     │      │from coord   │
+              └─────┬──────┘      └──────┬──────┘
+                    │                   │
+          ┌─────────┴───────────────────┤
+          │ Increment and validate cap  │
+          └─────────┬───────────────────┘
+                    │
+         ┌──────────┴──────────┐
+         │                     │
+    ┌────▼────┐        ┌──────▼──────┐
+    │ Over    │        │ Under limit  │
+    │ limit   │        │              │
+    └────┬────┘        └──────┬───────┘
+         │                    │
+         ▼                    ▼
+    ApplicationError   Continue-As-New
+    (GovernanceRetry   (same Workflow ID,
+    LimitExceeded)     new Run ID, fresh
+                       history)
+```
+
+**Code Location:** `openbox/workflow_interceptor.py`, `openbox/retry_coordinator.py`
 
 ### Hook-Level Governance Flow
 
