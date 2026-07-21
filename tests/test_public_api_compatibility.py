@@ -49,6 +49,9 @@ EXPECTED_EXPORTS = {
     "should_skip_hitl",
     # emit_handoff — multi-agent primitive kept in the public surface.
     "emit_handoff",
+    # Retryable-BLOCK restart envelope + schema version.
+    "RetryableBlockRequest",
+    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
 }
 
 REMOVED_EXPORTS = {
@@ -106,7 +109,7 @@ class TestExports:
     def test_public_surface_is_exactly_expected(self):
         # __all__ is the whole public surface — nothing beyond the expected set.
         assert set(openbox.__all__) == EXPECTED_EXPORTS
-        assert len(openbox.__all__) == 32
+        assert len(openbox.__all__) == 34
 
     def test_removed_exports_absent(self):
         for name in REMOVED_EXPORTS:
@@ -139,7 +142,11 @@ class TestShimBehavioralIdentity:
         from openbox_core.contracts.results import EvaluationResult
 
         response = openbox.GovernanceVerdictResponse.from_dict(
-            {"verdict": "block", "reason": "x", "guardrails_result": {"input_type": "activity_input"}}
+            {
+                "verdict": "block",
+                "reason": "x",
+                "guardrails_result": {"input_type": "activity_input"},
+            }
         )
         assert isinstance(response, EvaluationResult)
         assert response.guardrails_result is response.guardrails  # same object

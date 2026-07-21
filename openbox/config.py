@@ -10,17 +10,16 @@ linecache -> os.stat which triggers Temporal sandbox restrictions.
 
 import re
 from dataclasses import dataclass, field
-from typing import Set, Optional
+from typing import Optional, Set
 
 from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
-from openbox_core.identity import (
-    AGENT_DID_PREFIX as CORE_AGENT_DID_PREFIX,
-    load_ed25519_seed as load_core_ed25519_seed,
-    validate_agent_did as validate_core_agent_did,
-)
 
-# NOTE: urllib and logging imports are lazy to avoid Temporal sandbox restrictions.
-# Both use os.stat internally which triggers sandbox errors.
+# NOTE: urllib, logging, and openbox_core.identity imports are lazy to avoid
+# Temporal sandbox restrictions. urllib/logging use os.stat internally; identity
+# pulls cryptography. None may load on a workflow-sandbox import path
+# (openbox/__init__ → worker → config), so identity is imported inside the
+# functions that need it and via module __getattr__ for AGENT_DID_PREFIX.
+# Guarded by tests/test_workflow_sandbox_import_safety.py.
 
 
 def _get_logger():
@@ -33,15 +32,24 @@ def _get_logger():
 # API key format pattern (obx_live_... or obx_test_...)
 API_KEY_PATTERN = re.compile(r"^obx_(live|test)_\w+$")
 
-# Backward-compatible public constant, owned by the base SDK.
-AGENT_DID_PREFIX = CORE_AGENT_DID_PREFIX
+
+# Backward-compatible public constant, owned by the base SDK. Resolved lazily via
+# module __getattr__ (PEP 562) so a workflow-sandbox import of openbox.config never
+# eagerly loads openbox_core.identity (and its cryptography dependency).
+def __getattr__(name: str):
+    if name == "AGENT_DID_PREFIX":
+        from openbox_core.identity import AGENT_DID_PREFIX as _prefix
+
+        return _prefix
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Re-export from errors.py for backward compatibility
 from .errors import (  # noqa: F401
-    OpenBoxConfigError,
     OpenBoxAuthError,
-    OpenBoxNetworkError,
+    OpenBoxConfigError,
     OpenBoxInsecureURLError,
+    OpenBoxNetworkError,
 )
 
 # GovernanceConfig - Configuration for interceptors
@@ -117,6 +125,22 @@ class GovernanceConfig:
     # Temporal currently uses its native retry backoff for HITL polling.
     hitl_poll_interval_ms: int = 5000
 
+    # Maximum Continue-As-New restarts a retryable BLOCK may trigger across the
+    # whole workflow chain (bounded input-remediation loop). Applies uniformly to
+    # every event origin; must be >= 1.
+    max_retryable_block_restarts: int = 3
+
+    def __post_init__(self) -> None:
+        # GovernanceConfig is public and can be handed directly to an interceptor,
+        # bypassing the factory/plugin — so validation lives on the dataclass (the
+        # single source of truth), not only at the call sites. Pure + sandbox-safe:
+        # raises the already-imported OpenBoxConfigError, no logging/IO.
+        if self.max_retryable_block_restarts < 1:
+            raise OpenBoxConfigError(
+                "max_retryable_block_restarts must be >= 1 "
+                f"(got {self.max_retryable_block_restarts})"
+            )
+
 
 # Global Configuration Singleton
 
@@ -128,6 +152,8 @@ def _validate_api_key_format(api_key: str) -> bool:
 
 def _validate_did(agent_did: str) -> None:
     """Validate agent DID format through the shared base SDK."""
+    from openbox_core.identity import validate_agent_did as validate_core_agent_did
+
     try:
         validate_core_agent_did(agent_did)
     except CoreOpenBoxConfigError as exc:
@@ -150,6 +176,8 @@ def resolve_signing_defaults(agent_did, signer):
 
 def _load_ed25519_seed(agent_private_key: str):
     """Decode and load an Ed25519 signer through the shared base SDK."""
+    from openbox_core.identity import load_ed25519_seed as load_core_ed25519_seed
+
     try:
         return load_core_ed25519_seed(agent_private_key)
     except CoreOpenBoxConfigError as exc:
@@ -218,8 +246,8 @@ def _validate_api_key_with_server(
     urllib.request uses os.stat internally which triggers sandbox errors.
     """
     # Lazy imports to avoid sandbox restrictions
-    from urllib.request import Request, urlopen
     from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
 
     # Build signed (or plain) headers via the single source of truth.
     from .request_signing import prepare_signed_request
