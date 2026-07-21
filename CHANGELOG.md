@@ -4,6 +4,14 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-07-21
+
+### Changed
+
+- **Resolve `openbox-sdk-python` from PyPI.** The dependency now installs from the
+  published package (floor raised to `>=1.0.1`) instead of a local editable checkout,
+  so `pip install openbox-temporal-sdk-python` works without a sibling source tree.
+
 ## [1.2.0] - 2026-07-20
 
 ### Changed
