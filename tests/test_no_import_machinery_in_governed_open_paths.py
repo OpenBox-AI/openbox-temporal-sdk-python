@@ -59,12 +59,15 @@ class TestStaticVersion:
         self._assert_static_version(init)
 
     def test_versions_match_pyproject(self):
+        # Only this package's static __version__ is gated here. openbox_core
+        # installs from PyPI as a wheel (no sibling pyproject to read), and its
+        # release cadence is owned by its own repo; the static-literal guard for
+        # its __version__ lives in test_openbox_core_version_static_no_metadata.
         import tomllib
 
-        for pkg_dir, mod in ((OPENBOX_PKG, openbox), (CORE_PKG, openbox_core)):
-            pyproject = pkg_dir.parent / "pyproject.toml"
-            declared = tomllib.loads(pyproject.read_text())["project"]["version"]
-            assert mod.__version__ == declared, (
-                f"{mod.__name__}.__version__ ({mod.__version__}) out of sync "
-                f"with pyproject ({declared}) — update the static string on release"
-            )
+        pyproject = OPENBOX_PKG.parent / "pyproject.toml"
+        declared = tomllib.loads(pyproject.read_text())["project"]["version"]
+        assert openbox.__version__ == declared, (
+            f"openbox.__version__ ({openbox.__version__}) out of sync "
+            f"with pyproject ({declared}) — update the static string on release"
+        )
