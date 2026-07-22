@@ -12,10 +12,11 @@ Bootstrap model under test (base-SDK instrumentation):
   instrumentation, then wires both interceptors with that shared state.
 """
 
+import asyncio
 import functools
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from openbox.governance_state import TemporalGovernanceState
 
@@ -71,6 +72,7 @@ def with_worker_patches(func):
             # create_core_runtime returns a runtime the worker installs + owns.
             runtime = MagicMock(name="core_runtime")
             runtime.install_instrumentation = MagicMock(name="install_instrumentation")
+            runtime.aclose = AsyncMock(name="aclose")
             mocks["mock_create_core_runtime"].return_value = runtime
             mocks["mock_runtime"] = runtime
 
@@ -111,6 +113,7 @@ class TestCreateOpenboxWorkerWithConfig:
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
             governance_timeout=45.0,
+            validate=False,
             agent_did=None,
             agent_private_key=None,
         )
@@ -143,8 +146,33 @@ class TestCreateOpenboxWorkerWithConfig:
         assert call_kwargs["on_api_error"] == "fail_open"
         assert call_kwargs["instrument_databases"] is True
         assert call_kwargs["instrument_file_io"] is True
-        # The runtime lives for the worker process; install must run once.
+        # The synchronous validation transport does not remain open while the
+        # Worker is idle; the runtime stays installed until its run context exits.
+        m["mock_runtime"].client.validate_api_key.assert_called_once_with()
+        m["mock_runtime"].client.close.assert_called_once_with()
         m["mock_runtime"].install_instrumentation.assert_called_once_with()
+
+    @with_worker_patches
+    def test_runtime_closes_when_worker_context_exits(self, **m):
+        from openbox.worker import create_openbox_worker
+
+        create_openbox_worker(
+            client=Mock(),
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+        )
+        runtime_plugins = m["mock_worker_class"].call_args.kwargs["plugins"]
+        assert len(runtime_plugins) == 1
+        assert runtime_plugins[0].name() == "openbox.RuntimeLifecycle"
+
+        async def exercise() -> None:
+            assert runtime_plugins[0].run_context is not None
+            async with runtime_plugins[0].run_context():
+                pass
+
+        asyncio.run(exercise())
+        m["mock_runtime"].aclose.assert_awaited_once_with()
 
     @with_worker_patches
     def test_core_runtime_receives_shared_state(self, **m):
@@ -289,11 +317,16 @@ class TestCreateOpenboxWorkerWithConfig:
         assert my_activity in call_kwargs["activities"]
         assert sentinel_method in call_kwargs["activities"]
         # Credentials must be captured on the activity instance, not flowed via input
-        m["mock_build_activities"].assert_called_once_with(
-            api_url="http://localhost:8086",
-            api_key="obx_test_key123",
-            agent_did=None,
-            signer=None,
+        activity_kwargs = m["mock_build_activities"].call_args.kwargs
+        assert activity_kwargs["api_url"] == "http://localhost:8086"
+        assert activity_kwargs["api_key"] == "obx_test_key123"
+        assert activity_kwargs["agent_did"] is None
+        assert activity_kwargs["signer"] is None
+        assert activity_kwargs["timeout"] == 30.0
+        assert activity_kwargs["on_api_error"] == "fail_open"
+        assert (
+            activity_kwargs["governance_client"]._core_client
+            is m["mock_runtime"].client
         )
 
     @with_worker_patches

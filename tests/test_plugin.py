@@ -5,7 +5,8 @@ Tests the plugin class in isolation with mocked dependencies.
 Mirrors test patterns from test_worker.py.
 """
 
-from unittest.mock import MagicMock, Mock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from temporalio.plugin import SimplePlugin
@@ -32,6 +33,7 @@ def _make_plugin(**overrides):
     defaults.update(overrides)
 
     mock_runtime = MagicMock(name="core_runtime")
+    mock_runtime.aclose = AsyncMock(name="aclose")
 
     with (
         patch(f"{PATCH_BASE}.validate_api_key") as mock_validate,
@@ -65,6 +67,7 @@ class TestPluginInit:
             api_url="http://localhost:8086",
             api_key="obx_test_key_123",
             governance_timeout=45.0,
+            validate=False,
             agent_did=None,
             agent_private_key=None,
         )
@@ -87,9 +90,23 @@ class TestPluginInit:
         assert isinstance(kw["state"], TemporalGovernanceState)
         assert kw["state"] is plugin._state
 
-        # Instrumentation installed exactly once on the returned runtime.
+        # Validation transport is closed before Worker execution; instrumentation
+        # remains owned by the runtime until the Worker run context exits.
+        mocks["runtime"].client.validate_api_key.assert_called_once_with()
+        mocks["runtime"].client.close.assert_called_once_with()
         mocks["runtime"].install_instrumentation.assert_called_once_with()
         assert plugin._runtime is mocks["runtime"]
+
+    def test_runtime_closes_when_worker_context_exits(self):
+        plugin, mocks = _make_plugin()
+
+        async def exercise() -> None:
+            assert plugin.run_context is not None
+            async with plugin.run_context():
+                pass
+
+        asyncio.run(exercise())
+        mocks["runtime"].aclose.assert_awaited_once_with()
 
     def test_core_runtime_receives_instrumentation_flags(self):
         """instrument_databases / instrument_file_io / policy / timeout flow to
@@ -128,13 +145,9 @@ class TestPluginInit:
         plugin, mocks = _make_plugin(
             governance_timeout=20.0, governance_policy="fail_closed"
         )
-        mocks["governance_client"].assert_called_once_with(
-            api_url="http://localhost:8086",
-            api_key="obx_test_key_123",
-            timeout=20.0,
+        mocks["governance_client"]._from_core_client.assert_called_once_with(
+            mocks["runtime"].client,
             on_api_error="fail_closed",
-            agent_did=None,
-            signer=None,
         )
 
     def test_is_simple_plugin_subclass(self):
