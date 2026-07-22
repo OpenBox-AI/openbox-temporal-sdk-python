@@ -1,6 +1,7 @@
 """Comprehensive tests for the OpenBox SDK activity_interceptor module."""
 
 import base64
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -186,14 +187,15 @@ def create_mock_httpx_client(response_data, status_code=200):
     """
     mock_response = MagicMock()
     mock_response.status_code = status_code
+    mock_response.content = json.dumps(response_data).encode()
     mock_response.json.return_value = response_data
 
     mock_client_instance = AsyncMock()
     mock_client_instance.post = AsyncMock(return_value=mock_response)
 
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
-    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client.post = mock_client_instance.post
+    mock_client.aclose = AsyncMock(return_value=None)
 
     return mock_client, mock_client_instance
 
@@ -1262,7 +1264,8 @@ class TestActivityInterceptor:
 
         mock_httpx = MagicMock()
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.aclose = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)
@@ -1293,7 +1296,8 @@ class TestActivityInterceptor:
 
         mock_httpx = MagicMock()
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.aclose = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)

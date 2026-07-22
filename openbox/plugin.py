@@ -17,7 +17,9 @@ Usage:
 
 import dataclasses
 import logging
-from typing import Any, Optional, Set
+from collections.abc import Callable
+from contextlib import asynccontextmanager
+from typing import Any, Optional, Set, cast
 
 from temporalio.plugin import SimplePlugin
 from temporalio.worker import WorkerConfig, WorkflowRunner
@@ -73,6 +75,7 @@ class OpenBoxPlugin(SimplePlugin):
             api_url=openbox_url,
             api_key=openbox_api_key,
             governance_timeout=governance_timeout,
+            validate=False,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
         )
@@ -104,6 +107,12 @@ class OpenBoxPlugin(SimplePlugin):
             instrument_databases=instrument_databases,
             instrument_file_io=instrument_file_io,
         )
+        try:
+            self._runtime.client.validate_api_key()
+            self._runtime.client.close()
+        except Exception:
+            self._runtime.close()
+            raise
         self._runtime.install_instrumentation()
 
         config = GovernanceConfig(
@@ -121,13 +130,9 @@ class OpenBoxPlugin(SimplePlugin):
         from .activity_interceptor import ActivityGovernanceInterceptor
         from .workflow_interceptor import GovernanceInterceptor
 
-        governance_client = GovernanceClient(
-            api_url=openbox_url,
-            api_key=openbox_api_key,
-            timeout=governance_timeout,
+        governance_client = GovernanceClient._from_core_client(
+            self._runtime.client,
             on_api_error=governance_policy,
-            agent_did=agent_did,
-            signer=_signer,
         )
 
         interceptors: list = [
@@ -158,6 +163,9 @@ class OpenBoxPlugin(SimplePlugin):
             api_key=openbox_api_key,
             agent_did=agent_did,
             signer=_signer,
+            timeout=governance_timeout,
+            on_api_error=governance_policy,
+            governance_client=governance_client,
         )
 
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner | None:
@@ -178,11 +186,22 @@ class OpenBoxPlugin(SimplePlugin):
         self._instrument_file_io = instrument_file_io
         self._hitl_enabled = hitl_enabled
 
+        @asynccontextmanager
+        async def runtime_context():
+            try:
+                yield
+            finally:
+                await self._runtime.aclose()
+
         super().__init__(
             "openbox.OpenBoxPlugin",
             interceptors=interceptors,
             activities=[governance_activities.send_governance_event],
-            workflow_runner=workflow_runner,
+            workflow_runner=cast(
+                Callable[[WorkflowRunner | None], WorkflowRunner],
+                workflow_runner,
+            ),
+            run_context=runtime_context,
         )
 
     def configure_worker(self, config: WorkerConfig) -> WorkerConfig:

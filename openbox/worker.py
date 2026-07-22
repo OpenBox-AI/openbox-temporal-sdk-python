@@ -19,10 +19,12 @@ Usage:
 
 import logging
 from concurrent.futures import Executor, ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Type
+from typing import Any, Awaitable, Callable, Optional, Sequence, Type
 
 from temporalio.client import Client
+from temporalio.plugin import SimplePlugin
 from temporalio.worker import Interceptor, Worker
 
 from .config import GovernanceConfig
@@ -159,6 +161,7 @@ def create_openbox_worker(
         api_url=openbox_url,
         api_key=openbox_api_key,
         governance_timeout=governance_timeout,
+        validate=False,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
     )
@@ -190,6 +193,12 @@ def create_openbox_worker(
         instrument_databases=instrument_databases,
         instrument_file_io=instrument_file_io,
     )
+    try:
+        runtime.client.validate_api_key()
+        runtime.client.close()
+    except Exception:
+        runtime.close()
+        raise
     runtime.install_instrumentation()
 
     config = GovernanceConfig(
@@ -215,13 +224,9 @@ def create_openbox_worker(
         config=config,
     )
 
-    governance_client = GovernanceClient(
-        api_url=openbox_url,
-        api_key=openbox_api_key,
-        timeout=governance_timeout,
+    governance_client = GovernanceClient._from_core_client(
+        runtime.client,
         on_api_error=governance_policy,
-        agent_did=agent_did,
-        signer=_signer,
     )
 
     activity_interceptor = ActivityGovernanceInterceptor(
@@ -239,6 +244,9 @@ def create_openbox_worker(
         api_key=openbox_api_key,
         agent_did=agent_did,
         signer=_signer,
+        timeout=governance_timeout,
+        on_api_error=governance_policy,
+        governance_client=governance_client,
     )
 
     all_interceptors: list = [workflow_interceptor, activity_interceptor, *interceptors]
@@ -248,7 +256,10 @@ def create_openbox_worker(
 
         all_interceptors.append(TracingInterceptor())
 
-    all_activities = [*activities, governance_activities.send_governance_event]
+    all_activities: list[Callable[..., Any]] = [
+        *activities,
+        governance_activities.send_governance_event,
+    ]
 
     logger.info(
         "OpenBox SDK initialized: policy=%s timeout=%ss db=%s file=%s hitl=%s "
@@ -261,6 +272,17 @@ def create_openbox_worker(
         "enabled" if hitl_enabled else "disabled",
     )
 
+    @asynccontextmanager
+    async def runtime_context():
+        try:
+            yield
+        finally:
+            await runtime.aclose()
+
+    runtime_plugin = SimplePlugin(
+        "openbox.RuntimeLifecycle",
+        run_context=runtime_context,
+    )
     return Worker(
         client,
         task_queue=task_queue,
@@ -268,6 +290,7 @@ def create_openbox_worker(
         activities=all_activities,
         activity_executor=activity_executor,
         workflow_task_executor=workflow_task_executor,
+        plugins=[runtime_plugin],
         interceptors=all_interceptors,
         build_id=build_id,
         identity=identity,
