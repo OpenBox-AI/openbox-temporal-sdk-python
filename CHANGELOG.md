@@ -4,6 +4,14 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+### Added
+
+- Optional `sandbox` integration backed by `openbox-sandbox-sdk-python`: bounded Workflow contracts, a deterministic one-attempt governed-command helper, dedicated Worker/plugin registration, heartbeat-aware cancellation, verified-receipt or explicit same-domain trust, and typed Temporal result/error mapping.
+
+### Changed
+
+- Lifecycle governance Activities and Activity interceptors now adapt the Worker/plugin-owned `openbox_core.EvaluationClient` instead of constructing duplicate HTTP clients.
+
 ## [1.3.0] - 2026-07-21
 
 ### Added
