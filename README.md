@@ -11,6 +11,7 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
 - Zero-code setup via `create_openbox_worker()` factory
+- Optional governed-command wrapper for authorized local sandbox execution
 
 ---
 
@@ -18,6 +19,8 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 
 ```bash
 pip install openbox-temporal-sdk-python
+# Add the framework-neutral sandbox engine and governed-command wrapper:
+pip install "openbox-temporal-sdk-python[sandbox]"
 ```
 
 **Requirements:**
@@ -168,6 +171,10 @@ worker = create_openbox_worker(
 ```
 
 ---
+
+## Governed sandbox commands
+
+The optional sandbox integration schedules one-attempt, profile-bound commands through a dedicated Temporal Activity Worker while the application agent retains Core authorization ownership. `ALLOW` stays on the native application path; only a strict, pre-authorized `CONSTRAIN` may enter the local sandbox engine. See [Governed sandbox commands](./docs/governed-commands.md) for trust, receipt, Worker, cleanup, and replay requirements.
 
 ## Governance Verdicts
 
