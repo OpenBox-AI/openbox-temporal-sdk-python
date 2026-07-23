@@ -37,23 +37,28 @@ from .errors import (
     GOVERNANCE_API_ERROR_TYPE,
     GOVERNANCE_BLOCK_ERROR_TYPE,
     GOVERNANCE_HALT_ERROR_TYPE,
+    GOVERNANCE_PATCH_ERROR_TYPE,
     GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
 )
 from .multi_agent import inject_session_header, read_session_from_memo
-from .retry_coordinator import (
-    RetryableBlockControl,
-    RetryableBlockCoordinator,
+from .patch import PatchRequest, extract_patch_request
+from .patch_coordinator import (
+    PatchControl,
+    PatchCoordinator,
     bind_coordinator,
     next_restart_memo,
     unbind_coordinator,
 )
-from .retryable_block import RetryableBlockRequest, extract_retryable_block_request
 from .types import Verdict
 
-# Patch marker gating ALL retryable-BLOCK workflow behavior (coordinator wrap +
-# Continue-As-New). An old history predating this marker replays the exact
-# pre-feature control flow (patched(...) → False), taking no new branch.
+# Temporal patch marker (workflow.patched()) gating ALL BLOCK-with-patch restart
+# workflow behavior (coordinator wrap + Continue-As-New). This identifier keeps
+# its pre-rename name deliberately: it is Temporal's OWN patched-version marker,
+# a distinct concept from the governance "patch" directive, and renaming it to
+# use "patch" terminology would conflate the two. An old history predating this
+# marker replays the exact pre-feature control flow (patched(...) → False),
+# taking no new branch.
 _RETRYABLE_BLOCK_PATCH = "openbox-retryable-block-v1"
 
 # Patch marker gating inclusion of the workflow arguments in the WorkflowStarted
@@ -187,7 +192,7 @@ from .errors import GovernanceHaltError  # noqa: F401
 def _legacy_block_degrade(payload: dict) -> Optional[dict]:
     """Pre-feature BLOCK result shape, keyed by event origin.
 
-    A retryable BLOCK degrades HERE — when the caller has the feature disabled
+    A BLOCK with patch degrades HERE — when the caller has the feature disabled
     (an old unpatched history) OR its envelope failed extraction — never to ALLOW.
     Signals read ``result.get(...)`` so they need a dict that still BLOCKS;
     lifecycle/handoff legacy mapping is ``None`` (== the pre-feature
@@ -203,7 +208,7 @@ async def _send_governance_event(
     timeout: float,
     on_api_error: str = "fail_open",
     *,
-    retryable_block_enabled: bool = False,
+    patch_enabled: bool = False,
 ) -> Any:
     """
     Send governance event via activity.
@@ -211,17 +216,18 @@ async def _send_governance_event(
     Args:
         on_api_error: "fail_open" (default) = continue on error
                       "fail_closed" = halt workflow if governance API fails
-        retryable_block_enabled: when True (set by callers running inside the
-            retryable-block-patched path), a raised ``GovernanceRetryableBlock``
-            is converted to a ``RetryableBlockRequest`` return value; when False
-            (legacy/unpatched callers) it degrades to the exact pre-feature result
-            shape by event_type, so an old open history never receives the new
-            type or crashes.
+        patch_enabled: when True (set by callers running inside the
+            patch-restart-patched path), a raised ``GovernancePatch`` (or the
+            legacy ``GovernanceRetryableBlock`` alias, still possible on an
+            in-flight restart chain started before this rename) is converted to
+            a ``PatchRequest`` return value; when False (legacy/unpatched
+            callers) it degrades to the exact pre-feature result shape by
+            event_type, so an old open history never receives the new type or
+            crashes.
 
     Returns ``dict | None`` for the existing verdict paths, or a
-    ``RetryableBlockRequest`` when a valid retryable BLOCK is surfaced on an
-    enabled caller. Callers disambiguate with ``isinstance(result,
-    RetryableBlockRequest)``.
+    ``PatchRequest`` when a valid BLOCK with patch is surfaced on an enabled
+    caller. Callers disambiguate with ``isinstance(result, PatchRequest)``.
 
     Credentials (api_url, api_key) are held by the activity instance itself —
     never passed through activity inputs, so they never land in workflow
@@ -252,9 +258,12 @@ async def _send_governance_event(
         ):
             raise GovernanceHaltError(str(e))
 
-        if app_error_type == GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE:
-            if retryable_block_enabled:
-                req = extract_retryable_block_request(e)
+        if app_error_type in (
+            GOVERNANCE_PATCH_ERROR_TYPE,
+            GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+        ):
+            if patch_enabled:
+                req = extract_patch_request(e)
                 if req is not None:
                     return req
                 # Extraction failed (missing/invalid schema / malformed details).
@@ -278,7 +287,7 @@ def _is_halt(exc: Optional[BaseException]) -> bool:
     Walks cause / __cause__ / __context__ (mirrors ``_application_error_type``)
     and matches a typed ``GovernanceHaltError`` or an ``ApplicationError`` whose
     ``type`` is HALT/STOP. A ``None`` exception → False. Used for HALT dominance
-    over a concurrent coordinator retry request (priority: HALT > retryable BLOCK).
+    over a concurrent coordinator patch request (priority: HALT > BLOCK with patch).
     """
     if exc is None:
         return False
@@ -318,11 +327,11 @@ def _dispose_user_task(user_task: "asyncio.Task") -> None:
 
 
 async def _continue_as_new(
-    req: RetryableBlockRequest, current_args: list, max_restarts: int
+    req: PatchRequest, current_args: list, max_restarts: int
 ) -> Any:
     """The ONLY place that calls ``workflow.continue_as_new``.
 
-    Enforces the restart budget first (raises ``GovernanceRetryLimitExceeded`` at
+    Enforces the restart budget first (raises ``GovernancePatchLimitExceeded`` at
     the cap), then maps ``new_input``: ``None`` reuses the current run's args
     exactly; any other value is passed as ONE workflow argument.
     ``continue_as_new`` raises ``ContinueAsNewError`` (control flow) — never caught
@@ -389,8 +398,8 @@ class GovernanceInterceptor(Interceptor):
             getattr(config, "skip_workflow_types", set()) if config else set()
         )
         self.skip_signals = getattr(config, "skip_signals", set()) if config else set()
-        self.max_retryable_block_restarts = (
-            getattr(config, "max_retryable_block_restarts", 3) if config else 3
+        self.max_patch_restarts = (
+            getattr(config, "max_patch_restarts", 3) if config else 3
         )
 
     def workflow_interceptor_class(
@@ -402,7 +411,7 @@ class GovernanceInterceptor(Interceptor):
         send_start = self.send_start_event
         skip_types = self.skip_workflow_types
         skip_sigs = self.skip_signals
-        max_restarts = self.max_retryable_block_restarts
+        max_restarts = self.max_patch_restarts
 
         class _Outbound(WorkflowOutboundInterceptor):
             """Stamps the multi-agent session id onto every scheduled activity."""
@@ -424,10 +433,10 @@ class GovernanceInterceptor(Interceptor):
                 return super().start_local_activity(input)
 
         class _Inbound(WorkflowInboundInterceptor):
-            # Run-local coordinator, set at the top of the retryable execute path
-            # and read by handle_signal (same instance). None until bound / on the
-            # legacy path.
-            _coordinator: Optional[RetryableBlockCoordinator] = None
+            # Run-local coordinator, set at the top of the patch-restart execute
+            # path and read by handle_signal (same instance). None until bound /
+            # on the legacy path.
+            _coordinator: Optional[PatchCoordinator] = None
 
             def init(self, outbound: WorkflowOutboundInterceptor) -> None:
                 super().init(_Outbound(outbound))
@@ -439,14 +448,14 @@ class GovernanceInterceptor(Interceptor):
                     return await super().execute_workflow(input)
 
                 if workflow.patched(_RETRYABLE_BLOCK_PATCH):
-                    return await self._execute_workflow_retryable(info, input)
+                    return await self._execute_workflow_patch(info, input)
                 return await self._execute_workflow_legacy(info, input)
 
             async def _execute_workflow_legacy(
                 self, info, input: ExecuteWorkflowInput
             ) -> Any:
                 """Exact pre-feature control flow. Taken when replaying a history
-                that predates the retryable-block patch marker — no coordinator,
+                that predates the patch-restart marker — no coordinator,
                 no Continue-As-New."""
                 sid = read_session_from_memo()
 
@@ -510,16 +519,16 @@ class GovernanceInterceptor(Interceptor):
 
                     raise
 
-            async def _execute_workflow_retryable(
+            async def _execute_workflow_patch(
                 self, info, input: ExecuteWorkflowInput
             ) -> Any:
-                """Retryable-block control flow: own the run-local coordinator, race
+                """Patch-restart control flow: own the run-local coordinator, race
                 the user workflow against the coordinator wake condition, and
-                Continue-As-New on a valid retry request from any origin. This is
+                Continue-As-New on a valid patch request from any origin. This is
                 the ONLY path that calls ``workflow.continue_as_new`` (via
                 ``_continue_as_new``)."""
                 sid = read_session_from_memo()
-                coordinator = RetryableBlockCoordinator()
+                coordinator = PatchCoordinator()
                 self._coordinator = coordinator  # signals read this instance field
                 token = bind_coordinator(
                     coordinator
@@ -527,15 +536,15 @@ class GovernanceInterceptor(Interceptor):
                 current_args = list(input.args) if input.args is not None else []
 
                 try:
-                    # WorkflowStarted — a retryable BLOCK restarts before user code.
+                    # WorkflowStarted — a BLOCK with patch restarts before user code.
                     if send_start:
                         started = await _send_governance_event(
                             _workflow_started_payload(info, sid, input),
                             timeout,
                             on_error,
-                            retryable_block_enabled=True,
+                            patch_enabled=True,
                         )
-                        if isinstance(started, RetryableBlockRequest):
+                        if isinstance(started, PatchRequest):
                             return await _continue_as_new(
                                 started, current_args, max_restarts
                             )
@@ -550,9 +559,9 @@ class GovernanceInterceptor(Interceptor):
 
                     coordinator_request = coordinator.get_request()
                     if coordinator_request is not None:
-                        # A signal / handoff / activity-origin retry arrived mid-run.
+                        # A signal / handoff / activity-origin patch arrived mid-run.
                         await workflow.wait_condition(workflow.all_handlers_finished)
-                        # HALT dominates a concurrent retry (priority: HALT > BLOCK).
+                        # HALT dominates a concurrent patch (priority: HALT > BLOCK).
                         if user_task.done() and _is_halt(user_task.exception()):
                             raise user_task.exception()  # type: ignore[misc]
                         _dispose_user_task(user_task)
@@ -563,7 +572,7 @@ class GovernanceInterceptor(Interceptor):
                     # The user task finished first.
                     try:
                         result = user_task.result()
-                    except RetryableBlockControl:
+                    except PatchControl:
                         # A handoff unwound user code AND submitted to the coordinator.
                         await workflow.wait_condition(workflow.all_handlers_finished)
                         control_request = coordinator.get_request()
@@ -575,19 +584,19 @@ class GovernanceInterceptor(Interceptor):
                     except Exception as e:
                         # A genuine HALT surfacing through user code (e.g. a signal
                         # or completed-hook HALT enforced by an activity) dominates:
-                        # never restart it (priority HALT > retryable BLOCK, §3.3;
+                        # never restart it (priority HALT > BLOCK with patch, §3.3;
                         # acceptance: HALT never restarts). Mirrors the coordinator-
                         # win path's HALT-dominance guard above.
                         if _is_halt(e):
                             raise
                         # Activity / hook origin surfaced as an ActivityError chain.
-                        req = extract_retryable_block_request(e)
+                        req = extract_patch_request(e)
                         if req is not None:
                             return await _continue_as_new(
                                 req, current_args, max_restarts
                             )
-                        # Genuine failure: evaluate WorkflowFailed. A valid retry
-                        # plan there overrides the original failure with a restart;
+                        # Genuine failure: evaluate WorkflowFailed. A valid patch
+                        # there overrides the original failure with a restart;
                         # otherwise the original exception is rethrown unchanged.
                         error = _build_error_dict(e)
                         failed_outcome = None
@@ -605,7 +614,7 @@ class GovernanceInterceptor(Interceptor):
                                 ).to_payload_dict(),
                                 timeout,
                                 on_error,
-                                retryable_block_enabled=True,
+                                patch_enabled=True,
                             )
                         except Exception:
                             # Swallow ALL failed-reporting errors (including a
@@ -614,16 +623,16 @@ class GovernanceInterceptor(Interceptor):
                             # workflow exception. A genuine policy HALT still
                             # terminates the workflow via the reporting activity's
                             # client.terminate() before this point, so HALT remains
-                            # honored; a retryable BLOCK is returned (not raised) by
+                            # honored; a BLOCK with patch is returned (not raised) by
                             # the dispatcher, so it is unaffected by this swallow.
                             pass
-                        if isinstance(failed_outcome, RetryableBlockRequest):
+                        if isinstance(failed_outcome, PatchRequest):
                             return await _continue_as_new(
                                 failed_outcome, current_args, max_restarts
                             )
                         raise
 
-                    # WorkflowCompleted — a retryable BLOCK restarts instead of
+                    # WorkflowCompleted — a BLOCK with patch restarts instead of
                     # returning the user result.
                     workflow_output = None
                     try:
@@ -641,9 +650,9 @@ class GovernanceInterceptor(Interceptor):
                         ).to_payload_dict(),
                         timeout,
                         on_error,
-                        retryable_block_enabled=True,
+                        patch_enabled=True,
                     )
-                    if isinstance(completed, RetryableBlockRequest):
+                    if isinstance(completed, PatchRequest):
                         return await _continue_as_new(
                             completed, current_args, max_restarts
                         )
@@ -661,7 +670,7 @@ class GovernanceInterceptor(Interceptor):
 
                 if workflow.patched("openbox-v2-signal"):
                     sid = read_session_from_memo()
-                    rb_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
+                    patch_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
                     result = await _send_governance_event(
                         _events.signal_received(
                             workflow_id=info.workflow_id,
@@ -674,10 +683,10 @@ class GovernanceInterceptor(Interceptor):
                         ).to_payload_dict(),
                         timeout,
                         on_error,
-                        retryable_block_enabled=rb_enabled,
+                        patch_enabled=patch_enabled,
                     )
 
-                    if rb_enabled and isinstance(result, RetryableBlockRequest):
+                    if patch_enabled and isinstance(result, PatchRequest):
                         # Never Continue-As-New inside the handler. Submit to the
                         # run-local coordinator; the main execute path drains
                         # handlers then Continue-As-News. Skip the user handler.
@@ -685,7 +694,7 @@ class GovernanceInterceptor(Interceptor):
                             self._coordinator.submit(result)  # first-wins
                         elif state:
                             # Coordinator unbound (should not happen in a patched
-                            # run): never silently drop the retry — enforce it as a
+                            # run): never silently drop the patch — enforce it as a
                             # plain block via the activity bridge (fail safe).
                             state.set_signal_verdict(
                                 info.workflow_id,
@@ -696,8 +705,8 @@ class GovernanceInterceptor(Interceptor):
                         return
 
                     # Legacy/plain path: result is a dict (or None). Unpatched runs
-                    # reach here too (rb_enabled=False → dispatcher returns the
-                    # legacy dict shape), so a retryable signal still BLOCKS.
+                    # reach here too (patch_enabled=False → dispatcher returns the
+                    # legacy dict shape), so a signal carrying a patch still BLOCKS.
                     verdict = (
                         Verdict.from_string(
                             result.get("verdict") or result.get("action")

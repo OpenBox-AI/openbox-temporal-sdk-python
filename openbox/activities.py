@@ -205,18 +205,18 @@ class GovernanceActivities:
                 policy_id = parsed.policy_id
                 risk_score = parsed.risk_score
 
-                # A BLOCK carrying a valid retry plan restarts the workflow run
+                # A BLOCK carrying a valid patch restarts the workflow run
                 # instead of merely failing this activity — check for it before
                 # the plain BLOCK/HALT stop handling below ever sees the verdict.
-                from .errors import GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
-                from .retryable_block import retryable_block_request
+                from .errors import GOVERNANCE_PATCH_ERROR_TYPE
+                from .patch import patch_request
 
-                retry_req = retryable_block_request(parsed, event_type=event_type)
-                if retry_req is not None:
+                patch_req = patch_request(parsed, event_type=event_type)
+                if patch_req is not None:
                     raise ApplicationError(
                         "Governance requested workflow restart",
-                        retry_req.to_dict(),
-                        type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+                        patch_req.to_dict(),
+                        type=GOVERNANCE_PATCH_ERROR_TYPE,
                         non_retryable=True,
                     )
 

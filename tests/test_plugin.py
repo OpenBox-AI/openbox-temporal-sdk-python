@@ -190,8 +190,8 @@ class TestPluginInit:
             config_arg = mock_wi.call_args.kwargs["config"]
             assert "InternalWorkflow" in config_arg.skip_workflow_types
 
-    def test_max_retryable_block_restarts_passed_to_config(self):
-        """Verify max_retryable_block_restarts reaches GovernanceConfig."""
+    def test_max_patch_restarts_passed_to_config(self):
+        """Verify max_patch_restarts reaches GovernanceConfig."""
         with (
             patch(f"{PATCH_BASE}.validate_api_key"),
             patch(
@@ -207,11 +207,11 @@ class TestPluginInit:
             OpenBoxPlugin(
                 openbox_url="http://localhost:8086",
                 openbox_api_key="obx_test_key_123",
-                max_retryable_block_restarts=7,
+                max_patch_restarts=7,
                 enable_trace_propagation=False,
             )
             config_arg = mock_wi.call_args.kwargs["config"]
-            assert config_arg.max_retryable_block_restarts == 7
+            assert config_arg.max_patch_restarts == 7
 
     def test_invalid_api_key_raises(self):
         """Validate that bad key format raises OpenBoxAuthError."""
