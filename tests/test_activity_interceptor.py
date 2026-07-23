@@ -19,10 +19,7 @@ from openbox.activity_interceptor import (
 from openbox.config import GovernanceConfig
 from openbox.core_adapter import get_core_context_store
 from openbox.governance_state import TemporalGovernanceState
-from openbox.retryable_block import (
-    GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
-    RetryableBlockRequest,
-)
+from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
 from openbox.types import GovernanceVerdictResponse, Verdict
 
 from .conftest import posted_payload
@@ -160,21 +157,21 @@ def make_input(args=None):
     return mock_input
 
 
-def make_retry_request(**overrides) -> RetryableBlockRequest:
-    """Build a RetryableBlockRequest for seeding a completed-hook stop entry
+def make_patch_request(**overrides) -> PatchRequest:
+    """Build a PatchRequest for seeding a completed-hook stop entry
     directly (bypassing the normalizer — these tests target the interceptor's
     OWN priority handling of an already-produced request)."""
     base = dict(
-        schema_version=GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
-        new_input={"query": "retry"},
+        schema_version=GOVERNANCE_PATCH_SCHEMA_VERSION,
+        new_input={"query": "patch"},
         governance_event_id="evt_completed",
-        reason="post-hoc retry",
+        reason="post-hoc patch",
         event_type="ActivityStarted",
         hook_trigger=True,
         hook_stage="completed",
     )
     base.update(overrides)
-    return RetryableBlockRequest(**base)
+    return PatchRequest(**base)
 
 
 def create_mock_httpx_client(response_data, status_code=200):
@@ -1057,10 +1054,10 @@ class TestActivityInterceptor:
         assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
-    async def test_approval_retryable_block_raises_governance_retryable_block(
+    async def test_approval_patch_raises_governance_patch(
         self, state, mock_activity_info
     ):
-        """A non-expired exact BLOCK with a valid retry plan on the approval
+        """A non-expired exact BLOCK with a valid patch on the approval
         poll requests a workflow restart instead of the plain ApprovalRejected."""
         state.mark_pending_approval(
             "test-workflow-id", "test-run-id", "test-activity-id"
@@ -1070,9 +1067,9 @@ class TestActivityInterceptor:
         client = make_verdict_client(
             approval_response={
                 "verdict": "block",
-                "reason": "admin retry",
+                "reason": "admin patch",
                 "id": "evt_a",
-                "retry_plan": {"new_input": {"k": "v"}},
+                "patch": {"new_input": {"k": "v"}},
             }
         )
         interceptor = make_interceptor(state, config, client=client)
@@ -1088,7 +1085,7 @@ class TestActivityInterceptor:
         finally:
             ctx.stop()
 
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         assert exc_info.value.non_retryable is True
         details = exc_info.value.details[0]
         assert details["new_input"] == {"k": "v"}
@@ -1498,23 +1495,23 @@ class TestActivityInterceptor:
         assert "expired" not in result or result.get("expired") is not True
 
 
-class TestActivityLifecycleRetryableBlockRestart:
-    """``_enforce_verdict`` checks the retryable-BLOCK normalizer BEFORE the
+class TestActivityLifecyclePatchRestart:
+    """``_enforce_verdict`` checks the BLOCK-with-patch normalizer BEFORE the
     generic BLOCK/HALT/guardrails mapping, for both the ActivityStarted and
     ActivityCompleted lifecycle verdicts (real activity events — hook_trigger
     stays False)."""
 
     @pytest.mark.asyncio
-    async def test_started_block_with_valid_plan_raises_governance_retryable_block(
+    async def test_started_block_with_valid_patch_raises_governance_patch(
         self, state, mock_activity_info
     ):
         config = GovernanceConfig(send_activity_start_event=True)
         verdict = GovernanceVerdictResponse.from_dict(
             {
                 "verdict": "block",
-                "reason": "retry with corrected input",
+                "reason": "patch with corrected input",
                 "governance_event_id": "evt_1",
-                "retry_plan": {"new_input": {"query": "corrected"}},
+                "patch": {"new_input": {"query": "corrected"}},
             }
         )
         client = make_verdict_client(verdict)
@@ -1531,10 +1528,10 @@ class TestActivityLifecycleRetryableBlockRestart:
         finally:
             ctx.stop()
 
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         assert exc_info.value.non_retryable is True
         details = exc_info.value.details[0]
-        assert details["schema_version"] == GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+        assert details["schema_version"] == GOVERNANCE_PATCH_SCHEMA_VERSION
         assert details["new_input"] == {"query": "corrected"}
         assert details["governance_event_id"] == "evt_1"
         assert details["event_type"] == "ActivityStarted"
@@ -1543,15 +1540,15 @@ class TestActivityLifecycleRetryableBlockRestart:
         interceptor.next.execute_activity.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_completed_block_with_valid_plan_raises_governance_retryable_block(
+    async def test_completed_block_with_valid_patch_raises_governance_patch(
         self, state, mock_activity_info
     ):
-        """ActivityCompleted verdict with a retry plan raises the retryable
+        """ActivityCompleted verdict with a patch raises the versioned restart
         error tagged with event_type=ActivityCompleted; new_input=None is the
         valid 'reuse current input' directive."""
         config = GovernanceConfig(send_activity_start_event=False)
         verdict = GovernanceVerdictResponse.from_dict(
-            {"verdict": "block", "retry_plan": {"new_input": None}}
+            {"verdict": "block", "patch": {"new_input": None}}
         )
         client = make_verdict_client(verdict)
         interceptor = make_interceptor(state, config, client=client)
@@ -1567,21 +1564,21 @@ class TestActivityLifecycleRetryableBlockRestart:
         finally:
             ctx.stop()
 
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         details = exc_info.value.details[0]
         assert details["new_input"] is None
         assert details["event_type"] == "ActivityCompleted"
         assert details["hook_trigger"] is False
 
     @pytest.mark.asyncio
-    async def test_plain_block_without_plan_still_raises_governance_block(
+    async def test_plain_block_without_patch_still_raises_governance_block(
         self, state, mock_activity_info
     ):
-        """No retry_plan -> unchanged plain GovernanceBlock mapping (regression
-        guard for the retryable-first check added in front of enforce_verdict)."""
+        """No patch -> unchanged plain GovernanceBlock mapping (regression
+        guard for the patch-first check added in front of enforce_verdict)."""
         config = GovernanceConfig(send_activity_start_event=True)
         verdict = GovernanceVerdictResponse.from_dict(
-            {"verdict": "block", "reason": "no plan here"}
+            {"verdict": "block", "reason": "no patch here"}
         )
         client = make_verdict_client(verdict)
         interceptor = make_interceptor(state, config, client=client)
@@ -1601,18 +1598,18 @@ class TestActivityLifecycleRetryableBlockRestart:
         assert exc_info.value.non_retryable is True
 
     @pytest.mark.asyncio
-    async def test_halt_with_synthetic_plan_never_produces_retryable_block(
+    async def test_halt_with_synthetic_patch_never_produces_governance_patch(
         self, state, mock_activity_info
     ):
-        """Defense-in-depth: a HALT verdict carrying a retry_plan never
-        produces a retryable request — the base normalizer gates strictly on
+        """Defense-in-depth: a HALT verdict carrying a patch never
+        produces a patch request — the base normalizer gates strictly on
         verdict == BLOCK, so HALT always terminates instead."""
         config = GovernanceConfig(send_activity_start_event=True)
         verdict = GovernanceVerdictResponse.from_dict(
             {
                 "verdict": "halt",
                 "reason": "emergency",
-                "retry_plan": {"new_input": "x"},
+                "patch": {"new_input": "x"},
             }
         )
         client = make_verdict_client(verdict)
@@ -2073,8 +2070,8 @@ class TestCompletedHaltReachesTerminateOnActivityRaise:
         assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
 
 
-class TestCompletedHookRetryablePriority:
-    """Completed-hook priority: HALT > retryable BLOCK > original activity
+class TestCompletedHookPatchPriority:
+    """Completed-hook priority: HALT > BLOCK with patch > original activity
     exception > plain completed BLOCK — on both the success path
     (_handle_completion) and the exception path (_consume_completed_halt)."""
 
@@ -2083,18 +2080,18 @@ class TestCompletedHookRetryablePriority:
     # ---- success path (_handle_completion) --------------------------------
 
     @pytest.mark.asyncio
-    async def test_success_retryable_request_raises_after_user_code_returns(
+    async def test_success_patch_request_raises_after_user_code_returns(
         self, state, mock_activity_info
     ):
-        """A retryable completed-hook stop raises GovernanceRetryableBlock
+        """A patch completed-hook stop raises GovernancePatch
         AFTER the activity returned, replacing the skip-completed-event path."""
         config = GovernanceConfig(send_activity_start_event=False)
         client = make_verdict_client()
         interceptor = make_interceptor(state, config, client=client)
 
-        req = make_retry_request()
+        req = make_patch_request()
         state.record_completed_stop(
-            self._WF, self._RUN, self._ACT, Verdict.BLOCK, "post-hoc retry", req
+            self._WF, self._RUN, self._ACT, Verdict.BLOCK, "post-hoc patch", req
         )
 
         mock_input = make_input([])
@@ -2108,7 +2105,7 @@ class TestCompletedHookRetryablePriority:
         finally:
             ctx.stop()
 
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         assert exc_info.value.non_retryable is True
         assert exc_info.value.details[0] == req.to_dict()
         # No duplicate ActivityCompleted event sent — the operation already ran.
@@ -2117,12 +2114,12 @@ class TestCompletedHookRetryablePriority:
         assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
 
     @pytest.mark.asyncio
-    async def test_success_halt_wins_over_a_synthetic_retryable_request(
+    async def test_success_halt_wins_over_a_synthetic_patch_request(
         self, state, mock_activity_info
     ):
-        """HALT is checked before the retryable request regardless of what else
+        """HALT is checked before the patch request regardless of what else
         the stop entry carries — the real normalizer never pairs the two (HALT
-        never yields a retry directive), but the interceptor's own priority
+        never yields a patch directive), but the interceptor's own priority
         order must not depend on that."""
         config = GovernanceConfig(send_activity_start_event=False)
         client = make_verdict_client()
@@ -2134,7 +2131,7 @@ class TestCompletedHookRetryablePriority:
             self._ACT,
             Verdict.HALT,
             "kill switch",
-            make_retry_request(),
+            make_patch_request(),
         )
 
         mock_input = make_input([])
@@ -2152,20 +2149,20 @@ class TestCompletedHookRetryablePriority:
 
     # ---- exception path (_consume_completed_halt) --------------------------
 
-    async def test_exception_path_retryable_request_replaces_original_exception(
+    async def test_exception_path_patch_request_replaces_original_exception(
         self, mock_activity_info
     ):
-        """The activity itself raises, but a retryable completed-hook stop was
-        recorded during user code — the retryable request wins and REPLACES
+        """The activity itself raises, but a patch completed-hook stop was
+        recorded during user code — the patch request wins and REPLACES
         the original exception (governance's remediation route takes over)."""
         state = TemporalGovernanceState()
         interceptor = make_interceptor(state)  # ActivityStarted -> ALLOW
 
-        req = make_retry_request()
+        req = make_patch_request()
 
         async def raising_next(_input):
             state.record_completed_stop(
-                self._WF, self._RUN, self._ACT, Verdict.BLOCK, "retry me", req
+                self._WF, self._RUN, self._ACT, Verdict.BLOCK, "patch me", req
             )
             raise RuntimeError("activity boom")
 
@@ -2179,13 +2176,13 @@ class TestCompletedHookRetryablePriority:
         finally:
             ctx.stop()
 
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         assert exc_info.value.non_retryable is True
         assert exc_info.value.details[0] == req.to_dict()
         # Consumed on the exception path — nothing stranded.
         assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
 
-    async def test_exception_path_halt_wins_over_synthetic_retryable_request(
+    async def test_exception_path_halt_wins_over_synthetic_patch_request(
         self, mock_activity_info
     ):
         """Same defense-in-depth as the success-path equivalent: HALT still
@@ -2201,7 +2198,7 @@ class TestCompletedHookRetryablePriority:
                 self._ACT,
                 Verdict.HALT,
                 "kill switch",
-                make_retry_request(),
+                make_patch_request(),
             )
             raise RuntimeError("activity boom")
 

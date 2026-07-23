@@ -33,7 +33,7 @@ from openbox.workflow_interceptor import (
 
 def _legacy_patched(marker, *args, **kwargs):
     """Simulate an old history: every pre-existing ``openbox-v2-*`` marker is
-    present, but the retryable-block marker is NOT — so execute_workflow takes the
+    present, but the patch-restart marker is NOT — so execute_workflow takes the
     unchanged legacy path. Existing execute_workflow tests use this to assert the
     pre-feature behavior is preserved."""
     return marker != _RETRYABLE_BLOCK_PATCH
@@ -1600,7 +1600,7 @@ class TestMultiAgentSessionPropagation:
 
 
 # --------------------------------------------------------------------------- #
-# Phase 5 — retryable-block execute_workflow behavior (patched path)
+# Phase 5 — patch-restart execute_workflow behavior (patched path)
 # --------------------------------------------------------------------------- #
 
 import asyncio  # noqa: E402
@@ -1610,11 +1610,12 @@ from temporalio.exceptions import ApplicationError  # noqa: E402
 
 from openbox.errors import (  # noqa: E402
     GOVERNANCE_HALT_ERROR_TYPE,
-    GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE,
+    GOVERNANCE_PATCH_ERROR_TYPE,
+    GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE,
     GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
 )
-from openbox.retry_coordinator import RetryableBlockCoordinator  # noqa: E402
-from openbox.retryable_block import RetryableBlockRequest  # noqa: E402
+from openbox.patch import PatchRequest  # noqa: E402
+from openbox.patch_coordinator import PatchCoordinator  # noqa: E402
 
 
 class _ContinueAsNewSignal(Exception):
@@ -1632,23 +1633,28 @@ class _FakeActivityError(Exception):
         self.cause = cause
 
 
-def _mk_retry_request(new_input="corrected", event_type="WorkflowStarted"):
-    return RetryableBlockRequest(
+def _mk_patch_request(new_input="corrected", event_type="WorkflowStarted"):
+    return PatchRequest(
         schema_version=1,
         new_input=new_input,
         governance_event_id="evt",
-        reason="retry",
+        reason="patch",
         event_type=event_type,
         hook_trigger=False,
         hook_stage=None,
     )
 
 
-def _retryable_app_error(req):
+def _patch_app_error(req, *, error_type=GOVERNANCE_PATCH_ERROR_TYPE):
+    """Build the ApplicationError an activity/dispatcher raises for a patch
+    request. Defaults to the current ``GovernancePatch`` emission value; pass
+    ``error_type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE`` to simulate an
+    already-recorded legacy history predating the patch rename (replay safety —
+    both values must stay extractable)."""
     return ApplicationError(
         "Governance requested workflow restart",
         req.to_dict(),
-        type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+        type=error_type,
         non_retryable=True,
     )
 
@@ -1680,13 +1686,13 @@ async def _real_wait_condition(predicate, *args, **kwargs):
 
 
 @contextmanager
-def _patched_retryable_workflow(script=None, *, memo_value=0, patched_v1=True):
+def _patched_patch_workflow(script=None, *, memo_value=0, patched_v1=True):
     # The interceptor and the coordinator/budget module each hold their own
     # `workflow` reference; both must be patched. next_restart_memo (budget) reads
-    # openbox.retry_coordinator.workflow.memo / memo_value.
+    # openbox.patch_coordinator.workflow.memo / memo_value.
     with (
         patch("openbox.workflow_interceptor.workflow") as mock,
-        patch("openbox.retry_coordinator.workflow") as rc_mock,
+        patch("openbox.patch_coordinator.workflow") as rc_mock,
         patch("openbox.workflow_interceptor.read_session_from_memo", return_value=None),
     ):
         mock.info.return_value = MagicMock(
@@ -1723,7 +1729,7 @@ def _make_inbound(next_execute, config=None):
 
 
 class TestIsHalt:
-    """Unit tests for the HALT-detection helper used for HALT-over-retry dominance."""
+    """Unit tests for the HALT-detection helper used for HALT-over-patch dominance."""
 
     def test_none_is_not_halt(self):
         assert _is_halt(None) is False
@@ -1745,15 +1751,15 @@ class TestIsHalt:
         assert _is_halt(_FakeActivityError(GovernanceHaltError("deep"))) is True
 
 
-class TestRetryableBlockExecuteWorkflow:
-    """Phase-5 retryable-block Continue-As-New behavior in execute_workflow."""
+class TestPatchExecuteWorkflow:
+    """Phase-5 patch-restart Continue-As-New behavior in execute_workflow."""
 
     @pytest.mark.asyncio
     async def test_unpatched_takes_legacy_path_no_can(self):
         """patched(retryable-block-v1)=False → legacy path: no coordinator race,
         no Continue-As-New."""
         user = AsyncMock(return_value="ok")
-        with _patched_retryable_workflow({}, patched_v1=False) as mock:
+        with _patched_patch_workflow({}, patched_v1=False) as mock:
             inbound = _make_inbound(user)
             result = await inbound.execute_workflow(MagicMock(args=[]))
         assert result == "ok"
@@ -1761,10 +1767,10 @@ class TestRetryableBlockExecuteWorkflow:
 
     @pytest.mark.asyncio
     async def test_workflow_started_block_plan_cans_before_user_code(self):
-        req = _mk_retry_request(new_input={"q": "fixed"}, event_type="WorkflowStarted")
-        script = {"WorkflowStarted": ("raise", _retryable_app_error(req))}
+        req = _mk_patch_request(new_input={"q": "fixed"}, event_type="WorkflowStarted")
+        script = {"WorkflowStarted": ("raise", _patch_app_error(req))}
         user = AsyncMock(return_value="should-not-run")
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -1773,10 +1779,10 @@ class TestRetryableBlockExecuteWorkflow:
 
     @pytest.mark.asyncio
     async def test_workflow_completed_block_plan_cans_instead_of_returning(self):
-        req = _mk_retry_request(new_input="fixed", event_type="WorkflowCompleted")
-        script = {"WorkflowCompleted": ("raise", _retryable_app_error(req))}
+        req = _mk_patch_request(new_input="fixed", event_type="WorkflowCompleted")
+        script = {"WorkflowCompleted": ("raise", _patch_app_error(req))}
         user = AsyncMock(return_value="user-result")
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=["orig"]))
@@ -1784,16 +1790,16 @@ class TestRetryableBlockExecuteWorkflow:
         assert mock.continue_as_new.call_args.args == ("fixed",)
 
     @pytest.mark.asyncio
-    async def test_activity_origin_retry_extracted_and_cans(self):
-        req = _mk_retry_request(new_input=[1, 2], event_type="ActivityCompleted")
-        user = AsyncMock(side_effect=_FakeActivityError(_retryable_app_error(req)))
-        with _patched_retryable_workflow({}) as mock:
+    async def test_activity_origin_patch_extracted_and_cans(self):
+        req = _mk_patch_request(new_input=[1, 2], event_type="ActivityCompleted")
+        user = AsyncMock(side_effect=_FakeActivityError(_patch_app_error(req)))
+        with _patched_patch_workflow({}) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=[]))
         # A list new_input is passed as ONE workflow argument.
         assert mock.continue_as_new.call_args.args == ([1, 2],)
-        # An activity-origin retry is NOT reported as WorkflowFailed.
+        # An activity-origin patch is NOT reported as WorkflowFailed.
         event_types = [
             c.kwargs["args"][0]["payload"]["event_type"]
             for c in mock.execute_activity.call_args_list
@@ -1802,9 +1808,9 @@ class TestRetryableBlockExecuteWorkflow:
 
     @pytest.mark.asyncio
     async def test_new_input_none_reuses_current_args(self):
-        req = _mk_retry_request(new_input=None, event_type="WorkflowStarted")
-        script = {"WorkflowStarted": ("raise", _retryable_app_error(req))}
-        with _patched_retryable_workflow(script) as mock:
+        req = _mk_patch_request(new_input=None, event_type="WorkflowStarted")
+        script = {"WorkflowStarted": ("raise", _patch_app_error(req))}
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(AsyncMock())
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=["a", "b"]))
@@ -1813,20 +1819,20 @@ class TestRetryableBlockExecuteWorkflow:
 
     @pytest.mark.asyncio
     async def test_budget_exhausted_raises_limit_and_no_can(self):
-        req = _mk_retry_request(new_input="x", event_type="WorkflowStarted")
-        script = {"WorkflowStarted": ("raise", _retryable_app_error(req))}
+        req = _mk_patch_request(new_input="x", event_type="WorkflowStarted")
+        script = {"WorkflowStarted": ("raise", _patch_app_error(req))}
         # memo counter already at the default cap (3) → next would be 4 > 3.
-        with _patched_retryable_workflow(script, memo_value=3) as mock:
+        with _patched_patch_workflow(script, memo_value=3) as mock:
             inbound = _make_inbound(AsyncMock())
             with pytest.raises(ApplicationError) as exc:
                 await inbound.execute_workflow(MagicMock(args=[]))
-        assert exc.value.type == GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
+        assert exc.value.type == GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
         mock.continue_as_new.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_genuine_failure_reports_workflow_failed_and_reraises(self):
         user = AsyncMock(side_effect=ValueError("boom"))
-        with _patched_retryable_workflow({}) as mock:
+        with _patched_patch_workflow({}) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(ValueError):
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -1838,15 +1844,15 @@ class TestRetryableBlockExecuteWorkflow:
         mock.continue_as_new.assert_not_called()
 
 
-class TestSendGovernanceEventRetryable:
-    """Dispatcher-level retryable-block conversion + legacy degrade."""
+class TestSendGovernanceEventPatch:
+    """Dispatcher-level BLOCK-with-patch conversion + legacy degrade."""
 
     @pytest.fixture
     def mock_workflow(self):
         with patch("openbox.workflow_interceptor.workflow") as mock:
             yield mock
 
-    def _err(self, event_type="SignalReceived", schema_version=1):
+    def _err(self, event_type="SignalReceived", schema_version=1, error_type=None):
         return ApplicationError(
             "restart",
             {
@@ -1858,7 +1864,7 @@ class TestSendGovernanceEventRetryable:
                 "governance_event_id": None,
                 "reason": None,
             },
-            type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+            type=error_type or GOVERNANCE_PATCH_ERROR_TYPE,
             non_retryable=True,
         )
 
@@ -1868,20 +1874,37 @@ class TestSendGovernanceEventRetryable:
             side_effect=self._err("WorkflowStarted")
         )
         result = await _send_governance_event(
-            {"event_type": "WorkflowStarted"}, 30.0, retryable_block_enabled=True
+            {"event_type": "WorkflowStarted"}, 30.0, patch_enabled=True
         )
-        assert isinstance(result, RetryableBlockRequest)
+        assert isinstance(result, PatchRequest)
+        assert result.new_input == "x"
+
+    @pytest.mark.asyncio
+    async def test_enabled_accepts_legacy_pre_rename_error_type(self, mock_workflow):
+        """Replay safety: an already-recorded history may still carry the legacy
+        ``GovernanceRetryableBlock`` type on an in-flight restart chain started
+        before the patch rename — the dispatcher must extract it exactly like the
+        current ``GovernancePatch`` type asserted above."""
+        mock_workflow.execute_activity = AsyncMock(
+            side_effect=self._err(
+                "WorkflowStarted", error_type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
+            )
+        )
+        result = await _send_governance_event(
+            {"event_type": "WorkflowStarted"}, 30.0, patch_enabled=True
+        )
+        assert isinstance(result, PatchRequest)
         assert result.new_input == "x"
 
     @pytest.mark.asyncio
     async def test_disabled_degrades_signal_to_block_dict(self, mock_workflow):
-        """Legacy/unpatched caller: a retryable signal degrades to a blocking dict
-        (never ALLOW), so the legacy signal path still blocks."""
+        """Legacy/unpatched caller: a signal carrying a patch degrades to a
+        blocking dict (never ALLOW), so the legacy signal path still blocks."""
         mock_workflow.execute_activity = AsyncMock(
             side_effect=self._err("SignalReceived")
         )
         result = await _send_governance_event(
-            {"event_type": "SignalReceived"}, 30.0, retryable_block_enabled=False
+            {"event_type": "SignalReceived"}, 30.0, patch_enabled=False
         )
         assert result == {
             "success": True,
@@ -1895,7 +1918,7 @@ class TestSendGovernanceEventRetryable:
             side_effect=self._err("WorkflowStarted")
         )
         result = await _send_governance_event(
-            {"event_type": "WorkflowStarted"}, 30.0, retryable_block_enabled=False
+            {"event_type": "WorkflowStarted"}, 30.0, patch_enabled=False
         )
         assert result is None
 
@@ -1909,7 +1932,7 @@ class TestSendGovernanceEventRetryable:
             side_effect=self._err("SignalReceived", schema_version=999)
         )
         result = await _send_governance_event(
-            {"event_type": "SignalReceived"}, 30.0, retryable_block_enabled=True
+            {"event_type": "SignalReceived"}, 30.0, patch_enabled=True
         )
         assert result == {
             "success": True,
@@ -1918,9 +1941,9 @@ class TestSendGovernanceEventRetryable:
         }
 
 
-class TestRetryableBlockSignals:
-    """Phase-6 signal handling: retryable signals submit to the coordinator and
-    never invoke the user handler; plain/legacy stops keep the existing bridge."""
+class TestPatchSignals:
+    """Phase-6 signal handling: signals carrying a patch submit to the coordinator
+    and never invoke the user handler; plain/legacy stops keep the existing bridge."""
 
     def _inbound_with_coordinator(self, coordinator, state=None):
         interceptor = GovernanceInterceptor(
@@ -1936,26 +1959,26 @@ class TestRetryableBlockSignals:
         return inbound, mock_next
 
     @pytest.mark.asyncio
-    async def test_retryable_signal_submits_and_skips_user_handler(self):
-        req = _mk_retry_request(new_input="fix", event_type="SignalReceived")
-        script = {"SignalReceived": ("raise", _retryable_app_error(req))}
-        coord = RetryableBlockCoordinator()
-        with _patched_retryable_workflow(script):
+    async def test_patch_signal_submits_and_skips_user_handler(self):
+        req = _mk_patch_request(new_input="fix", event_type="SignalReceived")
+        script = {"SignalReceived": ("raise", _patch_app_error(req))}
+        coord = PatchCoordinator()
+        with _patched_patch_workflow(script):
             inbound, mock_next = self._inbound_with_coordinator(coord)
             await inbound.handle_signal(MagicMock(signal="s", args=[]))
         assert coord.get_request() == req
         mock_next.handle_signal.assert_not_called()  # user handler skipped
 
     @pytest.mark.asyncio
-    async def test_retryable_signal_without_coordinator_falls_back_to_block(self):
-        req = _mk_retry_request(new_input="fix", event_type="SignalReceived")
-        script = {"SignalReceived": ("raise", _retryable_app_error(req))}
+    async def test_patch_signal_without_coordinator_falls_back_to_block(self):
+        req = _mk_patch_request(new_input="fix", event_type="SignalReceived")
+        script = {"SignalReceived": ("raise", _patch_app_error(req))}
         state = TemporalGovernanceState()
-        with _patched_retryable_workflow(script):
+        with _patched_patch_workflow(script):
             inbound, mock_next = self._inbound_with_coordinator(None, state=state)
             await inbound.handle_signal(MagicMock(signal="s", args=[]))
         # Fail safe: enforced as a plain block via the activity bridge.
-        assert state.get_signal_verdict("wf-1", "run-1") == (Verdict.BLOCK, "retry")
+        assert state.get_signal_verdict("wf-1", "run-1") == (Verdict.BLOCK, "patch")
         mock_next.handle_signal.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1964,8 +1987,8 @@ class TestRetryableBlockSignals:
     ):
         script = {"SignalReceived": ("return", {"verdict": "block", "reason": "r"})}
         state = TemporalGovernanceState()
-        coord = RetryableBlockCoordinator()
-        with _patched_retryable_workflow(script):
+        coord = PatchCoordinator()
+        with _patched_patch_workflow(script):
             inbound, mock_next = self._inbound_with_coordinator(coord, state=state)
             await inbound.handle_signal(MagicMock(signal="s", args=[]))
         # Plain BLOCK keeps the existing bridge behavior + the user handler runs.
@@ -1974,15 +1997,15 @@ class TestRetryableBlockSignals:
         mock_next.handle_signal.assert_awaited_once()
 
 
-class TestRetryableBlockWorkflowFailedAndCoordinator:
-    """Phase-6 WorkflowFailed-origin retry, HALT dominance, coordinator-win."""
+class TestPatchWorkflowFailedAndCoordinator:
+    """Phase-6 WorkflowFailed-origin patch, HALT dominance, coordinator-win."""
 
     @pytest.mark.asyncio
     async def test_workflow_failed_with_plan_cans_overriding_failure(self):
-        req = _mk_retry_request(new_input="recovered", event_type="WorkflowFailed")
-        script = {"WorkflowFailed": ("raise", _retryable_app_error(req))}
+        req = _mk_patch_request(new_input="recovered", event_type="WorkflowFailed")
+        script = {"WorkflowFailed": ("raise", _patch_app_error(req))}
         user = AsyncMock(side_effect=ValueError("boom"))
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -2000,7 +2023,7 @@ class TestRetryableBlockWorkflowFailedAndCoordinator:
         )
         script = {"WorkflowFailed": ("raise", halt)}
         user = AsyncMock(side_effect=ValueError("original"))
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(ValueError, match="original"):
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -2014,27 +2037,27 @@ class TestRetryableBlockWorkflowFailedAndCoordinator:
         api_err = ApplicationError("api down", type="GovernanceAPIError")
         script = {"WorkflowFailed": ("raise", api_err)}
         user = AsyncMock(side_effect=ValueError("original"))
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(ValueError, match="original"):
                 await inbound.execute_workflow(MagicMock(args=[]))
         mock.continue_as_new.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_halt_dominates_coordinator_retry_request(self):
-        """User code submits a retry to the coordinator, then the same turn raises
-        HALT — HALT wins (priority: HALT > retryable BLOCK), no Continue-As-New."""
-        req = _mk_retry_request(new_input="x", event_type="Handoff")
+    async def test_halt_dominates_coordinator_patch_request(self):
+        """User code submits a patch to the coordinator, then the same turn raises
+        HALT — HALT wins (priority: HALT > BLOCK with patch), no Continue-As-New."""
+        req = _mk_patch_request(new_input="x", event_type="Handoff")
 
         async def user(_input):
-            from openbox.retry_coordinator import get_coordinator
+            from openbox.patch_coordinator import get_coordinator
 
             get_coordinator().submit(req)
             raise ApplicationError(
                 "halt", type=GOVERNANCE_HALT_ERROR_TYPE, non_retryable=True
             )
 
-        with _patched_retryable_workflow({}) as mock:
+        with _patched_patch_workflow({}) as mock:
             inbound = _make_inbound(AsyncMock(side_effect=user))
             with pytest.raises(ApplicationError) as exc:
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -2045,34 +2068,34 @@ class TestRetryableBlockWorkflowFailedAndCoordinator:
     async def test_coordinator_win_continues_as_new_after_submission(self):
         """A submission reachable via the run-scoped ContextVar (handoff-style)
         drives Continue-As-New from the main path."""
-        req = _mk_retry_request(new_input="via-coord", event_type="Handoff")
+        req = _mk_patch_request(new_input="via-coord", event_type="Handoff")
 
         async def user(_input):
-            from openbox.retry_coordinator import get_coordinator
+            from openbox.patch_coordinator import get_coordinator
 
             get_coordinator().submit(req)
             return "done"
 
-        with _patched_retryable_workflow({}) as mock:
+        with _patched_patch_workflow({}) as mock:
             inbound = _make_inbound(AsyncMock(side_effect=user))
             with pytest.raises(_ContinueAsNewSignal):
                 await inbound.execute_workflow(MagicMock(args=[]))
         assert mock.continue_as_new.call_args.args == ("via-coord",)
 
     @pytest.mark.asyncio
-    async def test_halt_in_user_exception_not_overridden_by_failed_retry(self):
+    async def test_halt_in_user_exception_not_overridden_by_failed_patch(self):
         """A genuine HALT surfacing through user code dominates: it is re-raised and
-        NEVER overridden by a WorkflowFailed retry plan (priority HALT > retryable
-        BLOCK; acceptance: HALT never restarts). The WorkflowFailed evaluation must
+        NEVER overridden by a WorkflowFailed patch (priority HALT > BLOCK with
+        patch; acceptance: HALT never restarts). The WorkflowFailed evaluation must
         not even be reached."""
         halt = ApplicationError(
             "halt", type=GOVERNANCE_HALT_ERROR_TYPE, non_retryable=True
         )
-        req = _mk_retry_request(new_input="x", event_type="WorkflowFailed")
-        # WorkflowFailed would return a plan if reached — it must NOT be reached.
-        script = {"WorkflowFailed": ("raise", _retryable_app_error(req))}
+        req = _mk_patch_request(new_input="x", event_type="WorkflowFailed")
+        # WorkflowFailed would return a patch if reached — it must NOT be reached.
+        script = {"WorkflowFailed": ("raise", _patch_app_error(req))}
         user = AsyncMock(side_effect=halt)
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(user)
             with pytest.raises(ApplicationError) as exc_info:
                 await inbound.execute_workflow(MagicMock(args=[]))
@@ -2093,7 +2116,7 @@ class TestRetryableBlockWorkflowFailedAndCoordinator:
 
 def _pre_input_patched(marker, *args, **kwargs):
     """Simulate a history predating the workflow-start-input marker: the legacy
-    execute path (retryable-block marker absent) with the input marker also
+    execute path (patch-restart marker absent) with the input marker also
     absent, so WorkflowStarted reproduces the exact pre-feature payload."""
     return marker not in (_RETRYABLE_BLOCK_PATCH, _WORKFLOW_START_INPUT_PATCH)
 
@@ -2199,11 +2222,11 @@ class TestWorkflowStartedInput:
         payloads = await _legacy_workflow_started_payloads([1, 2], send_start=False)
         assert payloads == []
 
-    # --- wiring: retryable execute path --------------------------------------- #
+    # --- wiring: patch-restart execute path ------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_retryable_started_event_includes_same_input_shape(self):
-        with _patched_retryable_workflow({}) as mock:
+    async def test_patch_started_event_includes_same_input_shape(self):
+        with _patched_patch_workflow({}) as mock:
             inbound = _make_inbound(AsyncMock(return_value="ok"))
             await inbound.execute_workflow(MagicMock(args=[{"query": "hello"}, 3]))
         started = [
@@ -2219,7 +2242,7 @@ class TestWorkflowStartedInput:
     @pytest.mark.asyncio
     async def test_signal_received_unchanged_and_carries_no_activity_input(self):
         script = {"SignalReceived": ("return", {"verdict": "allow"})}
-        with _patched_retryable_workflow(script) as mock:
+        with _patched_patch_workflow(script) as mock:
             inbound = _make_inbound(AsyncMock(return_value="ok"))
             await inbound.handle_signal(MagicMock(signal="s", args=["a", {"k": 1}]))
         payload = mock.execute_activity.call_args_list[0].kwargs["args"][0]["payload"]

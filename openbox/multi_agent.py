@@ -101,8 +101,8 @@ async def emit_handoff(
 
     Raises:
         ValueError: if required fields are missing/empty.
-        RetryableBlockControl: when governance returns a valid retryable BLOCK —
-            an SDK-owned control signal that unwinds user code so the inbound
+        PatchControl: when governance returns a valid BLOCK with patch — an
+            SDK-owned control signal that unwinds user code so the inbound
             interceptor can Continue-As-New. Like cancellation, application code
             must not catch/suppress it (it subclasses ``BaseException``).
     """
@@ -111,15 +111,15 @@ async def emit_handoff(
     payload = build_handoff_payload(from_agent_did, multi_agent_session_id, ts)
 
     # Reuse the workflow-sandbox-safe activity dispatcher (no signing here).
-    from .retryable_block import RetryableBlockRequest
+    from .patch import PatchRequest
     from .workflow_interceptor import _RETRYABLE_BLOCK_PATCH, _send_governance_event
 
-    rb_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
+    patch_enabled = workflow.patched(_RETRYABLE_BLOCK_PATCH)
     outcome = await _send_governance_event(
-        payload, timeout, on_api_error, retryable_block_enabled=rb_enabled
+        payload, timeout, on_api_error, patch_enabled=patch_enabled
     )
-    if rb_enabled and isinstance(outcome, RetryableBlockRequest):
-        from .retry_coordinator import RetryableBlockControl, get_coordinator
+    if patch_enabled and isinstance(outcome, PatchRequest):
+        from .patch_coordinator import PatchControl, get_coordinator
 
         coordinator = get_coordinator()
         if coordinator is None:
@@ -137,7 +137,7 @@ async def emit_handoff(
         coordinator.submit(outcome)  # first-wins; the interceptor performs CAN
         # Raise (not return): unwind user code immediately so no statement after
         # `await emit_handoff(...)` runs before the workflow Continue-As-News.
-        raise RetryableBlockControl("handoff requested workflow restart")
+        raise PatchControl("handoff requested workflow restart")
 
     return outcome  # ALLOW dict / fail-open None unchanged
 

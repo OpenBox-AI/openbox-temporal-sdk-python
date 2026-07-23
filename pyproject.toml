@@ -1,6 +1,6 @@
 [project]
 name = "openbox-temporal-sdk-python"
-version = "1.3.0"
+version = "1.4.0"
 description = "OpenBox SDK - Governance and observability for Temporal workflows"
 authors = [
     { name = "OpenBox Team", email = "tino@openbox.ai" },
@@ -50,8 +50,8 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
     # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
     # client, context runtime, generic instrumentation, conformance kit.
-    # Retryable-BLOCK restart needs handle_retryable_block (base SDK >= 1.1.0).
-    "openbox-sdk-python>=1.1.0",
+    # BLOCK-with-patch restart needs handle_patch (base SDK >= 1.2.0).
+    "openbox-sdk-python>=1.2.0",
 ]
 
 [project.urls]
@@ -60,6 +60,14 @@ Documentation = "https://github.com/OpenBox-AI/temporal-sdk-python#readme"
 Repository = "https://github.com/OpenBox-AI/temporal-sdk-python.git"
 Issues = "https://github.com/OpenBox-AI/temporal-sdk-python/issues"
 Changelog = "https://github.com/OpenBox-AI/temporal-sdk-python/blob/main/CHANGELOG.md"
+
+# TEMPORARY (local dev/test only): openbox-sdk-python 1.2.0 is not yet published
+# to PyPI. Point the >=1.2.0 pin above at the sibling renamed-base-SDK checkout so
+# `uv lock` / `uv sync` resolve locally instead of failing on a missing release.
+# Remove this override once 1.2.0 is published (final PyPI source strategy is a
+# human/release decision, tracked outside this file).
+[tool.uv.sources]
+openbox-sdk-python = { path = "../openbox-sdk-python", editable = true }
 
 [dependency-groups]
 dev = [
