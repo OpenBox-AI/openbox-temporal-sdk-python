@@ -12,8 +12,8 @@ object holds ONLY the Temporal effects the base runtime cannot express itself:
 - **completed-hook stop bridge** — a completed-hook BLOCK/HALT resolved by the
   base runtime is recorded here (keyed by workflow/run/activity) so the activity
   interceptor can skip a duplicate completed event (BLOCK), reach Temporal's
-  terminate path (HALT), or raise a retryable-BLOCK restart request (BLOCK with
-  a valid retry plan) after user code returns, then clear it.
+  terminate path (HALT), or raise a BLOCK-with-patch restart request (BLOCK with
+  a valid patch) after user code returns, then clear it.
 
 All keys are RUN-SCOPED: state from a prior run with the same ``workflow_id`` is
 ignored and cleared. Thread-safe — activities run on worker threads.
@@ -25,7 +25,7 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from .retryable_block import RetryableBlockRequest
+from .patch import PatchRequest
 from .types import Verdict
 
 __all__ = ["TemporalGovernanceState", "CompletedStop"]
@@ -39,15 +39,15 @@ class CompletedStop:
     """A completed-hook BLOCK/HALT resolved by the base runtime, recorded for the
     activity interceptor to consume after user code returns.
 
-    ``request`` carries the full retryable-BLOCK directive when the completed
-    verdict is an exact BLOCK with a valid retry plan; it is ``None`` for HALT
-    (the base contract never attaches a retry plan to HALT) and for a plain
+    ``request`` carries the full BLOCK-with-patch directive when the completed
+    verdict is an exact BLOCK with a valid patch; it is ``None`` for HALT
+    (the base contract never attaches a patch to HALT) and for a plain
     BLOCK without one.
     """
 
     verdict: Verdict
     reason: Optional[str]
-    request: Optional[RetryableBlockRequest] = None
+    request: Optional[PatchRequest] = None
 
 
 class TemporalGovernanceState:
@@ -113,12 +113,12 @@ class TemporalGovernanceState:
         activity_id: str,
         verdict: Verdict,
         reason: Optional[str] = None,
-        request: Optional[RetryableBlockRequest] = None,
+        request: Optional[PatchRequest] = None,
     ) -> None:
         """A completed-hook BLOCK/HALT resolved by the base runtime. Affects only
         FUTURE execution — the operation already ran. ``request`` carries the
-        full retryable-BLOCK directive when the completed verdict is an exact
-        BLOCK with a valid retry plan."""
+        full BLOCK-with-patch directive when the completed verdict is an exact
+        BLOCK with a valid patch."""
         with self._lock:
             self._completed_stop[(workflow_id, run_id, activity_id)] = CompletedStop(
                 verdict, reason, request

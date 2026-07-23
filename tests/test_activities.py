@@ -23,7 +23,7 @@ from openbox.activities import (
     raise_governance_block,
     send_governance_event,
 )
-from openbox.retryable_block import GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION
 
 from .conftest import posted_payload
 
@@ -805,10 +805,10 @@ class TestSendGovernanceEvent:
             assert result["verdict"] == result["action"]
 
     # -------------------------------------------------------------------------
-    # Retryable-BLOCK restart transport tests
+    # BLOCK-with-patch restart transport tests
     # -------------------------------------------------------------------------
 
-    RETRY_EVENT_TYPES = [
+    PATCH_EVENT_TYPES = [
         "WorkflowStarted",
         "WorkflowCompleted",
         "WorkflowFailed",
@@ -824,23 +824,23 @@ class TestSendGovernanceEvent:
         response.json.return_value = data
         return response
 
-    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
-    async def test_block_with_valid_retry_plan_raises_retryable_block_error(
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_block_with_valid_patch_raises_patch_error(
         self, base_input, event_type
     ):
-        """A BLOCK verdict carrying a valid retry_plan raises the versioned restart
+        """A BLOCK verdict carrying a valid patch raises the versioned restart
         error for every workflow-sourced event type, never the plain GovernanceBlock
-        (SignalReceived included — the retry check runs before the signal-return
+        (SignalReceived included — the patch check runs before the signal-return
         special case)."""
         base_input["payload"]["event_type"] = event_type
         response = self._mock_response(
             {
                 "verdict": "block",
-                "reason": "retry with corrected input",
-                "policy_id": "policy-retry",
+                "reason": "patch with corrected input",
+                "policy_id": "policy-patch",
                 "risk_score": 0.8,
-                "governance_event_id": "evt_retry_1",
-                "retry_plan": {"new_input": {"query": "corrected"}},
+                "governance_event_id": "evt_patch_1",
+                "patch": {"new_input": {"query": "corrected"}},
             }
         )
 
@@ -852,24 +852,24 @@ class TestSendGovernanceEvent:
             with pytest.raises(ApplicationError) as exc_info:
                 await send_governance_event(base_input)
 
-            assert exc_info.value.type == "GovernanceRetryableBlock"
+            assert exc_info.value.type == "GovernancePatch"
             assert exc_info.value.non_retryable is True
             details = exc_info.value.details
             assert len(details) == 1
             detail = details[0]
-            assert detail["schema_version"] == GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+            assert detail["schema_version"] == GOVERNANCE_PATCH_SCHEMA_VERSION
             assert detail["new_input"] == {"query": "corrected"}
             assert detail["event_type"] == event_type
-            assert detail["governance_event_id"] == "evt_retry_1"
-            assert detail["reason"] == "retry with corrected input"
+            assert detail["governance_event_id"] == "evt_patch_1"
+            assert detail["reason"] == "patch with corrected input"
             assert detail["hook_trigger"] is False
             assert detail["hook_stage"] is None
 
-    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
-    async def test_plain_block_without_retry_plan_preserves_existing_behavior(
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_plain_block_without_patch_preserves_existing_behavior(
         self, base_input, event_type
     ):
-        """A BLOCK verdict with no retry_plan is unaffected by the restart transport:
+        """A BLOCK verdict with no patch is unaffected by the restart transport:
         SignalReceived still returns the result dict, every other event type still
         raises the plain GovernanceBlock."""
         base_input["payload"]["event_type"] = event_type
@@ -897,11 +897,11 @@ class TestSendGovernanceEvent:
                     await send_governance_event(base_input)
                 assert exc_info.value.type == "GovernanceBlock"
 
-    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
-    async def test_halt_with_retry_plan_never_raises_retryable_block_error(
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_halt_with_patch_never_raises_patch_error(
         self, base_input, event_type
     ):
-        """HALT keeps its existing stop handling even when a retry_plan is present —
+        """HALT keeps its existing stop handling even when a patch is present —
         the restart transport gates on an exact BLOCK verdict and never fires for
         HALT, regardless of event type."""
         from openbox.activities import set_temporal_client
@@ -914,7 +914,7 @@ class TestSendGovernanceEvent:
                 "reason": "Emergency halt",
                 "policy_id": "emergency-policy",
                 "risk_score": 1.0,
-                "retry_plan": {"new_input": {"query": "corrected"}},
+                "patch": {"new_input": {"query": "corrected"}},
             }
         )
 
@@ -932,9 +932,9 @@ class TestSendGovernanceEvent:
                     await send_governance_event(base_input)
                 assert exc_info.value.type == "GovernanceHalt"
 
-    @pytest.mark.parametrize("event_type", RETRY_EVENT_TYPES)
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
     @pytest.mark.parametrize("verdict", ["allow", "constrain"])
-    async def test_allow_and_constrain_success_dict_unaffected_by_retry_support(
+    async def test_allow_and_constrain_success_dict_unaffected_by_patch_support(
         self, base_input, event_type, verdict
     ):
         """ALLOW / CONSTRAIN keep returning the plain success dict — the restart

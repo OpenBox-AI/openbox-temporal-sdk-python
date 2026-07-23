@@ -144,37 +144,27 @@ class TestGovernanceConfigCustomValues:
         config = GovernanceConfig(max_body_size=1024)
         assert config.max_body_size == 1024
 
-    def test_default_max_retryable_block_restarts(self):
-        """Default retryable-BLOCK restart budget is 3."""
-        assert GovernanceConfig().max_retryable_block_restarts == 3
+    def test_default_max_patch_restarts(self):
+        """Default BLOCK-with-patch restart budget is 3."""
+        assert GovernanceConfig().max_patch_restarts == 3
 
-    def test_custom_max_retryable_block_restarts(self):
+    def test_custom_max_patch_restarts(self):
         """Custom restart budget is honored."""
-        assert (
-            GovernanceConfig(
-                max_retryable_block_restarts=5
-            ).max_retryable_block_restarts
-            == 5
-        )
+        assert GovernanceConfig(max_patch_restarts=5).max_patch_restarts == 5
 
-    def test_max_retryable_block_restarts_min_one_is_valid(self):
+    def test_max_patch_restarts_min_one_is_valid(self):
         """A budget of exactly 1 is the minimum valid value."""
-        assert (
-            GovernanceConfig(
-                max_retryable_block_restarts=1
-            ).max_retryable_block_restarts
-            == 1
-        )
+        assert GovernanceConfig(max_patch_restarts=1).max_patch_restarts == 1
 
-    def test_max_retryable_block_restarts_zero_raises(self):
+    def test_max_patch_restarts_zero_raises(self):
         """Zero is invalid and rejected on the dataclass itself (single source of truth)."""
         with pytest.raises(OpenBoxConfigError):
-            GovernanceConfig(max_retryable_block_restarts=0)
+            GovernanceConfig(max_patch_restarts=0)
 
-    def test_max_retryable_block_restarts_negative_raises(self):
+    def test_max_patch_restarts_negative_raises(self):
         """Negative budgets are rejected on direct construction."""
         with pytest.raises(OpenBoxConfigError):
-            GovernanceConfig(max_retryable_block_restarts=-2)
+            GovernanceConfig(max_patch_restarts=-2)
 
     def test_custom_skip_activity_types(self):
         """Test setting custom skip_activity_types replaces default."""

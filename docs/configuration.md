@@ -31,25 +31,25 @@
 | `hitl_enabled` | `bool` | `True` | Enable approval polling for `REQUIRE_APPROVAL` |
 | `hitl_poll_interval_ms` | `int` | `5000` | Polling interval in milliseconds for approval status |
 
-## Retryable BLOCK Restart
+## BLOCK-with-Patch Restart
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `max_retryable_block_restarts` | `int` | `3` | Maximum Continue-As-New restarts triggered by a BLOCK with `retry_plan`. Minimum value: `1`. Applies uniformly across all governance event origins. When the count would exceed this limit, the workflow fails with a non-retryable `GovernanceRetryLimitExceeded` error. |
+| `max_patch_restarts` | `int` | `3` | Maximum Continue-As-New restarts triggered by a BLOCK with `patch`. Minimum value: `1`. Applies uniformly across all governance event origins. When the count would exceed this limit, the workflow fails with a non-retryable `GovernancePatchLimitExceeded` error. |
 
 ### Semantics
 
-A governance response carrying `BLOCK` with a valid `retry_plan` (containing `new_input`) will:
+A governance response carrying `BLOCK` with a valid `patch` (containing `new_input`) will:
 
 1. **Stop the current execution path** with a non-retryable error signal
 2. **Not retry** the blocked activity with the same input (Temporal activity retry is bypassed)
-3. **Restart the workflow via Continue-As-New** using `retry_plan.new_input` as replacement input
+3. **Restart the workflow via Continue-As-New** using `patch.new_input` as replacement input
    - If `new_input` is `null`, all arguments of the current run are reused exactly
    - If `new_input` is a non-null value, it is passed as one workflow argument
 4. **Keep the same Workflow ID** — the previous run closes as `ContinuedAsNew`; a new Run ID is issued for the restarted execution
-5. **Track restarts across the chain** — a global counter (per workflow ID) increments with each restart and is bounded by `max_retryable_block_restarts` to prevent infinite loops
+5. **Track restarts across the chain** — a global counter (per workflow ID) increments with each restart and is bounded by `max_patch_restarts` to prevent infinite loops
 
-This behavior is **event-agnostic**. The following governance event types all support retryable BLOCK:
+This behavior is **event-agnostic**. The following governance event types all support BLOCK with patch:
 
 - `WorkflowStarted`
 - `WorkflowCompleted`
@@ -61,15 +61,15 @@ This behavior is **event-agnostic**. The following governance event types all su
 - Started and completed hooks
 - Approval polling responses
 
-**Origins that do NOT restart:** `HALT`, expired approvals, malformed plans, and plain BLOCK (without a valid `retry_plan`) use existing behavior.
+**Origins that do NOT restart:** `HALT`, expired approvals, malformed patches, and plain BLOCK (without a valid `patch`) use existing behavior.
 
 ### Critical: Idempotency and Side Effects
 
-**This is the most important user-facing hazard.** A retry plan may be produced *after* side effects have already occurred:
+**This is the most important user-facing hazard.** A patch may be produced *after* side effects have already occurred:
 
-- A policy may return a retry plan in response to `ActivityCompleted` — after your activity already ran and may have modified external state
-- A completed hook may return a retry plan — after the operation has occurred
-- `WorkflowCompleted` or `WorkflowFailed` may return a retry plan — after your workflow has executed and potentially caused side effects
+- A policy may return a patch in response to `ActivityCompleted` — after your activity already ran and may have modified external state
+- A completed hook may return a patch — after the operation has occurred
+- `WorkflowCompleted` or `WorkflowFailed` may return a patch — after your workflow has executed and potentially caused side effects
 
 **You are responsible for ensuring safety:**
 
@@ -78,7 +78,7 @@ This behavior is **event-agnostic**. The following governance event types all su
 - **Policy authors and governance integrators own emitting safe replacement input.** The SDK does not validate that `new_input` is safe; it assumes the governance policy has vetted the input and the consequences of re-execution.
 - **The SDK adds no source-specific restrictions.** You have full control and full responsibility.
 
-Log any external state changes with identifiers your team can use to trace and reconcile retries. Monitor governance restart counts to detect policy bugs that cause repeated retries.
+Log any external state changes with identifiers your team can use to trace and reconcile restarts. Monitor governance restart counts to detect policy bugs that cause repeated restarts.
 
 ## Identity & Signing (AIP DID)
 

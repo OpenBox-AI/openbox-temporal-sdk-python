@@ -125,20 +125,19 @@ class GovernanceConfig:
     # Temporal currently uses its native retry backoff for HITL polling.
     hitl_poll_interval_ms: int = 5000
 
-    # Maximum Continue-As-New restarts a retryable BLOCK may trigger across the
+    # Maximum Continue-As-New restarts a BLOCK with patch may trigger across the
     # whole workflow chain (bounded input-remediation loop). Applies uniformly to
     # every event origin; must be >= 1.
-    max_retryable_block_restarts: int = 3
+    max_patch_restarts: int = 3
 
     def __post_init__(self) -> None:
         # GovernanceConfig is public and can be handed directly to an interceptor,
         # bypassing the factory/plugin — so validation lives on the dataclass (the
         # single source of truth), not only at the call sites. Pure + sandbox-safe:
         # raises the already-imported OpenBoxConfigError, no logging/IO.
-        if self.max_retryable_block_restarts < 1:
+        if self.max_patch_restarts < 1:
             raise OpenBoxConfigError(
-                "max_retryable_block_restarts must be >= 1 "
-                f"(got {self.max_retryable_block_restarts})"
+                "max_patch_restarts must be >= 1 " f"(got {self.max_patch_restarts})"
             )
 
 
