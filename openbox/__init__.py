@@ -6,7 +6,7 @@
 # it crashes the workflow sandbox as a circular import, lazily it recurses
 # unboundedly from build_auth_headers on every evaluate. Keep in sync with
 # pyproject.toml on release.
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 from .config import GovernanceConfig, get_global_config, initialize
 from .errors import (
@@ -31,11 +31,8 @@ from .errors import (
 # signing/HTTP routed lazily through the governance activity).
 from .multi_agent import emit_handoff
 
-# Retryable-BLOCK restart envelope (sandbox-safe: pure stdlib + base contracts).
-from .retryable_block import (
-    GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
-    RetryableBlockRequest,
-)
+# BLOCK-with-patch restart envelope (sandbox-safe: pure stdlib + base contracts).
+from .patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
 from .types import (
     GovernanceVerdictResponse,
     GuardrailsCheckResult,
@@ -110,8 +107,8 @@ __all__ = [
     "WorkflowEventType",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
-    "RetryableBlockRequest",
-    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
+    "PatchRequest",
+    "GOVERNANCE_PATCH_SCHEMA_VERSION",
     "emit_handoff",
     "GovernanceInterceptor",
     "enforce_verdict",

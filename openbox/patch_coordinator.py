@@ -2,13 +2,13 @@
 control-flow signal for Continue-As-New.
 
 These are the sandbox-safe, deterministic primitives the workflow boundary uses to
-honor a retryable BLOCK. Sandbox-safe: at module top level this imports ONLY stdlib
+honor a BLOCK with patch. Sandbox-safe: at module top level this imports ONLY stdlib
 (``contextvars``), ``temporalio.workflow``, ``temporalio.exceptions.ApplicationError``
 (both pure/sandbox-safe — the workflow interceptor imports them the same way), and
 the pure envelope module. No ``httpx`` / ``logging`` / crypto. Guarded by
 ``tests/test_workflow_sandbox_import_safety.py``.
 
-The pure request envelope + normalizer live in the sibling ``openbox/retryable_block.py``
+The pure request envelope + normalizer live in the sibling ``openbox/patch.py``
 (which has no ``temporalio`` dependency); this module adds the workflow-runtime
 pieces on top of it.
 """
@@ -21,12 +21,12 @@ from typing import Optional
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
-from .errors import GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
-from .retryable_block import RetryableBlockRequest
+from .errors import GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
+from .patch import PatchRequest
 
 __all__ = [
-    "RetryableBlockControl",
-    "RetryableBlockCoordinator",
+    "PatchControl",
+    "PatchCoordinator",
     "bind_coordinator",
     "unbind_coordinator",
     "get_coordinator",
@@ -35,8 +35,8 @@ __all__ = [
 ]
 
 
-class RetryableBlockControl(BaseException):
-    """Internal control-flow signal: a retry request was submitted; unwind the user
+class PatchControl(BaseException):
+    """Internal control-flow signal: a patch request was submitted; unwind the user
     workflow task so no post-discovery user statement runs before Continue-As-New.
 
     Subclasses ``BaseException`` (not ``Exception``) so an ordinary
@@ -48,8 +48,8 @@ class RetryableBlockControl(BaseException):
     """
 
 
-class RetryableBlockCoordinator:
-    """Run-local, first-wins store for a single retry request.
+class PatchCoordinator:
+    """Run-local, first-wins store for a single patch request.
 
     Workflow code is single-threaded and deterministic, so no lock is needed. Holds
     no wall-clock or process-global state. Created once per workflow run by the
@@ -58,9 +58,9 @@ class RetryableBlockCoordinator:
     """
 
     def __init__(self) -> None:
-        self._request: Optional[RetryableBlockRequest] = None
+        self._request: Optional[PatchRequest] = None
 
-    def submit(self, req: RetryableBlockRequest) -> None:
+    def submit(self, req: PatchRequest) -> None:
         """Store the first request; later submits are ignored (first-wins)."""
         if self._request is None:
             self._request = req
@@ -68,7 +68,7 @@ class RetryableBlockCoordinator:
     def has_request(self) -> bool:
         return self._request is not None
 
-    def get_request(self) -> Optional[RetryableBlockRequest]:
+    def get_request(self) -> Optional[PatchRequest]:
         return self._request
 
 
@@ -76,31 +76,36 @@ class RetryableBlockCoordinator:
 # with a token at execute_workflow entry and ALWAYS reset in a finally, so a
 # coordinator never leaks into a sequential run (or an error path) on the same
 # worker event loop. Defaults to None between runs.
-_coordinator_var: contextvars.ContextVar[Optional[RetryableBlockCoordinator]] = (
-    contextvars.ContextVar("openbox_retry_coordinator", default=None)
+_coordinator_var: contextvars.ContextVar[Optional[PatchCoordinator]] = (
+    contextvars.ContextVar("openbox_patch_coordinator", default=None)
 )
 
 
 def bind_coordinator(
-    coordinator: RetryableBlockCoordinator,
-) -> "contextvars.Token[Optional[RetryableBlockCoordinator]]":
+    coordinator: PatchCoordinator,
+) -> "contextvars.Token[Optional[PatchCoordinator]]":
     """Bind the run-local coordinator; returns a token for ``unbind_coordinator``."""
     return _coordinator_var.set(coordinator)
 
 
 def unbind_coordinator(
-    token: "contextvars.Token[Optional[RetryableBlockCoordinator]]",
+    token: "contextvars.Token[Optional[PatchCoordinator]]",
 ) -> None:
     """Reset the ContextVar (call in a finally) so no coordinator leaks across runs."""
     _coordinator_var.reset(token)
 
 
-def get_coordinator() -> Optional[RetryableBlockCoordinator]:
+def get_coordinator() -> Optional[PatchCoordinator]:
     """The run-local coordinator bound for the current workflow run, or None."""
     return _coordinator_var.get()
 
 
 # Namespaced workflow-memo key holding the restart count across the whole chain.
+#
+# IMMUTABLE VALUE: this key name is written into the Continue-As-New memo of
+# already-running workflow chains. Renaming the string (not just this Python
+# identifier) would reset/lose the restart budget for any chain upgraded
+# mid-flight, so it must stay byte-exact across the patch rename.
 MEMO_RESTART_COUNT_KEY = "openbox_retryable_block_restart_count"
 
 
@@ -112,7 +117,7 @@ def next_restart_memo(max_restarts: int) -> dict:
     session id. Deterministic / replay-safe (``workflow.memo`` / ``workflow.memo_value``
     — never ``workflow.info().memo``, which is undecoded raw Payloads).
 
-    Raises ``ApplicationError(type=GovernanceRetryLimitExceeded, non_retryable=True)``
+    Raises ``ApplicationError(type=GovernancePatchLimitExceeded, non_retryable=True)``
     when the stored counter is not a non-negative int, or when the next restart would
     exceed ``max_restarts``.
     """
@@ -121,15 +126,15 @@ def next_restart_memo(max_restarts: int) -> dict:
     # bool is an int subclass — reject it and any non-int / negative counter.
     if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
         raise ApplicationError(
-            "Invalid retryable-block restart counter in workflow memo",
-            type=GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE,
+            "Invalid patch restart counter in workflow memo",
+            type=GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE,
             non_retryable=True,
         )
     nxt = raw + 1
     if nxt > max_restarts:
         raise ApplicationError(
-            f"Retryable-block restart limit ({max_restarts}) exceeded",
-            type=GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE,
+            f"Patch restart limit ({max_restarts}) exceeded",
+            type=GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE,
             non_retryable=True,
         )
     memo[MEMO_RESTART_COUNT_KEY] = nxt

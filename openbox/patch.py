@@ -1,4 +1,4 @@
-"""Retryable-BLOCK request envelope, normalizer, and error-transport extractor.
+"""BLOCK-with-patch request envelope, normalizer, and error-transport extractor.
 
 Pure and workflow-sandbox-safe: at module top level this imports ONLY stdlib
 (``dataclasses`` / ``typing``) and the pure base contract
@@ -8,13 +8,13 @@ crypto, so it is safe to import on a workflow-sandbox path (guarded by
 
 Every governance response — workflow lifecycle, signal, activity lifecycle, hook
 (started/completed), handoff, or HITL approval poll — passes through
-:func:`retryable_block_request` (which delegates to the base
-``handle_retryable_block``) before any BLOCK / HALT / guardrail / HITL
-enforcement. No caller inspects a raw ``retry_plan``.
+:func:`patch_request` (which delegates to the base ``handle_patch``) before any
+BLOCK / HALT / guardrail / HITL enforcement. No caller inspects a raw ``patch``
+directly.
 
 The Temporal restart coordinator, restart-budget helper, and the internal
 control-flow exception live in the sibling sandbox-safe module
-``openbox/retry_coordinator.py`` (it additionally imports ``temporalio.workflow``);
+``openbox/patch_coordinator.py`` (it additionally imports ``temporalio.workflow``);
 this module stays free of any ``temporalio`` dependency so the pure envelope is
 independently importable and testable.
 """
@@ -27,33 +27,33 @@ from typing import Any, Optional, Union
 from openbox_core.contracts.results import (
     ApprovalResult,
     EvaluationResult,
-    handle_retryable_block,
+    handle_patch,
 )
 
-from .errors import GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
+from .errors import GOVERNANCE_PATCH_ERROR_TYPE, GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
 
 __all__ = [
-    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
-    "RetryableBlockRequest",
-    "retryable_block_request",
-    "extract_retryable_block_request",
+    "GOVERNANCE_PATCH_SCHEMA_VERSION",
+    "PatchRequest",
+    "patch_request",
+    "extract_patch_request",
 ]
 
 # Envelope schema version. Bump ONLY on a breaking change to the detail payload;
 # ``from_dict`` rejects any other version (fail safe as plain BLOCK).
-GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION = 1
+GOVERNANCE_PATCH_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
-class RetryableBlockRequest:
-    """A base ``RetryDirective`` wrapped with Temporal origin metadata.
+class PatchRequest:
+    """A base ``PatchDirective`` wrapped with Temporal origin metadata.
 
     ``new_input`` follows the base wire contract: ``None`` (reuse the current run's
     input) | str | number | list | dict.
 
     ``event_type`` / ``hook_trigger`` / ``hook_stage`` are ORIGIN METADATA ONLY —
     never authorization. The single authorization signal is that the base
-    ``handle_retryable_block`` returned a directive.
+    ``handle_patch`` returned a directive.
     """
 
     schema_version: int
@@ -77,18 +77,18 @@ class RetryableBlockRequest:
         }
 
     @classmethod
-    def from_dict(cls, data: Any) -> Optional["RetryableBlockRequest"]:
+    def from_dict(cls, data: Any) -> Optional["PatchRequest"]:
         """Reconstruct from a detail dict, or return ``None`` on ANY contract
         violation (fail safe as plain BLOCK). Never raises.
 
         The ``new_input`` KEY must be PRESENT even when its value is ``null``: a
         present ``None`` is the valid "reuse current input" directive, while an
-        ABSENT key is a malformed envelope (mirrors the base ``_parse_retry_plan``
+        ABSENT key is a malformed envelope (mirrors the base ``_parse_patch``
         requiring exactly ``{new_input}``).
         """
         if not isinstance(data, dict):
             return None
-        if data.get("schema_version") != GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION:
+        if data.get("schema_version") != GOVERNANCE_PATCH_SCHEMA_VERSION:
             return None
         # Present-null is the valid reuse directive; an absent key is malformed.
         if "new_input" not in data:
@@ -110,7 +110,7 @@ class RetryableBlockRequest:
         if reason is not None and not isinstance(reason, str):
             return None
         return cls(
-            schema_version=GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+            schema_version=GOVERNANCE_PATCH_SCHEMA_VERSION,
             new_input=data["new_input"],
             governance_event_id=governance_event_id,
             reason=reason,
@@ -120,24 +120,24 @@ class RetryableBlockRequest:
         )
 
 
-def retryable_block_request(
+def patch_request(
     result: Union[EvaluationResult, ApprovalResult],
     *,
     event_type: str,
     hook_trigger: bool = False,
     hook_stage: Optional[str] = None,
-) -> Optional[RetryableBlockRequest]:
-    """Wrap a base retry directive with Temporal origin metadata, or return ``None``.
+) -> Optional[PatchRequest]:
+    """Wrap a base patch directive with Temporal origin metadata, or return ``None``.
 
-    Delegates the entire verdict matrix (exact BLOCK + valid plan vs HALT / plain
-    BLOCK / malformed plan / expired / pending) to the base
-    ``handle_retryable_block``; this SDK never re-implements it.
+    Delegates the entire verdict matrix (exact BLOCK + valid patch vs HALT / plain
+    BLOCK / malformed patch / expired / pending) to the base ``handle_patch``;
+    this SDK never re-implements it.
     """
-    directive = handle_retryable_block(result)
+    directive = handle_patch(result)
     if directive is None:
         return None
-    return RetryableBlockRequest(
-        schema_version=GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+    return PatchRequest(
+        schema_version=GOVERNANCE_PATCH_SCHEMA_VERSION,
         new_input=directive.new_input,
         governance_event_id=directive.governance_event_id,
         reason=directive.reason,
@@ -147,27 +147,32 @@ def retryable_block_request(
     )
 
 
-def extract_retryable_block_request(
+def extract_patch_request(
     exc: BaseException,
-) -> Optional[RetryableBlockRequest]:
-    """Recover a :class:`RetryableBlockRequest` from a Temporal exception chain.
+) -> Optional[PatchRequest]:
+    """Recover a :class:`PatchRequest` from a Temporal exception chain.
 
     Walks ``cause`` / ``__cause__`` / ``__context__`` (mirrors
-    ``workflow_interceptor._application_error_type``), matches ONLY an
-    ``ApplicationError`` whose ``type`` equals the stable
-    ``GovernanceRetryableBlock`` constant (never the human-readable message),
-    requires EXACTLY ONE dict detail, and validates it via ``from_dict``. Any
-    mismatch → ``None`` (fail safe as plain BLOCK), never a Workflow Task retry
-    loop.
+    ``workflow_interceptor._application_error_type``), matches an
+    ``ApplicationError`` whose ``type`` equals EITHER the current stable
+    ``GovernancePatch`` constant OR the legacy pre-rename ``GovernanceRetryableBlock``
+    alias (never the human-readable message) — already-recorded histories may
+    still carry the legacy type on a replayed/pending restart chain, so both
+    must stay extractable. Requires EXACTLY ONE dict detail and validates it via
+    ``from_dict``. Any mismatch → ``None`` (fail safe as plain BLOCK), never a
+    Workflow Task retry loop.
     """
     seen: set[int] = set()
     current: Optional[BaseException] = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if getattr(current, "type", None) == GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE:
+        if getattr(current, "type", None) in (
+            GOVERNANCE_PATCH_ERROR_TYPE,
+            GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+        ):
             details = getattr(current, "details", None)
             if isinstance(details, (list, tuple)) and len(details) == 1:
-                return RetryableBlockRequest.from_dict(details[0])
+                return PatchRequest.from_dict(details[0])
             # Right type but wrong detail shape → fail safe as plain BLOCK.
             return None
         next_exc = (
