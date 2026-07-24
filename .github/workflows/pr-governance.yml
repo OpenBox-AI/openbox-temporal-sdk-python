@@ -1,0 +1,159 @@
+name: PR Governance
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-governance-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governance:
+    name: Validate PR governance
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate branch naming
+        if: github.event_name == 'pull_request'
+        env:
+          BRANCH_NAME: ${{ github.head_ref }}
+        run: |
+          pattern='^(feature|fix|hotfix|chore|docs|refactor|test|ci|build|release)\/[a-z0-9._-]+$'
+          if [[ ! "${BRANCH_NAME}" =~ ${pattern} ]]; then
+            echo "Invalid branch name: ${BRANCH_NAME}"
+            echo "Expected pattern: <type>/<short-description>"
+            exit 1
+          fi
+
+      - name: Validate PR title convention
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([a-z0-9._/-]+\))?!?: .+$'
+          if [[ ! "${PR_TITLE}" =~ ${pattern} ]]; then
+            echo "Invalid PR title: ${PR_TITLE}"
+            echo "Use Conventional Commits, for example: feat(worker): add hook governance"
+            exit 1
+          fi
+
+      - name: Validate commit messages when enabled
+        if: github.event_name == 'pull_request' && vars.ENFORCE_COMMIT_CONVENTION == 'true'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "${BASE_REF}" --depth=1
+          invalid=0
+          while IFS= read -r subject; do
+            if [[ -z "${subject}" ]]; then
+              continue
+            fi
+            if [[ "${subject}" =~ ^Merge\  ]]; then
+              continue
+            fi
+            if [[ ! "${subject}" =~ ^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([a-z0-9._/-]+\))?!?:\ .+ ]]; then
+              echo "Invalid commit subject: ${subject}"
+              invalid=1
+            fi
+          done < <(git log --format=%s "origin/${BASE_REF}..HEAD")
+          exit "${invalid}"
+
+      - name: Validate PR template fields
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+
+          body = os.getenv("PR_BODY") or ""
+          if not body.strip():
+            print("PR description is required.")
+            sys.exit(1)
+
+          required_sections = ["Summary", "Testing", "Checklist"]
+          missing = []
+          for section in required_sections:
+            match = re.search(rf"## {section}\s+(.+?)(?=\n## |\Z)", body, re.S)
+            if not match:
+              missing.append(section)
+              continue
+            content = match.group(1).strip()
+            normalized = re.sub(r"<!--.*?-->", "", content, flags=re.S).strip()
+            if not normalized:
+              missing.append(section)
+
+          if "Checklist" not in missing and not re.search(r"- \[[ xX]\] ", body):
+            missing.append("Checklist")
+
+          if missing:
+            print("Missing or incomplete PR template sections:", ", ".join(dict.fromkeys(missing)))
+            sys.exit(1)
+          PY
+
+      - name: Validate sensitive path ownership policy
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "${BASE_REF}" --depth=1
+          mapfile -t changed_files < <(git diff --name-only "origin/${BASE_REF}...HEAD")
+
+          if [ ! -f .github/CODEOWNERS ]; then
+            echo ".github/CODEOWNERS is required"
+            exit 1
+          fi
+
+          needs_check=0
+          for file in "${changed_files[@]}"; do
+            case "${file}" in
+              .github/workflows/*|.github/CODEOWNERS|.github/pull_request_template.md|SECURITY.md|.gitleaks.toml)
+                needs_check=1
+                ;;
+            esac
+          done
+
+          if [ "${needs_check}" -eq 0 ]; then
+            exit 0
+          fi
+
+          declare -A required_entries=(
+            ["/.github/workflows/"]="workflow owners"
+            ["/.github/CODEOWNERS"]="codeowners owners"
+            ["/.github/pull_request_template.md"]="pull request template owners"
+            ["/SECURITY.md"]="security owners"
+            ["/.gitleaks.toml"]="secret scanning owners"
+          )
+
+          missing=()
+          for pattern in "${!required_entries[@]}"; do
+            if ! awk '!/^#/ && NF >= 2 {print $1}' .github/CODEOWNERS | grep -Fxq "${pattern}"; then
+              missing+=("${required_entries[$pattern]} (${pattern})")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing CODEOWNERS coverage for:\n'
+            printf ' - %s\n' "${missing[@]}"
+            exit 1
+          fi
+
+          echo "Sensitive file ownership policy is defined in CODEOWNERS."
