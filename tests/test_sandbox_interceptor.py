@@ -7,11 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from openbox_sandbox import (
     GOVERNED_COMMAND_ACTIVITY_TYPE,
+    SandboxAuthorization,
     SandboxCommandRequest,
     SandboxReceipt,
 )
 from temporalio.exceptions import ApplicationError
 
+from openbox.sandbox.adapter import TemporalSandboxConfigurationError
 from openbox.sandbox.interceptor import (
     GovernedCommandInterceptor,
     _GovernedCommandActivityInterceptor,
@@ -30,6 +32,37 @@ def info(*, activity_type: str = GOVERNED_COMMAND_ACTIVITY_TYPE, attempt: int = 
         activity_type=activity_type,
         attempt=attempt,
     )
+
+
+def dispatch_result(
+    stdout: bytes = b"ok",
+    *,
+    stderr: bytes = b"err",
+    disposition: str = "executed_in_sandbox",
+    exit_code: int | None = 0,
+    execution: bool = True,
+    error: object | None = None,
+):
+    metadata = (
+        SimpleNamespace(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            timeout_status=SimpleNamespace(value="not_observed"),
+            cleanup_status=SimpleNamespace(value="deleted"),
+        )
+        if execution
+        else None
+    )
+    return SimpleNamespace(
+        disposition=SimpleNamespace(value=disposition),
+        execution=metadata,
+        error=error,
+    )
+
+
+def governed_command_factory() -> MagicMock:
+    return MagicMock(return_value=SimpleNamespace(factory_product=True))
 
 
 def receipt(profile_fingerprint: str) -> SandboxReceipt:
@@ -171,21 +204,186 @@ async def test_retry_attempt_is_rejected_before_sandbox() -> None:
     assert runtime.calls == []
 
 
+@pytest.mark.parametrize(
+    ("dispatcher", "factory"),
+    [
+        (None, None),
+        (SimpleNamespace(dispatch=AsyncMock()), None),
+        (None, governed_command_factory()),
+    ],
+)
+def test_incomplete_natural_mode_fails_closed_at_configuration(
+    dispatcher: object | None,
+    factory: object | None,
+) -> None:
+    with pytest.raises(TemporalSandboxConfigurationError):
+        sandbox_config(
+            trust_application_agent=False,
+            dispatcher=dispatcher,
+            governed_command_factory=factory,
+        )
+
+
 @pytest.mark.asyncio
-async def test_false_mode_without_receipt_fails_before_sandbox() -> None:
-    config, runtime = sandbox_config(trust_application_agent=False)
+async def test_natural_mode_dispatches_once_with_genuine_temporal_identity() -> None:
+    dispatcher = SimpleNamespace(
+        dispatch=AsyncMock(return_value=dispatch_result()),
+        authorize=MagicMock(),
+        execute=AsyncMock(),
+        verify=MagicMock(),
+    )
+    factory = governed_command_factory()
+    config, runtime = sandbox_config(
+        trust_application_agent=False,
+        dispatcher=dispatcher,
+        governed_command_factory=factory,
+    )
     interceptor = _GovernedCommandActivityInterceptor(
         SimpleNamespace(execute_activity=AsyncMock()), config
     )
-    with patch("openbox.sandbox.interceptor.activity.info", return_value=info()):
+    cancelled = asyncio.Future()
+    heartbeats: list[dict[str, object]] = []
+    with (
+        patch("openbox.sandbox.interceptor.activity.info", return_value=info()),
+        patch(
+            "openbox.sandbox.interceptor.activity.heartbeat",
+            side_effect=heartbeats.append,
+        ),
+        patch(
+            "openbox.sandbox.interceptor.activity.wait_for_cancelled",
+            new=lambda: cancelled,
+        ),
+        patch.object(
+            SandboxAuthorization, "trusted_application"
+        ) as trusted_application,
+        patch.object(SandboxAuthorization, "verified_receipt") as verified_receipt,
+    ):
+        result = await interceptor.execute_activity(
+            SimpleNamespace(
+                args=[SandboxCommandRequest("proof", {}).to_history_value()]
+            )
+        )
+
+    factory.assert_called_once_with(
+        workflow_id="workflow-1",
+        run_id="run-1",
+        activity_id="activity-1",
+        argv=("/bin/echo",),
+        profile_id="proof",
+        timeout_seconds=30,
+        workflow_type="ProofWorkflow",
+        task_queue="sandbox-queue",
+        attempt=1,
+    )
+    dispatcher.dispatch.assert_awaited_once_with(factory.return_value)
+    assert config.engine is None
+    assert runtime.calls == []
+    trusted_application.assert_not_called()
+    verified_receipt.assert_not_called()
+    dispatcher.authorize.assert_not_called()
+    dispatcher.execute.assert_not_awaited()
+    dispatcher.verify.assert_not_called()
+    assert not hasattr(result, "stdout")
+    assert result.disposition == "executed_in_sandbox"
+    assert result.exit_code == 0
+    assert result.timeout_status == "not_observed"
+    assert result.cleanup_status == "deleted"
+    assert result.stdout_bytes == 2
+    assert result.stderr_bytes == 3
+    assert heartbeats[-1]["disposition"] == "executed_in_sandbox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "dispatcher_result",
+    [
+        object(),
+        dispatch_result(disposition="executed_on_host"),
+        dispatch_result(execution=False),
+        dispatch_result(exit_code=None),
+        dispatch_result(exit_code=-1),
+        dispatch_result(exit_code=2**31),
+        dispatch_result(error=object()),
+        dispatch_result(b"x" * (1024 * 1024 + 1)),
+        dispatch_result(stderr=b"x" * (1024 * 1024 + 1)),
+    ],
+)
+async def test_natural_mode_rejects_invalid_host_nonterminal_or_unbounded_result(
+    dispatcher_result: object,
+) -> None:
+    dispatcher = SimpleNamespace(dispatch=AsyncMock(return_value=dispatcher_result))
+    config, _ = sandbox_config(
+        trust_application_agent=False,
+        dispatcher=dispatcher,
+        governed_command_factory=governed_command_factory(),
+        typed_result=True,
+    )
+    interceptor = _GovernedCommandActivityInterceptor(
+        SimpleNamespace(execute_activity=AsyncMock()), config
+    )
+    cancelled = asyncio.Future()
+    with (
+        patch("openbox.sandbox.interceptor.activity.info", return_value=info()),
+        patch("openbox.sandbox.interceptor.activity.heartbeat"),
+        patch(
+            "openbox.sandbox.interceptor.activity.wait_for_cancelled",
+            new=lambda: cancelled,
+        ),
+    ):
         with pytest.raises(ApplicationError) as exc_info:
             await interceptor.execute_activity(
                 SimpleNamespace(
                     args=[SandboxCommandRequest("proof", {}).to_history_value()]
                 )
             )
-    assert exc_info.value.type == "GovernedCommandUnauthorized"
-    assert runtime.calls == []
+    assert exc_info.value.type == "GovernedCommandEngineFailure"
+    assert exc_info.value.non_retryable is True
+
+
+@pytest.mark.asyncio
+async def test_natural_mode_cancellation_waits_for_dispatcher_cleanup() -> None:
+    dispatch_started = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def dispatch(command):
+        dispatch_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+            cleanup_finished.set()
+            raise
+
+    dispatcher = SimpleNamespace(dispatch=dispatch)
+    config, _ = sandbox_config(
+        trust_application_agent=False,
+        dispatcher=dispatcher,
+        governed_command_factory=governed_command_factory(),
+    )
+    interceptor = _GovernedCommandActivityInterceptor(
+        SimpleNamespace(execute_activity=AsyncMock()), config
+    )
+    cancellation = asyncio.Future()
+    with (
+        patch("openbox.sandbox.interceptor.activity.info", return_value=info()),
+        patch("openbox.sandbox.interceptor.activity.heartbeat"),
+        patch(
+            "openbox.sandbox.interceptor.activity.wait_for_cancelled",
+            new=lambda: cancellation,
+        ),
+    ):
+        task = asyncio.create_task(
+            interceptor.execute_activity(
+                SimpleNamespace(
+                    args=[SandboxCommandRequest("proof", {}).to_history_value()]
+                )
+            )
+        )
+        await dispatch_started.wait()
+        cancellation.set_result(None)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
@@ -205,6 +403,32 @@ async def test_trusted_mode_rejects_receipt_bearing_history_input() -> None:
                 SimpleNamespace(args=[request.to_history_value()])
             )
     assert exc_info.value.type == "GovernedCommandInvalid"
+    assert runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_natural_mode_rejects_compatibility_receipt_before_dispatch() -> None:
+    dispatcher = SimpleNamespace(dispatch=AsyncMock(return_value=dispatch_result()))
+    config, runtime = sandbox_config(
+        trust_application_agent=False,
+        dispatcher=dispatcher,
+        governed_command_factory=governed_command_factory(),
+    )
+    request = SandboxCommandRequest(
+        "proof",
+        {},
+        receipt(config.profiles.profile_fingerprint("proof")),
+    )
+    interceptor = _GovernedCommandActivityInterceptor(
+        SimpleNamespace(execute_activity=AsyncMock()), config
+    )
+    with patch("openbox.sandbox.interceptor.activity.info", return_value=info()):
+        with pytest.raises(ApplicationError) as exc_info:
+            await interceptor.execute_activity(
+                SimpleNamespace(args=[request.to_history_value()])
+            )
+    assert exc_info.value.type == "GovernedCommandInvalid"
+    dispatcher.dispatch.assert_not_awaited()
     assert runtime.calls == []
 
 
@@ -238,6 +462,7 @@ async def test_receipt_mode_uses_verifier_binding_before_sandbox() -> None:
             )
         )
     assert runtime.calls == ["create", "wait_ready", "exec", "delete", "wait_deleted"]
+    assert config.engine is not None
     verify_kwargs = verifier.verify.call_args.kwargs
     assert verify_kwargs["expected_workflow_id"] == "workflow-1"
     assert verify_kwargs["command_argv"] == ("/bin/echo",)

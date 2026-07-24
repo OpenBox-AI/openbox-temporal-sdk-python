@@ -98,6 +98,8 @@ def asset_bundle() -> AssetBundleIdentity:
 def sandbox_config(
     *,
     trust_application_agent: bool = True,
+    dispatcher: Any = None,
+    governed_command_factory: Any = None,
     receipt_verifier: Any = None,
     typed_result: bool = False,
 ) -> tuple[TemporalSandboxConfig, FakeSandboxRuntime]:
@@ -153,10 +155,16 @@ def sandbox_config(
     )
     return (
         TemporalSandboxConfig(
-            engine=engine,
+            engine=(
+                None
+                if dispatcher is not None or governed_command_factory is not None
+                else engine
+            ),
             profiles=registry.structured_profile_bundle(),
             heartbeat_sink=heartbeat,
             heartbeat_interval_seconds=60,
+            dispatcher=dispatcher,
+            governed_command_factory=governed_command_factory,
             receipt_verifier=receipt_verifier,
             trust_application_agent=trust_application_agent,
         ),

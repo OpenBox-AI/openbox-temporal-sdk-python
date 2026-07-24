@@ -53,13 +53,16 @@ def test_worker_owned_core_client_is_adapted_without_reconstruction() -> None:
 @pytest.mark.asyncio
 async def test_evaluate_maps_shared_result_without_reparsing() -> None:
     shared = core_client()
-    shared.aevaluate.return_value = EvaluationResult(
-        verdict=Verdict.CONSTRAIN,
-        reason="sandbox required",
-        policy_id="policy-1",
-        constraints=[{"kind": "run_in_sandbox"}],
-        raw={"unknown": "preserved"},
+    shared_result = EvaluationResult.from_dict(
+        {
+            "verdict": "constrain",
+            "reason": "sandbox required",
+            "policy_id": "policy-1",
+            "constraints": ["run_in_sandbox"],
+        }
     )
+    shared_result.raw = {"unknown": "preserved"}
+    shared.aevaluate.return_value = shared_result
     value = GovernanceClient._from_core_client(
         shared,
         on_api_error="fail_open",
@@ -69,7 +72,7 @@ async def test_evaluate_maps_shared_result_without_reparsing() -> None:
 
     assert isinstance(result, GovernanceVerdictResponse)
     assert result.verdict is Verdict.CONSTRAIN
-    assert result.constraints == [{"kind": "run_in_sandbox"}]
+    assert result.constraints == ["run_in_sandbox"]
     assert result.raw == {"unknown": "preserved"}
     shared.aevaluate.assert_awaited_once_with({"event_type": "ActivityStarted"})
 

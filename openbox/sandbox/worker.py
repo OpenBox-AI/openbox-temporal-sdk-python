@@ -21,11 +21,11 @@ def create_sandbox_worker(
     interceptors: Sequence[Interceptor] = (),
     **worker_options: Any,
 ) -> Worker:
-    """Create a Worker that owns sandbox execution but no Core client.
+    """Create a command-only Worker with no Temporal-side Core client.
 
-    The application agent authorizes before Workflow start. This Worker accepts
-    only the governed-command Activity and either an explicit same-domain trust
-    configuration or a verified receipt.
+    Production configuration injects the natural dispatcher and its governed-
+    command factory. Explicit same-domain trust and verified authorization
+    receipts remain compatibility modes.
     """
     forbidden = {
         "activities",

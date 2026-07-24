@@ -8,13 +8,20 @@ from openbox_sandbox import (
     SandboxTypedResult,
 )
 
-from .adapter import TemporalSandboxConfig, TemporalSandboxConfigurationError
+from .adapter import (
+    GovernedCommandDispatcher,
+    GovernedCommandFactory,
+    TemporalSandboxConfig,
+    TemporalSandboxConfigurationError,
+)
 from .heartbeat import TemporalHeartbeatSink
 from .interceptor import GovernedCommandInterceptor
 from .plugin import OpenBoxSandboxPlugin
 from .worker import create_sandbox_worker
 
 __all__ = [
+    "GovernedCommandDispatcher",
+    "GovernedCommandFactory",
     "GovernedCommandInterceptor",
     "OpenBoxSandboxPlugin",
     "SandboxActivityResult",

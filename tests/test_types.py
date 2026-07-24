@@ -1,11 +1,12 @@
 """Comprehensive tests for the OpenBox SDK types module."""
 
 import pytest
+
 from openbox.types import (
-    WorkflowEventType,
-    Verdict,
-    GuardrailsCheckResult,
     GovernanceVerdictResponse,
+    GuardrailsCheckResult,
+    Verdict,
+    WorkflowEventType,
 )
 
 
@@ -420,7 +421,7 @@ class TestGovernanceVerdictResponse:
             redacted_input={},
             input_type="activity_input",
         )
-        constraints = [{"type": "rate_limit", "value": 100}]
+        constraints = ["run_in_sandbox"]
         metadata = {"source": "test"}
 
         response = GovernanceVerdictResponse(
@@ -571,7 +572,7 @@ class TestGovernanceVerdictResponse:
             "behavioral_violations": ["violation1"],
             "alignment_score": 0.92,
             "approval_id": "approval-123",
-            "constraints": [{"type": "rate_limit", "value": 50}],
+            "constraints": ["run_in_sandbox"],
         }
         response = GovernanceVerdictResponse.from_dict(data)
 
@@ -581,7 +582,7 @@ class TestGovernanceVerdictResponse:
         assert response.behavioral_violations == ["violation1"]
         assert response.alignment_score == 0.92
         assert response.approval_id == "approval-123"
-        assert response.constraints == [{"type": "rate_limit", "value": 50}]
+        assert response.constraints == ["run_in_sandbox"]
 
     def test_from_dict_verdict_takes_precedence_over_action(self):
         """Test that verdict field takes precedence over action field."""
