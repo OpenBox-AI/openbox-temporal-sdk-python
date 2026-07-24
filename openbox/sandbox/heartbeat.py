@@ -20,10 +20,12 @@ _binding: contextvars.ContextVar[_Binding | None] = contextvars.ContextVar(
 
 
 class TemporalHeartbeatSink:
-    """An engine telemetry sink that emits only safe lifecycle metadata.
+    """A telemetry sink that emits only safe Temporal lifecycle metadata.
 
-    The same instance must be configured on the sandbox engine and the
-    Temporal wrapper. Context binding keeps concurrent Activities isolated.
+    Configure the same instance on the Temporal wrapper and on the natural
+    dispatcher's telemetry path or the compatibility sandbox engine. Natural
+    structural configuration cannot verify dispatcher telemetry ownership.
+    Context binding keeps concurrent Activities isolated.
     """
 
     @contextmanager

@@ -1,4 +1,4 @@
-"""Temporal Activity interception for authorized sandbox commands."""
+"""Temporal Activity interception for governed sandbox commands."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from openbox_sandbox import (
     SandboxAuthorization,
     SandboxCommand,
     SandboxCommandRequest,
+    SandboxExecutionResult,
     SandboxInputError,
 )
 from openbox_sandbox.command_profiles import CommandResultValidationError
@@ -24,7 +25,13 @@ from temporalio.worker import (
 )
 
 from ..core_adapter import build_core_activity_context
-from .adapter import TemporalSandboxConfig, activity_result
+from .adapter import (
+    TemporalSandboxConfig,
+    TemporalSandboxConfigurationError,
+    activity_result,
+    dispatch_activity_result,
+    dispatch_execution,
+)
 
 
 class GovernedCommandInterceptor(Interceptor):
@@ -54,7 +61,7 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
         info = activity.info()
         if info.activity_type != GOVERNED_COMMAND_ACTIVITY_TYPE:
             return await self.next.execute_activity(input)
-        if info.attempt != 1:
+        if type(info.attempt) is not int or info.attempt != 1:
             raise ApplicationError(
                 "Governed commands permit exactly one Activity attempt",
                 type="GovernedCommandAttemptRejected",
@@ -64,24 +71,50 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
         workflow_id = self._identifier(info.workflow_id)
         run_id = self._identifier(info.workflow_run_id)
         activity_id = self._identifier(info.activity_id)
+        workflow_type = self._identifier(info.workflow_type)
+        task_queue = self._identifier(info.task_queue)
         request, argv = self._request(input)
-        authorization = self._authorization(
-            request,
-            argv,
-            workflow_id=workflow_id,
-            run_id=run_id,
-            activity_id=activity_id,
-        )
-        context = build_core_activity_context(
-            info,
-            activity_input=request.to_history_value(),
-        )
-        command = SandboxCommand(
-            context=context,
-            argv=argv,
-            profile_id=request.profile_id,
-            timeout_seconds=self._config.timeout_seconds,
-        )
+        natural_mode = self._config.dispatcher is not None
+        authorization = None
+        if natural_mode:
+            factory = self._config.governed_command_factory
+            assert factory is not None
+            try:
+                command = factory(
+                    workflow_id=workflow_id,
+                    run_id=run_id,
+                    activity_id=activity_id,
+                    argv=argv,
+                    profile_id=request.profile_id,
+                    timeout_seconds=self._config.timeout_seconds,
+                    workflow_type=workflow_type,
+                    task_queue=task_queue,
+                    attempt=info.attempt,
+                )
+            except Exception as error:
+                raise ApplicationError(
+                    "Governed command construction failed",
+                    type="GovernedCommandInvalid",
+                    non_retryable=True,
+                ) from error
+        else:
+            authorization = self._authorization(
+                request,
+                argv,
+                workflow_id=workflow_id,
+                run_id=run_id,
+                activity_id=activity_id,
+            )
+            context = build_core_activity_context(
+                info,
+                activity_input=request.to_history_value(),
+            )
+            command = SandboxCommand(
+                context=context,
+                argv=argv,
+                profile_id=request.profile_id,
+                timeout_seconds=self._config.timeout_seconds,
+            )
 
         with self._config.heartbeat_sink.bind(
             activity.heartbeat,
@@ -91,9 +124,17 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
             attempt=info.attempt,
             profile_id=request.profile_id,
         ):
-            execution_task = asyncio.create_task(
-                self._config.engine.execute(command, authorization)
-            )
+            if natural_mode:
+                dispatcher = self._config.dispatcher
+                assert dispatcher is not None
+                execution_task = asyncio.create_task(dispatcher.dispatch(command))
+            else:
+                # Compatibility modes alone construct trusted/receipt authority.
+                engine = self._config.engine
+                assert engine is not None and authorization is not None
+                execution_task = asyncio.create_task(
+                    engine.execute(command, authorization)
+                )
             cancellation_task = asyncio.create_task(self._wait_for_cancellation())
             heartbeat_task = asyncio.create_task(self._heartbeat_periodically())
             try:
@@ -119,16 +160,52 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
                     except asyncio.CancelledError:
                         pass
 
-        activity.heartbeat(
-            {
-                "phase": "governed_dispatch_terminal",
-                "workflow_id": workflow_id,
-                "run_id": run_id,
-                "activity_id": activity_id,
-                "attempt": info.attempt,
-                "profile_id": request.profile_id,
-                "disposition": result.disposition.value,
-            }
+        if natural_mode:
+            try:
+                execution = dispatch_execution(result)
+                typed_result = self._config.profiles.parse_result(
+                    request.profile_id, execution.stdout
+                )
+                mapped_result = dispatch_activity_result(
+                    request.profile_id,
+                    execution,
+                    typed_result=typed_result,
+                )
+            except CommandResultValidationError as error:
+                raise ApplicationError(
+                    "Governed command typed result rejected",
+                    type="GovernedCommandResultInvalid",
+                    non_retryable=True,
+                ) from error
+            except TemporalSandboxConfigurationError as error:
+                raise ApplicationError(
+                    "Governed dispatcher result rejected",
+                    type="GovernedCommandEngineFailure",
+                    non_retryable=True,
+                ) from error
+            self._terminal_heartbeat(
+                workflow_id,
+                run_id,
+                activity_id,
+                info.attempt,
+                request.profile_id,
+                mapped_result.disposition,
+            )
+            return mapped_result
+
+        if not isinstance(result, SandboxExecutionResult):
+            raise ApplicationError(
+                "Sandbox engine returned an invalid result",
+                type="GovernedCommandEngineFailure",
+                non_retryable=True,
+            )
+        self._terminal_heartbeat(
+            workflow_id,
+            run_id,
+            activity_id,
+            info.attempt,
+            request.profile_id,
+            result.disposition.value,
         )
         if result.disposition is Disposition.EXECUTED_IN_SANDBOX:
             if result.execution is None:
@@ -141,17 +218,23 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
                 typed_result = self._config.profiles.parse_result(
                     request.profile_id, result.execution.stdout
                 )
+                return activity_result(
+                    request.profile_id,
+                    result,
+                    typed_result=typed_result,
+                )
             except CommandResultValidationError as error:
                 raise ApplicationError(
                     "Governed command typed result rejected",
                     type="GovernedCommandResultInvalid",
                     non_retryable=True,
                 ) from error
-            return activity_result(
-                request.profile_id,
-                result,
-                typed_result=typed_result,
-            )
+            except (SandboxInputError, TemporalSandboxConfigurationError) as error:
+                raise ApplicationError(
+                    "Governed command result rejected",
+                    type="GovernedCommandEngineFailure",
+                    non_retryable=True,
+                ) from error
 
         error_code = (
             "governed_command_not_executed"
@@ -177,7 +260,10 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
             if len(args) != 1:
                 raise SandboxInputError("governed command input rejected")
             request = SandboxCommandRequest.from_value(args[0])
-            if self._config.trust_application_agent and request.receipt is not None:
+            if (
+                self._config.trust_application_agent
+                or self._config.dispatcher is not None
+            ) and request.receipt is not None:
                 raise SandboxInputError("governed command input rejected")
             argv = self._config.profiles.derive(request)
             self._config.profiles.profile_fingerprint(request.profile_id)
@@ -203,8 +289,9 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
             return SandboxAuthorization.trusted_application(
                 f"trusted:{hashlib.sha256(binding).hexdigest()}"
             )
+        engine = self._config.engine
         verifier = self._config.receipt_verifier
-        if verifier is None:
+        if verifier is None or engine is None:
             raise ApplicationError(
                 "Governed command authorization is not configured",
                 type="GovernedCommandUnauthorized",
@@ -215,7 +302,7 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
                 request,
                 expected_workflow_id=workflow_id,
                 command_argv=argv,
-                asset_bundle=self._config.engine.asset_bundle,
+                asset_bundle=engine.asset_bundle,
                 profile_fingerprint=self._config.profiles.profile_fingerprint(
                     request.profile_id
                 ),
@@ -237,6 +324,27 @@ class _GovernedCommandActivityInterceptor(ActivityInboundInterceptor):
                 non_retryable=True,
             )
         return value
+
+    @staticmethod
+    def _terminal_heartbeat(
+        workflow_id: str,
+        run_id: str,
+        activity_id: str,
+        attempt: int,
+        profile_id: str,
+        disposition: str,
+    ) -> None:
+        activity.heartbeat(
+            {
+                "phase": "governed_dispatch_terminal",
+                "workflow_id": workflow_id,
+                "run_id": run_id,
+                "activity_id": activity_id,
+                "attempt": attempt,
+                "profile_id": profile_id,
+                "disposition": disposition,
+            }
+        )
 
     async def _heartbeat_periodically(self) -> None:
         while True:
