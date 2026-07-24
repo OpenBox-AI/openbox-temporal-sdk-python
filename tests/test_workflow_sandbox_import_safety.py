@@ -37,8 +37,8 @@ SANDBOX_IMPORT_TARGETS = (
     "openbox.workflow_interceptor",
     "openbox.errors",
     "openbox.types",
-    "openbox.retryable_block",
-    "openbox.retry_coordinator",
+    "openbox.patch",
+    "openbox.patch_coordinator",
     "openbox_core.contracts.events",
     "openbox_core.contracts.results",
 )

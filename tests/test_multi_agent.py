@@ -85,13 +85,13 @@ async def test_emit_handoff_routes_through_activity_dispatcher():
 
 
 def _handoff_request(new_input="fixed"):
-    from openbox.retryable_block import RetryableBlockRequest
+    from openbox.patch import PatchRequest
 
-    return RetryableBlockRequest(
+    return PatchRequest(
         schema_version=1,
         new_input=new_input,
         governance_event_id="evt",
-        reason="retry",
+        reason="patch",
         event_type="Handoff",
         hook_trigger=False,
         hook_stage=None,
@@ -99,26 +99,26 @@ def _handoff_request(new_input="fixed"):
 
 
 @pytest.mark.asyncio
-async def test_emit_handoff_retryable_submits_to_coordinator_and_raises_control():
-    """A retryable-BLOCK handoff submits to the run-local coordinator and unwinds
-    user code via RetryableBlockControl (CAN stays owned by the interceptor)."""
-    from openbox.retry_coordinator import (
-        RetryableBlockControl,
-        RetryableBlockCoordinator,
+async def test_emit_handoff_patch_submits_to_coordinator_and_raises_control():
+    """A BLOCK-with-patch handoff submits to the run-local coordinator and unwinds
+    user code via PatchControl (CAN stays owned by the interceptor)."""
+    from openbox.patch_coordinator import (
+        PatchControl,
+        PatchCoordinator,
         bind_coordinator,
         unbind_coordinator,
     )
 
     req = _handoff_request("via-handoff")
     sender = AsyncMock(return_value=req)
-    coord = RetryableBlockCoordinator()
+    coord = PatchCoordinator()
     token = bind_coordinator(coord)
     try:
         with (
             patch("openbox.workflow_interceptor._send_governance_event", sender),
             patch("temporalio.workflow.patched", return_value=True),
         ):
-            with pytest.raises(RetryableBlockControl):
+            with pytest.raises(PatchControl):
                 await emit_handoff(
                     multi_agent_session_id="s", from_agent_did="did:aip:x"
                 )
@@ -129,13 +129,13 @@ async def test_emit_handoff_retryable_submits_to_coordinator_and_raises_control(
 
 
 @pytest.mark.asyncio
-async def test_emit_handoff_retryable_without_coordinator_fails_safe_as_block():
+async def test_emit_handoff_patch_without_coordinator_fails_safe_as_block():
     """No coordinator bound (should not happen in a patched run) → fail safe as a
     plain governance block, never a silent continuation."""
     from temporalio.exceptions import ApplicationError
 
     from openbox.errors import GOVERNANCE_BLOCK_ERROR_TYPE
-    from openbox.retry_coordinator import get_coordinator
+    from openbox.patch_coordinator import get_coordinator
 
     assert get_coordinator() is None  # no active binding
     sender = AsyncMock(return_value=_handoff_request())
@@ -150,7 +150,7 @@ async def test_emit_handoff_retryable_without_coordinator_fails_safe_as_block():
 
 @pytest.mark.asyncio
 async def test_emit_handoff_allow_unchanged_on_patched_path():
-    """ALLOW returns the dict unchanged even when the retryable path is enabled."""
+    """ALLOW returns the dict unchanged even when the patch-restart path is enabled."""
     sender = AsyncMock(return_value={"verdict": "allow"})
     with (
         patch("openbox.workflow_interceptor._send_governance_event", sender),

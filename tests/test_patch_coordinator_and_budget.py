@@ -12,22 +12,22 @@ import pytest
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
-import openbox.retry_coordinator as rc
-from openbox.errors import GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
-from openbox.retry_coordinator import (
+import openbox.patch_coordinator as pc
+from openbox.errors import GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
+from openbox.patch import PatchRequest
+from openbox.patch_coordinator import (
     MEMO_RESTART_COUNT_KEY,
-    RetryableBlockControl,
-    RetryableBlockCoordinator,
+    PatchControl,
+    PatchCoordinator,
     bind_coordinator,
     get_coordinator,
     next_restart_memo,
     unbind_coordinator,
 )
-from openbox.retryable_block import RetryableBlockRequest
 
 
-def _req(new_input="x", event_type="SignalReceived") -> RetryableBlockRequest:
-    return RetryableBlockRequest(
+def _req(new_input="x", event_type="SignalReceived") -> PatchRequest:
+    return PatchRequest(
         schema_version=1,
         new_input=new_input,
         governance_event_id=None,
@@ -44,13 +44,13 @@ def _req(new_input="x", event_type="SignalReceived") -> RetryableBlockRequest:
 
 
 def test_coordinator_starts_empty():
-    coord = RetryableBlockCoordinator()
+    coord = PatchCoordinator()
     assert coord.has_request() is False
     assert coord.get_request() is None
 
 
 def test_coordinator_first_submit_wins():
-    coord = RetryableBlockCoordinator()
+    coord = PatchCoordinator()
     first = _req(new_input="first")
     second = _req(new_input="second")
     coord.submit(first)
@@ -61,8 +61,8 @@ def test_coordinator_first_submit_wins():
 
 def test_control_signal_is_base_exception_not_exception():
     # Must evade a plain `except Exception` in user code, like cancellation.
-    assert issubclass(RetryableBlockControl, BaseException)
-    assert not issubclass(RetryableBlockControl, Exception)
+    assert issubclass(PatchControl, BaseException)
+    assert not issubclass(PatchControl, Exception)
 
 
 # --------------------------------------------------------------------------- #
@@ -72,7 +72,7 @@ def test_control_signal_is_base_exception_not_exception():
 
 def test_accessor_default_none_and_bind_unbind_cycle():
     assert get_coordinator() is None
-    coord = RetryableBlockCoordinator()
+    coord = PatchCoordinator()
     token = bind_coordinator(coord)
     try:
         assert get_coordinator() is coord
@@ -82,8 +82,8 @@ def test_accessor_default_none_and_bind_unbind_cycle():
 
 
 def test_accessor_unbind_restores_previous_binding():
-    outer = RetryableBlockCoordinator()
-    inner = RetryableBlockCoordinator()
+    outer = PatchCoordinator()
+    inner = PatchCoordinator()
     outer_token = bind_coordinator(outer)
     try:
         inner_token = bind_coordinator(inner)
@@ -126,7 +126,7 @@ def test_budget_at_cap_raises_limit_exceeded(monkeypatch):
     _patch_memo(monkeypatch, {MEMO_RESTART_COUNT_KEY: 3})
     with pytest.raises(ApplicationError) as exc:
         next_restart_memo(3)
-    assert exc.value.type == GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
+    assert exc.value.type == GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
     assert exc.value.non_retryable is True
 
 
@@ -135,7 +135,7 @@ def test_budget_non_int_counter_raises(monkeypatch, bad):
     _patch_memo(monkeypatch, {MEMO_RESTART_COUNT_KEY: bad})
     with pytest.raises(ApplicationError) as exc:
         next_restart_memo(3)
-    assert exc.value.type == GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
+    assert exc.value.type == GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
 
 
 def test_budget_bool_counter_rejected(monkeypatch):

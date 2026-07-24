@@ -1,4 +1,4 @@
-"""End-to-end tests for Retryable BLOCK Workflow Restart.
+"""End-to-end tests for BLOCK-with-Patch Workflow Restart.
 
 These drive the REAL governance stack — the workflow interceptor, activity
 interceptor, base core runtime, and the real ``send_governance_event`` activity —
@@ -11,7 +11,7 @@ everything under test runs for real, so these tests genuinely exercise the
 Assertions cover: same Workflow ID, new Run ID, prior run ``ContinuedAsNew``,
 replacement ``new_input`` delivered (and ``new_input=None`` reuses args), the
 blocked governance activity is not auto-retried, and the restart budget
-terminates the chain with ``GovernanceRetryLimitExceeded``.
+terminates the chain with ``GovernancePatchLimitExceeded``.
 
 The declared floor is ``temporalio>=1.23.0``; the APIs the feature relies on
 (``workflow.patched``, ``workflow.memo``/``memo_value``,
@@ -32,14 +32,14 @@ from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from openbox.errors import GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
+from openbox.errors import GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
 
 PATCH_BASE = "openbox.plugin"
 
 
 def _BLOCK(new_input):
-    """A retryable-BLOCK governance response carrying a valid retry plan."""
-    return {"verdict": "block", "retry_plan": {"new_input": new_input}}
+    """A BLOCK-with-patch governance response carrying a valid patch."""
+    return {"verdict": "block", "patch": {"new_input": new_input}}
 
 
 _ALLOW = {"verdict": "allow"}
@@ -122,7 +122,7 @@ async def echo_activity(value: str) -> str:
 
 @workflow.defn
 class EchoWorkflow:
-    """Runs one activity and returns its result — the arg is what a retry plan
+    """Runs one activity and returns its result — the arg is what a patch
     replaces, so the final result reveals which input the last run received."""
 
     @workflow.run
@@ -143,7 +143,7 @@ def _real_plugin(core_url: str, **overrides):
         )
 
 
-class TestRetryableBlockRealContinueAsNew:
+class TestPatchRealContinueAsNew:
     @pytest.fixture
     async def env(self):
         async with await WorkflowEnvironment.start_local() as env:
@@ -158,8 +158,8 @@ class TestRetryableBlockRealContinueAsNew:
         ).describe()
         return first_run_id, latest_desc.run_id, first_desc.status
 
-    async def test_workflow_started_block_plan_restarts_with_new_input(self, env):
-        """WorkflowStarted BLOCK+plan → real Continue-As-New before user code;
+    async def test_workflow_started_block_patch_restarts_with_new_input(self, env):
+        """WorkflowStarted BLOCK+patch → real Continue-As-New before user code;
         the next run receives the replacement input; the blocked activity is not
         auto-retried."""
         server, counts = _start_fake_core(
@@ -195,7 +195,7 @@ class TestRetryableBlockRealContinueAsNew:
             server.shutdown()
 
     async def test_new_input_none_reuses_current_args(self, env):
-        """WorkflowStarted BLOCK+plan with new_input=None reuses the current run's
+        """WorkflowStarted BLOCK+patch with new_input=None reuses the current run's
         args exactly on restart."""
         server, _ = _start_fake_core({"WorkflowStarted": [_BLOCK(None), _ALLOW]})
         url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -217,8 +217,8 @@ class TestRetryableBlockRealContinueAsNew:
         finally:
             server.shutdown()
 
-    async def test_workflow_completed_block_plan_restarts(self, env):
-        """WorkflowCompleted BLOCK+plan → Continue-As-New instead of returning the
+    async def test_workflow_completed_block_patch_restarts(self, env):
+        """WorkflowCompleted BLOCK+patch → Continue-As-New instead of returning the
         user result."""
         server, _ = _start_fake_core({"WorkflowCompleted": [_BLOCK("after"), _ALLOW]})
         url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -242,7 +242,7 @@ class TestRetryableBlockRealContinueAsNew:
 
     async def test_restart_limit_terminates_chain(self, env):
         """An always-BLOCK policy is bounded: the chain stops at the configured cap
-        with a non-retryable GovernanceRetryLimitExceeded, not an unbounded loop."""
+        with a non-retryable GovernancePatchLimitExceeded, not an unbounded loop."""
         server, counts = _start_fake_core({"WorkflowStarted": [_BLOCK("loop")]})
         url = f"http://127.0.0.1:{server.server_address[1]}"
         try:
@@ -251,7 +251,7 @@ class TestRetryableBlockRealContinueAsNew:
                 task_queue="tq-limit",
                 workflows=[EchoWorkflow],
                 activities=[echo_activity],
-                plugins=[_real_plugin(url, max_retryable_block_restarts=2)],
+                plugins=[_real_plugin(url, max_patch_restarts=2)],
             ):
                 handle = await env.client.start_workflow(
                     EchoWorkflow.run, "x", id="wf-limit", task_queue="tq-limit"
@@ -260,7 +260,7 @@ class TestRetryableBlockRealContinueAsNew:
                     await handle.result()
 
             assert _has_error_type(
-                exc_info.value, GOVERNANCE_RETRY_LIMIT_EXCEEDED_ERROR_TYPE
+                exc_info.value, GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
             )
             # cap=2: runs with memo counts 0,1,2 evaluate WorkflowStarted; the 3rd
             # increment (→3) exceeds the cap and fails. Bounded, not runaway.
@@ -269,7 +269,7 @@ class TestRetryableBlockRealContinueAsNew:
             server.shutdown()
 
     async def test_allow_completes_normally_through_real_transport(self, env):
-        """Sanity: with no retry plan, the real transport lets the workflow run and
+        """Sanity: with no patch, the real transport lets the workflow run and
         complete unchanged (no restart)."""
         server, counts = _start_fake_core({})  # all ALLOW
         url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -279,7 +279,7 @@ class TestRetryableBlockRealContinueAsNew:
                 task_queue="tq-allow",
                 workflows=[EchoWorkflow],
                 activities=[echo_activity],
-                plugins=[_real_plugin(url, max_retryable_block_restarts=3)],
+                plugins=[_real_plugin(url, max_patch_restarts=3)],
             ):
                 handle = await env.client.start_workflow(
                     EchoWorkflow.run, "plain", id="wf-allow", task_queue="tq-allow"
