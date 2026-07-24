@@ -178,10 +178,10 @@ OpenBox Core returns a verdict indicating what action the SDK should take.
 | `ALLOW` | Continue execution normally |
 | `CONSTRAIN` | Log constraints, continue |
 | `REQUIRE_APPROVAL` | Pause, poll for human approval |
-| `BLOCK` | Raise error, stop activity; if carrying a `retry_plan`, restart the workflow with replacement input via Continue-As-New (see "Retryable BLOCK" below) |
+| `BLOCK` | Raise error, stop activity; if carrying a `patch`, restart the workflow with replacement input via Continue-As-New (see "BLOCK with Patch" below) |
 | `HALT` | Raise error, terminate workflow |
 
-**Retryable BLOCK:** When a `BLOCK` verdict includes a `retry_plan` with `new_input`, the SDK restarts the workflow using the corrected input instead of failing permanently. The restart chain is bounded by `max_retryable_block_restarts` (default: 3). See [Retryable BLOCK Restart Configuration](./docs/configuration.md#retryable-block-restart) for semantics and **critical idempotency requirements**.
+**BLOCK with Patch:** When a `BLOCK` verdict includes a `patch` with `new_input`, the SDK restarts the workflow using the corrected input instead of failing permanently. The restart chain is bounded by `max_patch_restarts` (default: 3). See [BLOCK-with-Patch Restart Configuration](./docs/configuration.md#block-with-patch-restart) for semantics and **critical idempotency requirements**.
 
 **v1.0 Backward Compatibility:**
 - `"continue"` → `ALLOW`
