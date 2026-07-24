@@ -61,14 +61,6 @@ Repository = "https://github.com/OpenBox-AI/temporal-sdk-python.git"
 Issues = "https://github.com/OpenBox-AI/temporal-sdk-python/issues"
 Changelog = "https://github.com/OpenBox-AI/temporal-sdk-python/blob/main/CHANGELOG.md"
 
-# TEMPORARY (local dev/test only): openbox-sdk-python 1.2.0 is not yet published
-# to PyPI. Point the >=1.2.0 pin above at the sibling renamed-base-SDK checkout so
-# `uv lock` / `uv sync` resolve locally instead of failing on a missing release.
-# Remove this override once 1.2.0 is published (final PyPI source strategy is a
-# human/release decision, tracked outside this file).
-[tool.uv.sources]
-openbox-sdk-python = { path = "../openbox-sdk-python", editable = true }
-
 [dependency-groups]
 dev = [
     "pytest>=8.2",
