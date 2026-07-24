@@ -6,7 +6,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ### Added
 
-- Optional `sandbox` integration backed by `openbox-sandbox-sdk-python`: bounded Workflow contracts, a deterministic one-attempt governed-command helper, dedicated Worker/plugin registration, heartbeat-aware cancellation, verified-receipt or explicit same-domain trust, and typed Temporal result/error mapping.
+- Optional governed-command integration with bounded Workflow contracts, a deterministic one-attempt helper, dedicated Worker/plugin registration, heartbeat-aware cancellation, and typed Temporal result mapping. Production mode structurally injects the real governed dispatcher plus its `GovernedCommand` factory, builds the command from genuine `activity.info()` identity, invokes only `dispatcher.dispatch(command)`, and validates/maps its `DispatchResult` without a hard dispatcher-package dependency. Host-result rejection is post-dispatch and does not prevent a host attempt; zero-host operation requires exact `CONSTRAIN` policy plus a deployment with no available dispatcher host path. Temporal and dispatcher profile bundles must use equivalent definitions/version. The mapped result is reported terminal metadata correlated with lifecycle signals, not a portable signed runtime receipt or independent proof. Pre-authorized same-domain trust and verified authorization receipts remain compatibility modes; authorization receipts prove permission, not execution.
 
 ### Changed
 
