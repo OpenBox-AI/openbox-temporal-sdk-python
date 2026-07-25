@@ -338,6 +338,7 @@ async def test_natural_mode_rejects_invalid_host_nonterminal_or_unbounded_result
             )
     assert exc_info.value.type == "GovernedCommandEngineFailure"
     assert exc_info.value.non_retryable is True
+    dispatcher.dispatch.assert_awaited_once()
 
 
 @pytest.mark.asyncio

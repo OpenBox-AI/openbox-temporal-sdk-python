@@ -56,6 +56,7 @@ def test_dedicated_worker_registers_one_interceptor_and_defensive_activity() -> 
         )
     assert result is worker_type.return_value
     kwargs = worker_type.call_args.kwargs
+    assert len(kwargs["interceptors"]) == 1
     assert isinstance(kwargs["interceptors"][0], GovernedCommandInterceptor)
     assert kwargs["workflows"] == []
     assert kwargs["activities"] == [governed_command_activity]
