@@ -35,6 +35,7 @@ EXPECTED_EXPORTS = {
     "OpenBoxNetworkError",
     "OpenBoxPlugin",
     "OpenBoxSigningError",
+    "SandboxConfig",
     "Verdict",
     "VerdictEnforcementResult",
     "WorkflowEventType",
@@ -74,6 +75,7 @@ WORKER_KWARGS = {
     "send_activity_start_event",
     "skip_workflow_types",
     "skip_activity_types",
+    "sandbox",
 }
 
 PLUGIN_KWARGS = {
@@ -109,7 +111,7 @@ class TestExports:
     def test_public_surface_is_exactly_expected(self):
         # __all__ is the whole public surface — nothing beyond the expected set.
         assert set(openbox.__all__) == EXPECTED_EXPORTS
-        assert len(openbox.__all__) == 34
+        assert len(openbox.__all__) == 35
 
     def test_removed_exports_absent(self):
         for name in REMOVED_EXPORTS:

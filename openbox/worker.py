@@ -51,6 +51,7 @@ def create_openbox_worker(
     skip_activity_types: Optional[set] = None,
     skip_signals: Optional[set] = None,
     hitl_enabled: bool = True,
+    sandbox: Optional[Any] = None,
     max_retryable_block_restarts: int = 3,
     instrument_databases: bool = True,
     db_libraries: Optional[set] = None,
@@ -261,6 +262,35 @@ def create_openbox_worker(
         governance_activities.send_governance_event,
     ]
 
+    all_plugins: list = []
+
+    # ── Sandbox integration ──────────────────────────────────────────────
+    if sandbox is not None:
+        from .sandbox.config import SandboxConfig
+        from .sandbox.governed_command_activity import governed_command_activity
+        from .sandbox.interceptor import GovernedCommandInterceptor
+        from .sandbox.plugin import OpenBoxSandboxPlugin
+        from .sandbox.resolver import resolve_sandbox_config
+
+        if not isinstance(sandbox, SandboxConfig):
+            raise TypeError(
+                "sandbox must be a SandboxConfig instance or None, "
+                f"got {type(sandbox).__name__}"
+            )
+
+        sandbox_config = resolve_sandbox_config(sandbox)
+        sandbox_plugin = OpenBoxSandboxPlugin(sandbox_config)
+
+        all_activities.append(governed_command_activity)
+        all_interceptors.append(GovernedCommandInterceptor(sandbox_config))
+        all_plugins.append(sandbox_plugin)
+
+        logger.info(
+            "OpenBox sandbox enabled: timeout=%ss trust_app_agent=%s",
+            sandbox_config.timeout_seconds,
+            sandbox_config.trust_application_agent,
+        )
+
     logger.info(
         "OpenBox SDK initialized: policy=%s timeout=%ss db=%s file=%s hitl=%s "
         "instrumentation=openbox_core events=WorkflowStarted,WorkflowCompleted,"
@@ -283,6 +313,7 @@ def create_openbox_worker(
         "openbox.RuntimeLifecycle",
         run_context=runtime_context,
     )
+    all_plugins.insert(0, runtime_plugin)
     return Worker(
         client,
         task_queue=task_queue,
@@ -290,7 +321,7 @@ def create_openbox_worker(
         activities=all_activities,
         activity_executor=activity_executor,
         workflow_task_executor=workflow_task_executor,
-        plugins=[runtime_plugin],
+        plugins=all_plugins,
         interceptors=all_interceptors,
         build_id=build_id,
         identity=identity,

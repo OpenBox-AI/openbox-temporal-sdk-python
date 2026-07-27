@@ -52,6 +52,19 @@ try:
 except ImportError:
     pass  # temporalio < 1.23.0, plugin not available
 
+# Sandbox — NOT imported eagerly. The sandbox sub-package imports
+# openbox_sandbox.engine/runtime which pull in cryptography and TLS I/O,
+# which must not be loaded in workflow-sandbox or governance contexts.
+# Users import directly: from openbox.sandbox.config import SandboxConfig
+
+
+def __getattr__(name: str) -> object:
+    if name == "SandboxConfig":
+        from .sandbox.config import SandboxConfig
+
+        return SandboxConfig
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 from .client import GovernanceClient
 from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
 from .verdict_handler import VerdictEnforcementResult, enforce_verdict
@@ -88,6 +101,7 @@ from .verdict_handler import VerdictEnforcementResult, enforce_verdict
 __all__ = [
     "create_openbox_worker",
     "OpenBoxPlugin",
+    "SandboxConfig",
     "initialize",
     "get_global_config",
     "GovernanceConfig",
