@@ -6,7 +6,7 @@
 # it crashes the workflow sandbox as a circular import, lazily it recurses
 # unboundedly from build_auth_headers on every evaluate. Keep in sync with
 # pyproject.toml on release.
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 
 from .config import GovernanceConfig, get_global_config, initialize
 from .errors import (
