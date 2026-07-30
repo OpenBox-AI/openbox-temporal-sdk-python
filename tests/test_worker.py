@@ -901,6 +901,32 @@ class TestConfigurationOptions:
         assert result is m["mock_worker_class"].return_value
         assert "sqlalchemy_engine" not in m["mock_create_core_runtime"].call_args.kwargs
 
+    @with_worker_patches
+    def test_prebootstrapped_okta_identity_reaches_core_runtime(self, **m):
+        from openbox.config import get_global_config
+        from openbox.worker import create_openbox_worker
+
+        identity = object()
+        get_global_config().configure(
+            "http://localhost:8086",
+            "obx_test_key123",
+            okta_identity=identity,
+        )
+
+        create_openbox_worker(
+            client=Mock(),
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+            okta_agent_private_key="private-pem",
+            enable_trace_propagation=False,
+        )
+
+        assert (
+            m["mock_create_core_runtime"].call_args.kwargs["resolved_okta_identity"]
+            is identity
+        )
+
 
 class TestLogOutput:
     """Test initialization status logging."""

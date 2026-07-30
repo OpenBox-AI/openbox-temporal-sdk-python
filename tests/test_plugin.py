@@ -146,6 +146,45 @@ class TestPluginInit:
             okta_identity=None,
         )
 
+    def test_private_key_bootstrap_identity_reaches_all_runtime_paths(self):
+        identity = object()
+
+        def configure_bootstrapped_identity(**kwargs):
+            from openbox.config import get_global_config
+
+            get_global_config().configure(
+                kwargs["api_url"],
+                kwargs["api_key"],
+                kwargs["governance_timeout"],
+                okta_identity=identity,
+            )
+
+        runtime = MagicMock()
+        with (
+            patch(
+                f"{PATCH_BASE}.validate_api_key",
+                side_effect=configure_bootstrapped_identity,
+            ),
+            patch(
+                "openbox.core_adapter.create_core_runtime",
+                return_value=runtime,
+            ) as create_runtime,
+            patch("openbox.workflow_interceptor.GovernanceInterceptor"),
+            patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
+            patch(f"{PATCH_BASE}.GovernanceClient") as governance_client,
+        ):
+            from openbox.plugin import OpenBoxPlugin
+
+            OpenBoxPlugin(
+                openbox_url="http://localhost:8086",
+                openbox_api_key="obx_test_key_123",
+                okta_agent_private_key="private-pem",
+                enable_trace_propagation=False,
+            )
+
+        assert create_runtime.call_args.kwargs["resolved_okta_identity"] is identity
+        assert governance_client.call_args.kwargs["okta_identity"] is identity
+
     def test_is_simple_plugin_subclass(self):
         plugin, _ = _make_plugin()
         assert isinstance(plugin, SimplePlugin)

@@ -276,6 +276,7 @@ def create_core_runtime(
     okta_agent_private_key: Optional[str] = None,
     okta_agent_algorithm: Optional[str] = None,
     agent_proof_audience: Optional[str] = None,
+    resolved_okta_identity: Any = None,
     hitl_enabled: bool = True,
     skip_hitl_activity_types: Optional[set] = None,
     skip_workflow_types: Optional[set] = None,
@@ -349,4 +350,28 @@ def create_core_runtime(
         skip_hitl_activity_types=skip_hitl_activity_types,
         context_store=_core_context_store,
     )
-    return OpenBoxRuntime(config, adapter, context_store=_core_context_store)
+    evaluation_client = None
+    if resolved_okta_identity is not None:
+        if config.identity_method != "okta_ai_agent":
+            raise ValueError(
+                "resolved_okta_identity requires an okta_ai_agent runtime configuration"
+            )
+        from openbox_core.client import EvaluationClient
+
+        from .request_signing import _sdk_identifier
+
+        evaluation_client = EvaluationClient(
+            config.api_url,
+            config.api_key,
+            timeout_seconds=config.timeout_seconds,
+            on_api_error=config.on_api_error,
+            identity=resolved_okta_identity,
+            sdk_version=_sdk_identifier(),
+        )
+
+    return OpenBoxRuntime(
+        config,
+        adapter,
+        client=evaluation_client,
+        context_store=_core_context_store,
+    )

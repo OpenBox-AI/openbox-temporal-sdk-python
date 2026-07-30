@@ -80,11 +80,12 @@ class OpenBoxPlugin(SimplePlugin):
         """OpenBox governance plugin for a Temporal ``Worker``.
 
         agent_did / agent_private_key: OpenBox DID identity (v1). Both-or-neither.
+        okta_agent_private_key alone: Okta AI Agent bootstrap mode (v2); Core
+        supplies the non-secret identity metadata. The complete
         openbox_agent_id / organization_id / deployment_id / okta_agent_id /
-        okta_agent_key_id / okta_agent_private_key / okta_agent_algorithm /
-        agent_proof_audience: Okta AI Agent identity (v2, proposal §13.7).
-        All-or-nothing together, and mutually exclusive with agent_did/
-        agent_private_key — at most one identity verification method.
+        okta_agent_key_id / okta_agent_private_key / agent_proof_audience set
+        remains supported for explicit configuration. Both modes are mutually
+        exclusive with agent_did / agent_private_key.
         """
         validate_api_key(
             api_url=openbox_url,
@@ -129,6 +130,11 @@ class OpenBoxPlugin(SimplePlugin):
             okta_agent_private_key=okta_agent_private_key,
             okta_agent_algorithm=okta_agent_algorithm,
             agent_proof_audience=agent_proof_audience,
+            **(
+                {"resolved_okta_identity": _okta_identity}
+                if _okta_identity is not None
+                else {}
+            ),
             hitl_enabled=hitl_enabled,
             skip_workflow_types=skip_workflow_types or set(),
             skip_activity_types=skip_activity_types or {"send_governance_event"},

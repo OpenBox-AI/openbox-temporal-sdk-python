@@ -19,6 +19,7 @@ as production code does.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from openbox.activities import GovernanceActivities
 from openbox.client import GovernanceClient
 from openbox.config import (
+    _bootstrap_okta_identity,
     _load_okta_identity,
     get_global_config,
     initialize,
@@ -133,6 +135,83 @@ def test_initialize_configures_okta_identity(monkeypatch: pytest.MonkeyPatch):
     assert gc.agent_did is None  # v1 stays unset — mutually exclusive
 
 
+def test_initialize_bootstraps_okta_identity_from_private_key_only(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    identity = _okta_identity()
+    bootstrap = MagicMock(return_value=identity)
+    monkeypatch.setattr("openbox.config._bootstrap_okta_identity", bootstrap)
+
+    initialize(
+        API_URL,
+        API_KEY,
+        okta_agent_private_key=_PRIVATE_KEY_PEM,
+    )
+
+    bootstrap.assert_called_once_with(
+        api_url=API_URL,
+        api_key=API_KEY,
+        timeout=30.0,
+        okta_agent_private_key=_PRIVATE_KEY_PEM,
+    )
+    gc = get_global_config()
+    assert gc.get_okta_identity() is identity
+    assert gc.agent_did is None
+
+
+def test_bootstrap_okta_identity_delegates_to_base_client(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    document = SimpleNamespace(
+        openbox_agent_id="agent-1",
+        organization_id="org-1",
+        deployment_id="dep-1",
+        assertion_audience="urn:openbox:dep-1:core",
+        okta=SimpleNamespace(external_agent_id="wlp-1", credential_kid="kid-1"),
+    )
+    client = MagicMock()
+    client.identity_metadata.return_value = document
+    client_type = MagicMock(return_value=client)
+    monkeypatch.setattr("openbox_core.client.EvaluationClient", client_type)
+
+    identity = _bootstrap_okta_identity(
+        api_url=API_URL,
+        api_key=API_KEY,
+        timeout=12.0,
+        okta_agent_private_key=_PRIVATE_KEY_PEM,
+    )
+
+    client_type.assert_called_once()
+    call = client_type.call_args
+    assert call.args == (API_URL, API_KEY)
+    assert call.kwargs["timeout_seconds"] == 12.0
+    assert call.kwargs["okta_bootstrap_private_key"] == _PRIVATE_KEY_PEM
+    client.validate_api_key.assert_called_once_with()
+    client.close.assert_called_once_with()
+    assert identity.external_agent_id == "wlp-1"
+    assert identity.key_id == "kid-1"
+
+
+def test_initialize_rejects_bootstrap_without_server_validation():
+    with pytest.raises(OpenBoxConfigError, match="requires server validation"):
+        initialize(
+            API_URL,
+            API_KEY,
+            validate=False,
+            okta_agent_private_key=_PRIVATE_KEY_PEM,
+        )
+
+
+def test_initialize_rejects_bootstrap_with_unsupported_algorithm():
+    with pytest.raises(OpenBoxConfigError, match="only 'RS256'"):
+        initialize(
+            API_URL,
+            API_KEY,
+            okta_agent_private_key=_PRIVATE_KEY_PEM,
+            okta_agent_algorithm="RS512",
+        )
+
+
 def test_initialize_rejects_did_and_okta_together(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         "openbox.config._validate_api_key_with_server", lambda *a, **k: None
@@ -221,6 +300,22 @@ def test_create_core_runtime_preserves_okta_identity():
         assert identity is not None
         assert identity.external_agent_id == "wlp-1"
         assert runtime.config.load_identity() is None
+    finally:
+        runtime.close()
+
+
+def test_create_core_runtime_uses_prebootstrapped_okta_identity():
+    identity = _okta_identity()
+    runtime = create_core_runtime(
+        api_url=API_URL,
+        api_key=API_KEY,
+        state=TemporalGovernanceState(),
+        okta_agent_private_key=_PRIVATE_KEY_PEM,
+        resolved_okta_identity=identity,
+    )
+    try:
+        assert runtime.config.okta_config_mode() == "bootstrap"
+        assert runtime.client._identity is identity
     finally:
         runtime.close()
 
