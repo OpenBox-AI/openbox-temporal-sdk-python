@@ -54,6 +54,14 @@ class OpenBoxPlugin(SimplePlugin):
         openbox_api_key: str,
         agent_did: Optional[str] = None,
         agent_private_key: Optional[str] = None,
+        openbox_agent_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        deployment_id: Optional[str] = None,
+        okta_agent_id: Optional[str] = None,
+        okta_agent_key_id: Optional[str] = None,
+        okta_agent_private_key: Optional[str] = None,
+        okta_agent_algorithm: Optional[str] = None,
+        agent_proof_audience: Optional[str] = None,
         governance_timeout: float = 30.0,
         governance_policy: str = "fail_open",
         send_start_event: bool = True,
@@ -69,17 +77,35 @@ class OpenBoxPlugin(SimplePlugin):
         instrument_file_io: bool = True,
         enable_trace_propagation: bool = True,
     ):
+        """OpenBox governance plugin for a Temporal ``Worker``.
+
+        agent_did / agent_private_key: OpenBox DID identity (v1). Both-or-neither.
+        openbox_agent_id / organization_id / deployment_id / okta_agent_id /
+        okta_agent_key_id / okta_agent_private_key / okta_agent_algorithm /
+        agent_proof_audience: Okta AI Agent identity (v2, proposal §13.7).
+        All-or-nothing together, and mutually exclusive with agent_did/
+        agent_private_key — at most one identity verification method.
+        """
         validate_api_key(
             api_url=openbox_url,
             api_key=openbox_api_key,
             governance_timeout=governance_timeout,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
+            openbox_agent_id=openbox_agent_id,
+            organization_id=organization_id,
+            deployment_id=deployment_id,
+            okta_agent_id=okta_agent_id,
+            okta_agent_key_id=okta_agent_key_id,
+            okta_agent_private_key=okta_agent_private_key,
+            okta_agent_algorithm=okta_agent_algorithm,
+            agent_proof_audience=agent_proof_audience,
         )
 
         from .config import get_global_config
 
         _signer = get_global_config().get_signer()
+        _okta_identity = get_global_config().get_okta_identity()
 
         from .governance_state import TemporalGovernanceState
 
@@ -95,6 +121,14 @@ class OpenBoxPlugin(SimplePlugin):
             on_api_error=governance_policy,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
+            openbox_agent_id=openbox_agent_id,
+            organization_id=organization_id,
+            deployment_id=deployment_id,
+            okta_agent_id=okta_agent_id,
+            okta_agent_key_id=okta_agent_key_id,
+            okta_agent_private_key=okta_agent_private_key,
+            okta_agent_algorithm=okta_agent_algorithm,
+            agent_proof_audience=agent_proof_audience,
             hitl_enabled=hitl_enabled,
             skip_workflow_types=skip_workflow_types or set(),
             skip_activity_types=skip_activity_types or {"send_governance_event"},
@@ -128,6 +162,7 @@ class OpenBoxPlugin(SimplePlugin):
             on_api_error=governance_policy,
             agent_did=agent_did,
             signer=_signer,
+            okta_identity=_okta_identity,
         )
 
         interceptors: list = [
@@ -158,6 +193,7 @@ class OpenBoxPlugin(SimplePlugin):
             api_key=openbox_api_key,
             agent_did=agent_did,
             signer=_signer,
+            okta_identity=_okta_identity,
         )
 
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner | None:

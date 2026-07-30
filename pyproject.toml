@@ -51,7 +51,17 @@ dependencies = [
     # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
     # client, context runtime, generic instrumentation, conformance kit.
     # BLOCK-with-patch restart needs handle_patch (base SDK >= 1.2.0).
-    "openbox-sdk-python>=1.2.0",
+    # >=1.3.0 for tagged Okta AI Agent (v2) identity support (proposal §13.7):
+    # OktaAiAgentIdentityConfig/identity_okta/config.load_okta_identity().
+    # NOT YET ON PyPI at time of writing (PyPI has up to 1.2.0) — per this
+    # repo's own decision-pypi-openbox-core-dependency.md (v1.2.1 deliberately
+    # dropped the local [tool.uv.sources] editable override so `pip install`
+    # works standalone), this constraint is NOT paired with a source override
+    # here. `uv sync` will not resolve until 1.3.0 publishes; local
+    # verification during this feature-branch's development used an EPHEMERAL
+    # `uv run --with-editable ../openbox-sdk-python` override instead (never
+    # persisted to this file or uv.lock).
+    "openbox-sdk-python>=1.3.0",
 ]
 
 [project.urls]

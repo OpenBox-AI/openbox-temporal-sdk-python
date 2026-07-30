@@ -267,6 +267,15 @@ def create_core_runtime(
     on_api_error: str = "fail_open",
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    identity_method: Optional[str] = None,
+    openbox_agent_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    deployment_id: Optional[str] = None,
+    okta_agent_id: Optional[str] = None,
+    okta_agent_key_id: Optional[str] = None,
+    okta_agent_private_key: Optional[str] = None,
+    okta_agent_algorithm: Optional[str] = None,
+    agent_proof_audience: Optional[str] = None,
     hitl_enabled: bool = True,
     skip_hitl_activity_types: Optional[set] = None,
     skip_workflow_types: Optional[set] = None,
@@ -302,6 +311,20 @@ def create_core_runtime(
         on_api_error=on_api_error,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        # Okta AI Agent (v2) identity (proposal §13.7). `okta_agent_algorithm`
+        # defaults to "RS256" here (not None) — this constructs the
+        # OpenBoxConfig dataclass DIRECTLY (not via `.resolve()`), so an
+        # explicit `None` would overwrite the dataclass's own "RS256"
+        # default rather than falling through to it.
+        identity_method=identity_method,
+        openbox_agent_id=openbox_agent_id,
+        organization_id=organization_id,
+        deployment_id=deployment_id,
+        okta_agent_id=okta_agent_id,
+        okta_agent_key_id=okta_agent_key_id,
+        okta_agent_private_key=okta_agent_private_key,
+        okta_agent_algorithm=okta_agent_algorithm or "RS256",
+        agent_proof_audience=agent_proof_audience,
         hitl=HitlConfig(
             enabled=hitl_enabled,
             skip_activity_types=(skip_hitl_activity_types or {"send_governance_event"}),

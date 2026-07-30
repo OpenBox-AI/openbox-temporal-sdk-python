@@ -113,6 +113,14 @@ class TestCreateOpenboxWorkerWithConfig:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
+            openbox_agent_id=None,
+            organization_id=None,
+            deployment_id=None,
+            okta_agent_id=None,
+            okta_agent_key_id=None,
+            okta_agent_private_key=None,
+            okta_agent_algorithm=None,
+            agent_proof_audience=None,
         )
 
     @with_worker_patches
@@ -291,6 +299,7 @@ class TestCreateOpenboxWorkerWithConfig:
             api_key="obx_test_key123",
             agent_did=None,
             signer=None,
+            okta_identity=None,
         )
 
     @with_worker_patches

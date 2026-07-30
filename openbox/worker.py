@@ -41,6 +41,14 @@ def create_openbox_worker(
     openbox_api_key: str,
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    openbox_agent_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    deployment_id: Optional[str] = None,
+    okta_agent_id: Optional[str] = None,
+    okta_agent_key_id: Optional[str] = None,
+    okta_agent_private_key: Optional[str] = None,
+    okta_agent_algorithm: Optional[str] = None,
+    agent_proof_audience: Optional[str] = None,
     governance_timeout: float = 30.0,
     governance_policy: str = "fail_open",
     send_start_event: bool = True,
@@ -99,6 +107,12 @@ def create_openbox_worker(
         # OpenBox config
         openbox_url: OpenBox Core API URL (required for governance)
         openbox_api_key: OpenBox API key (required for governance)
+        agent_did / agent_private_key: OpenBox DID identity (v1). Both-or-neither.
+        openbox_agent_id / organization_id / deployment_id / okta_agent_id /
+        okta_agent_key_id / okta_agent_private_key / okta_agent_algorithm /
+        agent_proof_audience: Okta AI Agent identity (v2, proposal §13.7).
+        All-or-nothing together, and mutually exclusive with agent_did/
+        agent_private_key — at most one identity verification method.
         governance_timeout: Timeout for governance API calls (default: 30.0s)
         governance_policy: "fail_open" or "fail_closed" (default: "fail_open")
         send_start_event: Send WorkflowStarted events (default: True)
@@ -161,11 +175,20 @@ def create_openbox_worker(
         governance_timeout=governance_timeout,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        openbox_agent_id=openbox_agent_id,
+        organization_id=organization_id,
+        deployment_id=deployment_id,
+        okta_agent_id=okta_agent_id,
+        okta_agent_key_id=okta_agent_key_id,
+        okta_agent_private_key=okta_agent_private_key,
+        okta_agent_algorithm=okta_agent_algorithm,
+        agent_proof_audience=agent_proof_audience,
     )
 
     from .config import get_global_config
 
     _signer = get_global_config().get_signer()
+    _okta_identity = get_global_config().get_okta_identity()
 
     from .governance_state import TemporalGovernanceState
 
@@ -181,6 +204,14 @@ def create_openbox_worker(
         on_api_error=governance_policy,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        openbox_agent_id=openbox_agent_id,
+        organization_id=organization_id,
+        deployment_id=deployment_id,
+        okta_agent_id=okta_agent_id,
+        okta_agent_key_id=okta_agent_key_id,
+        okta_agent_private_key=okta_agent_private_key,
+        okta_agent_algorithm=okta_agent_algorithm,
+        agent_proof_audience=agent_proof_audience,
         hitl_enabled=hitl_enabled,
         skip_workflow_types=skip_workflow_types or set(),
         skip_activity_types=skip_activity_types or {"send_governance_event"},
@@ -222,6 +253,7 @@ def create_openbox_worker(
         on_api_error=governance_policy,
         agent_did=agent_did,
         signer=_signer,
+        okta_identity=_okta_identity,
     )
 
     activity_interceptor = ActivityGovernanceInterceptor(
@@ -239,6 +271,7 @@ def create_openbox_worker(
         api_key=openbox_api_key,
         agent_did=agent_did,
         signer=_signer,
+        okta_identity=_okta_identity,
     )
 
     all_interceptors: list = [workflow_interceptor, activity_interceptor, *interceptors]

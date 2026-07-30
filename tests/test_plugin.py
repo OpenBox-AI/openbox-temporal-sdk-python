@@ -67,6 +67,14 @@ class TestPluginInit:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
+            openbox_agent_id=None,
+            organization_id=None,
+            deployment_id=None,
+            okta_agent_id=None,
+            okta_agent_key_id=None,
+            okta_agent_private_key=None,
+            okta_agent_algorithm=None,
+            agent_proof_audience=None,
         )
 
     def test_builds_core_runtime_and_installs_instrumentation(self):
@@ -135,6 +143,7 @@ class TestPluginInit:
             on_api_error="fail_closed",
             agent_did=None,
             signer=None,
+            okta_identity=None,
         )
 
     def test_is_simple_plugin_subclass(self):

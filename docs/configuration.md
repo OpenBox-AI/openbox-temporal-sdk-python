@@ -102,6 +102,48 @@ OPENBOX_AGENT_DID=did:aip:<uuid>
 OPENBOX_AGENT_PRIVATE_KEY=<base64 raw 32-byte Ed25519 seed>
 ```
 
+## Identity & Signing (Okta AI Agent, v2)
+
+An alternative to OpenBox DID: an Okta-synchronized AI Agent identity, signed
+with RS256 JWT assertions instead of Ed25519 headers. Requests route to
+Core's `/api/v2/*` endpoints instead of `/api/v1/*`. Mutually exclusive with
+`agent_did`/`agent_private_key` — configure exactly one identity verification
+method. All eight fields below are **all-or-nothing together**.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `openbox_agent_id` | `str` | `None` | OpenBox agent UUID. |
+| `organization_id` | `str` | `None` | OpenBox organization ID. |
+| `deployment_id` | `str` | `None` | OpenBox deployment ID. |
+| `okta_agent_id` | `str` | `None` | External Okta AI Agent ID (asserted as `iss`/`sub`). |
+| `okta_agent_key_id` | `str` | `None` | Okta credential `kid` (JWT key-selection identifier). |
+| `okta_agent_private_key` | `str` | `None` | PKCS8 PEM RSA private key (2048-bit minimum). Signs requests locally. Non-repudiation material — never logged, redacted from errors/`__repr__`. |
+| `okta_agent_algorithm` | `str` | `"RS256"` | Signing algorithm. Only `"RS256"` is supported at launch. |
+| `agent_proof_audience` | `str` | `None` | Deployment-specific assertion audience, `urn:openbox:<deployment-id>:core`. |
+
+All RSA key loading, the 2048-bit floor, algorithm allowlisting, and RS256/JWT
+assertion construction are owned by the base SDK
+(`openbox_core.identity_okta`) — this package never re-implements them.
+
+Commonly supplied from env alongside the API key:
+
+```
+OPENBOX_AGENT_ID=<openbox-agent-uuid>
+OPENBOX_ORGANIZATION_ID=<openbox-organization-id>
+OPENBOX_DEPLOYMENT_ID=<openbox-deployment-id>
+OPENBOX_OKTA_AGENT_ID=<external-okta-ai-agent-id>
+OPENBOX_OKTA_AGENT_KEY_ID=<kid>
+OPENBOX_OKTA_AGENT_PRIVATE_KEY=<pkcs8-pem-rsa-private-key>
+OPENBOX_AGENT_PROOF_AUDIENCE=urn:openbox:<deployment-id>:core
+```
+
+Note: unlike `agent_did`/`agent_private_key`, these Okta fields are read
+directly from the arguments you pass to `create_openbox_worker(...)` /
+`OpenBoxPlugin(...)` / `initialize(...)` — this package does not read
+`OPENBOX_*` environment variables itself (see the "Standard Worker options"
+example in the README for the `os.getenv(...)` pattern this project uses
+throughout).
+
 ## Governance Context
 
 | Parameter | Type | Default | Description |

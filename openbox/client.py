@@ -15,11 +15,18 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from .types import GovernanceVerdictResponse, Verdict
 
 logger = logging.getLogger(__name__)
+
+# v1 (OpenBox DID / unsigned) routes — byte-compatible, unchanged.
+_EVALUATE_PATH = "/api/v1/governance/evaluate"
+_APPROVAL_PATH = "/api/v1/governance/approval"
+# v2 (Okta AI Agent) routes (proposal §13.7; contract §2.2).
+_EVALUATE_PATH_V2 = "/api/v2/governance/evaluate"
+_APPROVAL_PATH_V2 = "/api/v2/governance/approval"
 
 
 def _check_expiration(data: dict) -> dict:
@@ -48,6 +55,46 @@ def _check_expiration(data: dict) -> dict:
     return data
 
 
+def _extract_reason_code(body: Optional[bytes]) -> Optional[str]:
+    """Machine reason code from Core's JSON error body, if present."""
+    import json
+
+    if not body:
+        return None
+    try:
+        data = json.loads(body.decode("utf-8", errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    code = data.get("reason_code") or data.get("code") or data.get("reason")
+    return code if isinstance(code, str) else None
+
+
+def _raise_okta_auth_failure(response: Any) -> None:
+    """Raise an actionable auth error for a 401/403 v2 (Okta) response.
+
+    Delegates reason-code CLASSIFICATION to the base SDK's own
+    ``map_signing_error`` (contract §7's full v2 code set) but always raises
+    THIS package's own ``OpenBoxSigningError``/``OpenBoxAuthError`` type, so
+    callers catching ``openbox.errors.*`` work identically for v1 and v2
+    (proposal §13.6 — 401/403 are hard authentication failures, never
+    laundered into a fallback ALLOW or "still pending").
+    """
+    from .errors import OpenBoxAuthError, OpenBoxSigningError
+
+    reason_code = _extract_reason_code(getattr(response, "content", None))
+    if reason_code:
+        from openbox_core.errors import map_signing_error as core_map_signing_error
+
+        core_exc = core_map_signing_error(reason_code)
+        raise OpenBoxSigningError(str(core_exc), reason_code) from core_exc
+    raise OpenBoxAuthError(
+        f"Authentication rejected (HTTP {response.status_code}). "
+        "Check your API key at dashboard.openbox.ai"
+    )
+
+
 class GovernanceClient:
     """HTTP client for OpenBox Core governance API.
 
@@ -68,22 +115,28 @@ class GovernanceClient:
         on_api_error: str = "fail_open",
         agent_did: Optional[str] = None,
         signer=None,
+        okta_identity=None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
         self._on_api_error = on_api_error
         # DID + Ed25519 signer for AIP signed requests (None = unsigned mode).
-        # Fall back to the globally-configured signer when omitted so manual
-        # setups that called initialize() with signing don't send unsigned calls.
+        # okta_identity (v2, proposal §13.7): a loaded OktaAgentIdentity —
+        # mutually exclusive with agent_did/signer. Fall back to the
+        # globally-configured identity when ALL THREE are omitted, so manual
+        # setups that called initialize() with signing don't send unsigned
+        # (or wrong-version) calls.
         from .config import resolve_signing_defaults
 
-        self._agent_did, self._signer = resolve_signing_defaults(agent_did, signer)
+        self._agent_did, self._signer, self._okta_identity = resolve_signing_defaults(
+            agent_did, signer, okta_identity
+        )
 
     async def evaluate_event(
         self, payload: dict
     ) -> Optional[GovernanceVerdictResponse]:
-        """Send governance event to /api/v1/governance/evaluate.
+        """Send governance event to the version-appropriate evaluate route.
 
         Args:
             payload: Pre-built governance event payload dict.
@@ -92,27 +145,55 @@ class GovernanceClient:
             GovernanceVerdictResponse on success.
             None on API error with fail_open policy.
             GovernanceVerdictResponse(HALT) on API error with fail_closed policy.
+
+        Raises:
+            OpenBoxAuthError / OpenBoxSigningError: Okta (v2) mode ONLY — a
+                401/403 fails closed unconditionally (proposal §13.6), never
+                laundered into a fallback ALLOW. v1/unsigned mode preserves
+                its existing (`_handle_api_error`) behavior unchanged.
         """
         # Lazy import — avoids Temporal sandbox restrictions at module level
         import httpx
-        from .request_signing import prepare_signed_request
 
-        headers, body = prepare_signed_request(
-            "POST",
-            "/api/v1/governance/evaluate",
-            payload,
-            api_key=self._api_key,
-            agent_did=self._agent_did,
-            signer=self._signer,
-        )
+        from .errors import OpenBoxAuthError
+
+        if self._okta_identity is not None:
+            from .request_signing import prepare_okta_signed_request
+
+            headers, body = prepare_okta_signed_request(
+                "POST",
+                _EVALUATE_PATH_V2,
+                payload,
+                api_key=self._api_key,
+                okta_identity=self._okta_identity,
+            )
+            evaluate_path = _EVALUATE_PATH_V2
+        else:
+            from .request_signing import prepare_signed_request
+
+            headers, body = prepare_signed_request(
+                "POST",
+                _EVALUATE_PATH,
+                payload,
+                api_key=self._api_key,
+                agent_did=self._agent_did,
+                signer=self._signer,
+            )
+            evaluate_path = _EVALUATE_PATH
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
-                    f"{self._api_url}/api/v1/governance/evaluate",
+                    f"{self._api_url}{evaluate_path}",
                     content=body,
                     headers=headers,
                 )
+
+                if self._okta_identity is not None and response.status_code in (
+                    401,
+                    403,
+                ):
+                    _raise_okta_auth_failure(response)
 
                 if response.status_code >= 400:
                     error_msg = f"HTTP {response.status_code}"
@@ -141,6 +222,12 @@ class GovernanceClient:
 
                 return None
 
+        except OpenBoxAuthError:
+            # Raised by `_raise_okta_auth_failure` above (a 401/403 in Okta
+            # mode) — an authentication failure, never a network error
+            # (proposal §13.6). Must propagate, never be laundered into a
+            # fallback ALLOW/HALT via `_handle_api_error` below.
+            raise
         except Exception as e:
             error_msg = str(e) if str(e) else repr(e)
             logger.warning(f"Governance API error ({type(e).__name__}): {error_msg}")
@@ -149,14 +236,20 @@ class GovernanceClient:
     async def poll_approval(
         self, workflow_id: str, run_id: str, activity_id: str
     ) -> Optional[dict]:
-        """Poll /api/v1/governance/approval for HITL status.
+        """Poll the version-appropriate approval route for HITL status.
 
         Returns dict with verdict/action and optional fields, or None on failure.
         Sets expired=True in the dict if approval_expiration_time has passed.
+
+        Raises:
+            OpenBoxAuthError / OpenBoxSigningError: Okta (v2) mode ONLY — a
+                401/403 fails closed unconditionally (proposal §13.6) rather
+                than being read as "still pending" and retried forever.
         """
         # Lazy import — avoids Temporal sandbox restrictions at module level
         import httpx
-        from .request_signing import prepare_signed_request
+
+        from .errors import OpenBoxAuthError
 
         payload = {
             "workflow_id": workflow_id,
@@ -164,22 +257,43 @@ class GovernanceClient:
             "activity_id": activity_id,
         }
 
-        headers, body = prepare_signed_request(
-            "POST",
-            "/api/v1/governance/approval",
-            payload,
-            api_key=self._api_key,
-            agent_did=self._agent_did,
-            signer=self._signer,
-        )
+        if self._okta_identity is not None:
+            from .request_signing import prepare_okta_signed_request
+
+            headers, body = prepare_okta_signed_request(
+                "POST",
+                _APPROVAL_PATH_V2,
+                payload,
+                api_key=self._api_key,
+                okta_identity=self._okta_identity,
+            )
+            approval_path = _APPROVAL_PATH_V2
+        else:
+            from .request_signing import prepare_signed_request
+
+            headers, body = prepare_signed_request(
+                "POST",
+                _APPROVAL_PATH,
+                payload,
+                api_key=self._api_key,
+                agent_did=self._agent_did,
+                signer=self._signer,
+            )
+            approval_path = _APPROVAL_PATH
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 response = await client.post(
-                    f"{self._api_url}/api/v1/governance/approval",
+                    f"{self._api_url}{approval_path}",
                     content=body,
                     headers=headers,
                 )
+
+                if self._okta_identity is not None and response.status_code in (
+                    401,
+                    403,
+                ):
+                    _raise_okta_auth_failure(response)
 
                 if response.status_code == 200:
                     data = response.json()
@@ -192,6 +306,11 @@ class GovernanceClient:
                 )
                 return None
 
+        except OpenBoxAuthError:
+            # Raised by `_raise_okta_auth_failure` above — must propagate
+            # (proposal §13.6: never read a hard auth failure as "still
+            # pending" and keep polling forever).
+            raise
         except Exception as e:
             logger.warning(f"Failed to poll approval status: {e}")
             return None
