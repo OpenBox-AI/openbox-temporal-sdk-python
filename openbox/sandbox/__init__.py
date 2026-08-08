@@ -1,40 +1,55 @@
-"""Thin Temporal integration for the framework-neutral sandbox SDK."""
+"""Lazy public exports for Activity-side governed-command integration.
 
-from openbox_sandbox import (
-    SandboxActivityResult,
-    SandboxCommandArgument,
-    SandboxCommandRequest,
-    SandboxReceipt,
-    SandboxTypedResult,
-)
+The package initializer stays empty of Activity dependencies so importing
+``openbox.sandbox.types`` from workflow code loads only that pure types module.
+"""
 
-from .adapter import (
-    GovernedCommandDispatcher,
-    GovernedCommandFactory,
-    TemporalSandboxConfig,
-    TemporalSandboxConfigurationError,
-)
-from .config import SandboxConfig
-from .heartbeat import TemporalHeartbeatSink
-from .interceptor import GovernedCommandInterceptor
-from .plugin import OpenBoxSandboxPlugin
-from .resolver import resolve_sandbox_config
-from .worker import create_sandbox_worker
+from __future__ import annotations
 
-__all__ = [
-    "GovernedCommandDispatcher",
-    "GovernedCommandFactory",
-    "GovernedCommandInterceptor",
-    "OpenBoxSandboxPlugin",
-    "SandboxActivityResult",
-    "SandboxCommandArgument",
-    "SandboxCommandRequest",
-    "SandboxConfig",
-    "SandboxReceipt",
-    "SandboxTypedResult",
-    "TemporalHeartbeatSink",
-    "TemporalSandboxConfig",
-    "TemporalSandboxConfigurationError",
-    "create_sandbox_worker",
-    "resolve_sandbox_config",
-]
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "TemporalSandboxConfig": "openbox.sandbox.adapter",
+    "TemporalSandboxConfigurationError": "openbox.sandbox.adapter",
+    "TemporalHeartbeatSink": "openbox.sandbox.heartbeat",
+    "CommandProfileBundleError": "openbox.sandbox.profiles",
+    "TemporalCommandProfileBundle": "openbox.sandbox.profiles",
+    "GovernedCommandDeployment": "openbox.sandbox.deployment",
+    "GovernedCommandDeploymentError": "openbox.sandbox.deployment",
+    "load_governed_command_deployment": "openbox.sandbox.deployment",
+    "GovernedCommandReceiptError": "openbox.sandbox.receipts",
+    "GovernedCommandReceiptVerifier": "openbox.sandbox.receipts",
+    "AipEd25519RequestSigner": "openbox.sandbox.signing",
+    "DecimalArgument": "openbox.sandbox.registry",
+    "EnumArgument": "openbox.sandbox.registry",
+    "GovernedCommandDefinition": "openbox.sandbox.registry",
+    "GovernedCommandRegistry": "openbox.sandbox.registry",
+    "GovernedCommandRegistryError": "openbox.sandbox.registry",
+    "IdentifierArgument": "openbox.sandbox.registry",
+    "IdentifierResultField": "openbox.sandbox.registry",
+    "IntegerResultField": "openbox.sandbox.registry",
+    "LiteralArgument": "openbox.sandbox.registry",
+    "TypedJsonResultSchema": "openbox.sandbox.registry",
+    "governed_command_registry": "openbox.sandbox.registry",
+    "GOVERNED_COMMAND_ACTIVITY_TYPE": "openbox.sandbox.types",
+    "GovernedCommandActivityResult": "openbox.sandbox.types",
+    "GovernedCommandInputError": "openbox.sandbox.types",
+    "GovernedCommandReceipt": "openbox.sandbox.types",
+    "GovernedCommandRequest": "openbox.sandbox.types",
+    "GovernedCommandResultValue": "openbox.sandbox.types",
+    "GovernedCommandTypedResult": "openbox.sandbox.types",
+    "StructuredCommandArgument": "openbox.sandbox.types",
+}
+
+
+def __getattr__(name: str) -> Any:
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(name)
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+__all__ = list(_EXPORTS)

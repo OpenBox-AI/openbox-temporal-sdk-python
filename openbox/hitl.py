@@ -65,8 +65,8 @@ def handle_approval_response(
             Response is None (poll failed) or verdict is still pending.
         ApplicationError(type="ApprovalExpired", non_retryable=True):
             Approval window has expired.
-        ApplicationError(type="GovernanceRetryableBlock", non_retryable=True):
-            A non-expired exact BLOCK verdict carries a valid retry plan — the
+        ApplicationError(type="GovernancePatch", non_retryable=True):
+            A non-expired exact BLOCK verdict carries a valid patch — the
             workflow interceptor catches this and restarts with the
             replacement input instead of rejecting the approval outright.
         ApplicationError(type="ApprovalRejected", non_retryable=True):
@@ -91,23 +91,23 @@ def handle_approval_response(
 
     approval = ApprovalResult.from_dict(response)
 
-    # A non-expired exact BLOCK with a valid retry plan requests a workflow
+    # A non-expired exact BLOCK with a valid patch requests a workflow
     # restart instead of a plain rejection — checked before the ALLOW/stop
-    # branches below so a retry request is never first turned into
+    # branches below so a patch request is never first turned into
     # ApprovalRejected. Expiry above still takes precedence. Approvals gate a
     # specific activity, so ActivityStarted is the origin tag (metadata only).
-    from .retryable_block import retryable_block_request
+    from .patch import patch_request
 
-    retry_request = retryable_block_request(approval, event_type="ActivityStarted")
-    if retry_request is not None:
+    req = patch_request(approval, event_type="ActivityStarted")
+    if req is not None:
         from temporalio.exceptions import ApplicationError
 
-        from .errors import GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE
+        from .errors import GOVERNANCE_PATCH_ERROR_TYPE
 
         raise ApplicationError(
             "Governance requested workflow restart",
-            retry_request.to_dict(),
-            type=GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
+            req.to_dict(),
+            type=GOVERNANCE_PATCH_ERROR_TYPE,
             non_retryable=True,
         )
 

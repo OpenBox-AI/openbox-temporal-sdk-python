@@ -1,5 +1,7 @@
 """OpenBox SDK - Workflow-Boundary Governance with OpenTelemetry"""
 
+from typing import Any
+
 # STATIC on purpose — never read via importlib.metadata. A metadata lookup
 # OPENS A FILE; with file instrumentation active (traced_open patches
 # builtins.open + io.open) that read re-enters governance: eagerly at import
@@ -31,11 +33,8 @@ from .errors import (
 # signing/HTTP routed lazily through the governance activity).
 from .multi_agent import emit_handoff
 
-# Retryable-BLOCK restart envelope (sandbox-safe: pure stdlib + base contracts).
-from .retryable_block import (
-    GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
-    RetryableBlockRequest,
-)
+# BLOCK-with-patch restart envelope (sandbox-safe: pure stdlib + base contracts).
+from .patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
 from .types import (
     GovernanceVerdictResponse,
     GuardrailsCheckResult,
@@ -51,19 +50,6 @@ try:
     from .plugin import OpenBoxPlugin
 except ImportError:
     pass  # temporalio < 1.23.0, plugin not available
-
-# Sandbox — NOT imported eagerly. The sandbox sub-package imports
-# openbox_sandbox.engine/runtime which pull in cryptography and TLS I/O,
-# which must not be loaded in workflow-sandbox or governance contexts.
-# Users import directly: from openbox.sandbox.config import SandboxConfig
-
-
-def __getattr__(name: str) -> object:
-    if name == "SandboxConfig":
-        from .sandbox.config import SandboxConfig
-
-        return SandboxConfig
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 from .client import GovernanceClient
 from .hitl import handle_approval_response, raise_approval_pending, should_skip_hitl
@@ -101,7 +87,6 @@ from .verdict_handler import VerdictEnforcementResult, enforce_verdict
 __all__ = [
     "create_openbox_worker",
     "OpenBoxPlugin",
-    "SandboxConfig",
     "initialize",
     "get_global_config",
     "GovernanceConfig",
@@ -124,8 +109,8 @@ __all__ = [
     "WorkflowEventType",
     "GovernanceVerdictResponse",
     "GuardrailsCheckResult",
-    "RetryableBlockRequest",
-    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
+    "PatchRequest",
+    "GOVERNANCE_PATCH_SCHEMA_VERSION",
     "emit_handoff",
     "GovernanceInterceptor",
     "enforce_verdict",
@@ -135,3 +120,35 @@ __all__ = [
     "should_skip_hitl",
     "GovernanceClient",
 ]
+
+
+# Sandbox surface (local extension): resolved lazily so importing any
+# sandbox-safe module never pulls the signing/network stack.
+_SANDBOX_NAMES = (
+    "AipEd25519RequestSigner",
+    "GovernedCommandActivityResult",
+    "GovernedCommandDeployment",
+    "GovernedCommandDeploymentError",
+    "GovernedCommandInputError",
+    "GovernedCommandReceipt",
+    "GovernedCommandReceiptError",
+    "GovernedCommandReceiptVerifier",
+    "GovernedCommandRequest",
+    "GovernedCommandResultValue",
+    "GovernedCommandTypedResult",
+    "StructuredCommandArgument",
+    "TemporalCommandProfileBundle",
+    "TemporalHeartbeatSink",
+    "TemporalSandboxConfig",
+    "load_governed_command_deployment",
+)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SANDBOX_NAMES:
+        import openbox.sandbox as _sandbox_pkg
+
+        value = getattr(_sandbox_pkg, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(name)

@@ -1,13 +1,9 @@
-"""AIP DID + Ed25519 signed-request construction.
+"""Temporal-compatible wrappers around the shared exact-body signing contract.
 
-This module keeps the Temporal SDK's public surface while delegating the
-canonical-string/signature construction to ``openbox_core.identity``::
-
-    UPPER(METHOD)\\nPATH\\nTIMESTAMP\\nNONCE\\nBODY_SHA256_HEX
-
-SANDBOX SAFETY: ``cryptography`` work happens only through a pre-loaded signer
-object passed by the caller, ``httpx`` is imported lazily inside the transports,
-and this module must not be imported from the Temporal workflow sandbox path.
+The shared SDK owns JSON byte serialization, canonical request construction,
+and Ed25519 signing.  This module keeps the historical Temporal call signature,
+raw Temporal SDK headers, and timestamp/nonce patch seams used by callers and
+tests.  It is intentionally absent from deterministic workflow import paths.
 """
 
 from __future__ import annotations
@@ -16,7 +12,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from openbox_core.identity import (  # noqa: F401  (re-exported public names)
+from openbox_core.identity import (
     EMPTY_BODY_SHA256,
     HEADER_BODY_SHA256,
     HEADER_DID,
@@ -24,11 +20,22 @@ from openbox_core.identity import (  # noqa: F401  (re-exported public names)
     HEADER_SIGNATURE,
     HEADER_TIMESTAMP,
     AgentIdentity,
+    sign_serialized_request,
 )
-from openbox_core.identity import (
-    prepare_signed_request as _core_prepare_signed_request,
-)
-from openbox_core.serialization import serialize_body  # noqa: F401  (re-export)
+from openbox_core.serialization import serialize_body
+
+__all__ = [
+    "EMPTY_BODY_SHA256",
+    "HEADER_DID",
+    "HEADER_TIMESTAMP",
+    "HEADER_NONCE",
+    "HEADER_SIGNATURE",
+    "HEADER_BODY_SHA256",
+    "serialize_body",
+    "prepare_signed_request",
+    "send_sync",
+    "send_async",
+]
 
 
 def prepare_signed_request(
@@ -40,50 +47,39 @@ def prepare_signed_request(
     agent_did: Optional[str],
     signer,
 ) -> Tuple[dict, bytes]:
-    """Build request headers + exact body bytes — the single source of truth.
+    """Build Temporal auth headers and shared exact signed body bytes.
 
-    Args:
-        method: HTTP method (case-insensitive; upper-cased into the canonical string).
-        path: URL path only, no host/query (e.g. ``/api/v1/governance/evaluate``).
-        payload: JSON-serializable body, or ``None`` for empty-body (GET) requests.
-        api_key: Bearer API key for the base auth headers.
-        agent_did: Agent DID asserted in ``X-OpenBox-Agent-DID`` (or ``None``).
-        signer: Loaded ``Ed25519PrivateKey`` object, or ``None`` for unsigned mode.
-
-    Returns:
-        ``(headers, body_bytes)``. Callers MUST send ``content=body_bytes`` —
-        never ``json=`` — so the transmitted bytes match the hashed bytes.
+    Callers must transmit the returned body with ``content=``.  A partial
+    DID/signer pair intentionally preserves the historical unsigned behavior.
     """
-    from . import __version__
+    # Keep Temporal's established header values rather than replacing them
+    # with the base SDK's framework identifier.
+    from .hook_governance import build_auth_headers
 
-    sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"
-
-    if signer is not None and agent_did:
-        identity = AgentIdentity(agent_did=agent_did, signer=signer)
-        timestamp = datetime.now(timezone.utc).isoformat()
-        nonce = secrets.token_urlsafe(24)
-        return _core_prepare_signed_request(
-            method,
-            path,
-            payload,
-            api_key=api_key,
-            identity=identity,
-            sdk_version=sdk_identifier,
-            _timestamp=timestamp,
-            _nonce=nonce,
-        )
-    return _core_prepare_signed_request(
-        method, path, payload, api_key=api_key, identity=None, sdk_version=sdk_identifier
+    body = serialize_body(payload)
+    headers = build_auth_headers(api_key)
+    identity = (
+        AgentIdentity(agent_did=agent_did, signer=signer)
+        if agent_did and signer is not None
+        else None
+    )
+    return sign_serialized_request(
+        method,
+        path,
+        body,
+        headers=headers,
+        identity=identity,
+        # Preserve the module-level deterministic seams from the legacy helper.
+        _timestamp=(datetime.now(timezone.utc).isoformat() if identity else None),
+        _nonce=(secrets.token_urlsafe(24) if identity else None),
     )
 
 
 def send_sync(client, url: str, headers: dict, body_bytes: bytes):
-    """POST prepared bytes via a sync ``httpx.Client``. Sends ``content=`` — never
-    ``json=`` — so the transmitted bytes match the signed/hashed bytes."""
+    """Send prepared bytes through a sync client (never ``json=``)."""
     return client.post(url, headers=headers, content=body_bytes)
 
 
 async def send_async(client, url: str, headers: dict, body_bytes: bytes):
-    """POST prepared bytes via an async ``httpx.AsyncClient``. Sends ``content=`` —
-    never ``json=`` — so the transmitted bytes match the signed/hashed bytes."""
+    """Send prepared bytes through an async client (never ``json=``)."""
     return await client.post(url, headers=headers, content=body_bytes)

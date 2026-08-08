@@ -11,13 +11,15 @@ crypto, OTel, or wall-clock at import).
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Optional
 
 from openbox_core.contracts.events import EventType as WorkflowEventType  # noqa: F401
-from openbox_core.contracts.results import EvaluationResult  # noqa: F401
-from openbox_core.contracts.results import Verdict  # noqa: F401
-from openbox_core.contracts.results import (  # noqa: F401  (Temporal-parity name)
-    GuardrailsResult as GuardrailsCheckResult,
+from openbox_core.contracts.results import (  # noqa: F401
+    EvaluationResult,
+    Verdict,
+)
+from openbox_core.contracts.results import (
+    GuardrailsResult as GuardrailsCheckResult,  # noqa: F401  (Temporal-parity name)
 )
 
 from .errors import GovernanceBlockedError  # noqa: F401
@@ -48,7 +50,7 @@ class GovernanceVerdictResponse(EvaluationResult):
         behavioral_violations: Optional[List[str]] = None,
         alignment_score: Optional[float] = None,
         approval_id: Optional[str] = None,
-        constraints: List[Dict[str, Any]] | List[str] | Dict[str, Any] | None = None,
+        constraints: Optional[List[Dict[str, Any]]] = None,
         **shared_fields: Any,
     ):
         super().__init__(
@@ -63,7 +65,7 @@ class GovernanceVerdictResponse(EvaluationResult):
             behavioral_violations=behavioral_violations,
             alignment_score=alignment_score,
             approval_id=approval_id,
-            constraints=cast(Any, constraints),
+            constraints=constraints,
             **shared_fields,
         )
 
