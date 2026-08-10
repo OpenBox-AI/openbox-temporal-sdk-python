@@ -133,7 +133,6 @@ def _temporal_response(result: EvaluationResult) -> GovernanceVerdictResponse:
         alignment_score=result.alignment_score,
         approval_id=result.approval_id,
         constraints=temporal_constraints,
-        wire_action=result.wire_action,
         fallback_used=result.fallback_used,
         patch=result.patch,
         raw=dict(result.raw),
@@ -176,8 +175,6 @@ class GovernanceClient:
             timeout_seconds=timeout,
             on_api_error=on_api_error,
             identity=identity,
-            # Reuse the singleton's already-resolved context when available.
-            verify=self._ssl_context,
             sdk_engine="temporal",
         )
 
@@ -240,7 +237,9 @@ class GovernanceClient:
 
     def _handle_api_error(self, error_msg: str) -> Optional[GovernanceVerdictResponse]:
         if self._on_api_error == "fail_closed":
-            return GovernanceVerdictResponse(verdict=Verdict.HALT, reason=error_msg)
+            return GovernanceVerdictResponse(
+                verdict=Verdict.HALT, reason=error_msg, fallback_used=True
+            )
         return None
 
     @staticmethod
