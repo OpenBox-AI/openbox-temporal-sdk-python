@@ -292,7 +292,7 @@ class GovernanceActivities:
         except Exception as e:
             logger.warning(f"Failed to send {event_type} event: {e}")
             if on_api_error == "fail_closed":
-                raise GovernanceAPIError(str(e))
+                raise GovernanceAPIError(str(e)) from None
             return {"success": False, "error": str(e)}
 
 

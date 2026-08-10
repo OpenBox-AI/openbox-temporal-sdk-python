@@ -15,8 +15,6 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from openbox.errors import OpenBoxInsecureURLError
-
 from openbox.config import (
     API_KEY_PATTERN,
     GovernanceConfig,
@@ -29,6 +27,7 @@ from openbox.config import (
     get_global_config,
     initialize,
 )
+from openbox.errors import OpenBoxInsecureURLError
 
 
 class TestGovernanceConfigDefaults:

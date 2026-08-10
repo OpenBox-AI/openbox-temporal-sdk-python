@@ -205,7 +205,7 @@ def _validate_api_key_with_server(
             if reason_code:
                 from .errors import map_signing_error
 
-                raise map_signing_error(reason_code)
+                raise map_signing_error(reason_code) from None
             raise OpenBoxAuthError(
                 "Invalid API key. Check your API key at dashboard.openbox.ai"
             ) from None

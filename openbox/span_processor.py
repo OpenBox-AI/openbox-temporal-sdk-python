@@ -9,17 +9,15 @@ to fallback exporters (Jaeger, OTLP, etc.) without buffering.
 
 import logging
 import threading
-from typing import TYPE_CHECKING, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Optional
+
+from .types import Verdict
 
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
-
-from dataclasses import dataclass, field
-from typing import Any
-
-from .types import Verdict
 
 
 @dataclass

@@ -40,6 +40,7 @@ from .errors import (
     GOVERNANCE_PATCH_ERROR_TYPE,
     GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
+    GovernanceHaltError,
 )
 from .multi_agent import inject_session_header, read_session_from_memo
 from .patch import PatchRequest, extract_patch_request
@@ -186,8 +187,6 @@ def _serialize_value(value: Any) -> Any:
         return str(value)
 
 
-from .errors import GovernanceHaltError  # noqa: F401
-
 
 def _legacy_block_degrade(payload: dict) -> dict | None:
     """Pre-feature BLOCK result shape, keyed by event origin.
@@ -256,7 +255,7 @@ async def _send_governance_event(
             GOVERNANCE_HALT_ERROR_TYPE,
             GOVERNANCE_STOP_ERROR_TYPE,
         ):
-            raise GovernanceHaltError(str(e))
+            raise GovernanceHaltError(str(e)) from None
 
         if app_error_type in (
             GOVERNANCE_PATCH_ERROR_TYPE,
@@ -276,7 +275,7 @@ async def _send_governance_event(
             return None
 
         if app_error_type == GOVERNANCE_API_ERROR_TYPE:
-            raise GovernanceHaltError(str(e))
+            raise GovernanceHaltError(str(e)) from None
 
         return None
 

@@ -37,9 +37,9 @@ _ignored_url_prefixes: set[str] = set()
 _instrument_http: bool = True
 
 # Hook-level governance is handled by hook_governance module
-from . import db_governance_hooks as _db_gov
-from . import hook_governance as _hook_gov
-from .file_governance_hooks import (  # noqa: F401
+from . import db_governance_hooks as _db_gov  # noqa: E402
+from . import hook_governance as _hook_gov  # noqa: E402
+from .file_governance_hooks import (  # noqa: E402, F401
     _build_file_span_data,
     setup_file_io_instrumentation,
     uninstrument_file_io,
@@ -48,7 +48,7 @@ from .file_governance_hooks import (  # noqa: F401
 # ── Re-export all names from sub-modules for backward compatibility ─────────
 # Tests and external code import from openbox.otel_setup; these re-exports
 # ensure all existing import paths continue to work unchanged.
-from .http_governance_hooks import (  # noqa: F401
+from .http_governance_hooks import (  # noqa: E402, F401
     _HTTP_HOOK_TIMINGS_MAX,
     _TEXT_CONTENT_TYPES,
     _build_http_span_data,
@@ -312,7 +312,9 @@ def _validate_sqlalchemy_engine(engine: Any) -> None:
     try:
         from sqlalchemy.engine import Engine as _SAEngine
     except ImportError:
-        raise TypeError("sqlalchemy_engine provided but sqlalchemy is not installed")
+        raise TypeError(
+            "sqlalchemy_engine provided but sqlalchemy is not installed"
+        ) from None
     if not isinstance(engine, _SAEngine):
         raise TypeError(
             f"sqlalchemy_engine must be a sqlalchemy.engine.Engine instance, "

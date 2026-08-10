@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # openbox/plugin.py
 """
 OpenBox Plugin for Temporal Workers.
@@ -18,6 +16,8 @@ Usage:
     )
 """
 
+from __future__ import annotations
+
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable
@@ -31,12 +31,12 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 from .client import GovernanceClient
 from .config import GovernanceConfig
 from .config import initialize as validate_api_key
+from .span_processor import WorkflowSpanProcessor
 
 if TYPE_CHECKING:  # pragma: no cover — type-only reference
     from .sandbox.adapter import (
         TemporalSandboxConfig,
     )
-from .span_processor import WorkflowSpanProcessor
 
 logger = logging.getLogger(__name__)
 
