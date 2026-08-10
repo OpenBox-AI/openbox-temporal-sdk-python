@@ -155,9 +155,16 @@ class OpenBoxPlugin(SimplePlugin):
             core_ca_path=core_ca_path,
         )
         from .config import get_global_config
+        from .governance_state import TemporalGovernanceState
 
         global_config: Any = get_global_config()
         _signer: Any = global_config.get_signer()
+
+        # One run-scoped state shared by the runtime adapter and both
+        # interceptors: signal verdicts (workflow records → activity enforces),
+        # HITL pending-approval markers, and completed-hook stops all flow
+        # through this single instance.
+        self._state = TemporalGovernanceState()
 
         config = GovernanceConfig(
             on_api_error=governance_policy,
@@ -181,6 +188,7 @@ class OpenBoxPlugin(SimplePlugin):
             agent_did=agent_did,
             signer=_signer,
             core_ca_path=core_ca_path,
+            state=self._state,
         )
 
         # 2. Create span processor
@@ -240,10 +248,8 @@ class OpenBoxPlugin(SimplePlugin):
             config=config,
             client=governance_client,
             sandbox=sandbox,
+            state=self._state,
         )
-        from .governance_state import TemporalGovernanceState
-
-        self._state = TemporalGovernanceState()
         interceptors: list[Any] = [
             self._activity_interceptor,
             GovernanceInterceptor(

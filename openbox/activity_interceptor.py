@@ -34,7 +34,7 @@ from temporalio.worker import (
 from .activities import _terminate_workflow_for_halt
 from .client import GovernanceClient
 from .config import GovernanceConfig
-from .core_adapter import get_core_context_store
+from .core_adapter import core_activity_scope, get_core_context_store
 from .errors import (
     GOVERNANCE_PATCH_ERROR_TYPE,
     GovernanceBlockedError,
@@ -350,6 +350,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 info,
                 WorkflowEventType.ACTIVITY_STARTED.value,
                 activity_input=activity_input,
+                session_id=session_id,
             )
 
         # Buffer activity context for hook-level governance
@@ -407,6 +408,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             activity_input,
             activity_output,
             result,
+            session_id=session_id,
         )
 
         return result
@@ -1219,8 +1221,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             )
 
             try:
-                result = await self.next.execute_activity(input)
-                activity_output = _serialize_value(result)
+                with core_activity_scope(
+                    info,
+                    activity_input,
+                    multi_agent_session_id=session_id,
+                ):
+                    result = await self.next.execute_activity(input)
+                    activity_output = _serialize_value(result)
             except GovernanceBlockedError as e:
                 status = "failed"
                 error = {
@@ -1281,6 +1288,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input,
         activity_output,
         result,
+        session_id=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
         # Completed-hook stop recorded run-scoped by the adapter (BLOCK/HALT), plus
@@ -1339,6 +1347,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
                 activity_output=activity_output,
                 error=error,
+                session_id=session_id,
             )
 
         # Enforce completed verdict
@@ -1354,6 +1363,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         self, info, event_type: str, **extra
     ) -> GovernanceVerdictResponse | None:
         """Send activity event via GovernanceClient."""
+        session_id = extra.pop("session_id", None)
         serialized_extra = {}
         for key, value in extra.items():
             try:
@@ -1375,6 +1385,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             "timestamp": _rfc3339_now(),
             **serialized_extra,
         }
+        if session_id is not None:
+            payload["multi_agent_session_id"] = session_id
 
         # Final safety check - ensure payload is JSON serializable
         try:

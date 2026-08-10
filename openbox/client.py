@@ -47,7 +47,7 @@ class _TemporalEvaluationClient:  # type: ignore[no-redef]
     def _parse_evaluate_response(self, response):
         content = getattr(response, "content", None)
         if isinstance(content, bytes):
-            return super()._parse_evaluate_response(response)
+            return self._base._parse_evaluate_response(response)
         if type(response).__module__.startswith("unittest.mock"):
             import json
 
@@ -60,12 +60,12 @@ class _TemporalEvaluationClient:  # type: ignore[no-redef]
             return EvaluationResult.from_wire(
                 json.dumps(response.json(), separators=(",", ":")).encode()
             )
-        return super()._parse_evaluate_response(response)
+        return self._base._parse_evaluate_response(response)
 
     async def aevaluate(self, payload: dict) -> EvaluationResult:
         client = self._async()
         if not self._legacy_manager(client):
-            return await super().aevaluate(payload)
+            return await self._base.aevaluate(payload)
         url, headers, body = self._prepared(
             "POST", "/api/v1/governance/evaluate", payload
         )
@@ -83,7 +83,7 @@ class _TemporalEvaluationClient:  # type: ignore[no-redef]
     ) -> ApprovalResult | None:
         client = self._async()
         if not self._legacy_manager(client):
-            return await super().apoll_approval(workflow_id, run_id, activity_id)
+            return await self._base.apoll_approval(workflow_id, run_id, activity_id)
         payload = {
             "workflow_id": workflow_id,
             "run_id": run_id,
