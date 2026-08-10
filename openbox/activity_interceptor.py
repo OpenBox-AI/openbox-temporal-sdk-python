@@ -20,9 +20,46 @@ import asyncio
 import json
 import time
 from dataclasses import asdict, fields, is_dataclass
+from datetime import UTC
 from typing import Any, Literal, NoReturn
 
+from opentelemetry import trace
+from temporalio import activity
+from temporalio.worker import (
+    ActivityInboundInterceptor,
+    ExecuteActivityInput,
+    Interceptor,
+)
+
+from .activities import _terminate_workflow_for_halt
+from .client import GovernanceClient
+from .config import GovernanceConfig
+from .core_adapter import get_core_context_store
+from .errors import (
+    GOVERNANCE_PATCH_ERROR_TYPE,
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GuardrailsValidationError,
+)
+from .governance_state import TemporalGovernanceState
+from .multi_agent import read_session_from_header
+from .patch import PatchRequest, patch_request
+from .sandbox.adapter import TemporalSandboxConfig, activity_result
+from .sandbox.profiles import CommandResultValidationError
+from .sandbox.types import (
+    GOVERNED_COMMAND_ACTIVITY_TYPE,
+    GovernedCommandInputError,
+    GovernedCommandRequest,
+    GovernedCommandTypedResult,
+)
+from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+from .types import (
+    GovernanceVerdictResponse,
+    Verdict,
+    WorkflowEventType,
+)
 from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .verdict_handler import enforce_verdict
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -60,52 +97,15 @@ def _should_recurse_dataclass(current: Any, new_value: Any) -> bool:
 
 def _update_list_items(current_list: list, new_list: list, _logger=None) -> None:
     """Update list items, recursing into dataclass items."""
-    for i, (curr_item, new_item) in enumerate(zip(current_list, new_list)):
+    for i, (curr_item, new_item) in enumerate(
+        zip(current_list, new_list, strict=False)
+    ):
         if _should_recurse_dataclass(curr_item, new_item):
             _deep_update_dataclass(curr_item, new_item, _logger)
         elif i < len(current_list):
             current_list[i] = new_item
 
 
-from datetime import UTC
-
-from opentelemetry import trace
-from temporalio import activity
-from temporalio.worker import (
-    ActivityInboundInterceptor,
-    ExecuteActivityInput,
-    Interceptor,
-)
-
-from .activities import _terminate_workflow_for_halt
-from .client import GovernanceClient
-from .config import GovernanceConfig
-from .core_adapter import get_core_context_store
-from .errors import (
-    GOVERNANCE_PATCH_ERROR_TYPE,
-    GovernanceBlockedError,
-    GovernanceHaltError,
-    GuardrailsValidationError,
-)
-from .governance_state import TemporalGovernanceState
-from .multi_agent import read_session_from_header
-from .patch import PatchRequest, patch_request
-from .sandbox.adapter import TemporalSandboxConfig, activity_result
-from .sandbox.profiles import CommandResultValidationError
-from .sandbox.types import (
-    GOVERNED_COMMAND_ACTIVITY_TYPE,
-    GovernedCommandInputError,
-    GovernedCommandRequest,
-    GovernedCommandTypedResult,
-)
-from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
-from .types import (
-    GovernanceBlockedError,
-    GovernanceVerdictResponse,
-    Verdict,
-    WorkflowEventType,
-)
-from .verdict_handler import enforce_verdict
 
 
 def _raise_patch(req: PatchRequest) -> NoReturn:
@@ -796,7 +796,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             non_retryable=True,
         )
 
-    @staticmethod
 
     async def _consume_completed_halt(self, info) -> None:
         """Exception-path safety net: a completed-hook stop recorded during user
@@ -823,400 +822,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             return
         if stop.request is not None:
             _raise_patch(stop.request)
-    async def _consume_completed_halt(self, info) -> None:
-        """Exception-path safety net: a completed-hook stop recorded during user
-        code must still be enforced even though the activity itself raised, so
-        _handle_completion (the success path) never runs. Priority: HALT raises
-        GovernanceHalt (terminating the workflow and REPLACING the original
-        exception); a patch request raises GovernancePatch (also replacing the
-        original exception with the restart request); a plain completed BLOCK is
-        a no-op here, so the caller's re-raise propagates the original exception
-        unchanged. Clears the completed-stop and the base abort flag so nothing
-        strands."""
-        stop = self._state.take_completed_stop(
-            info.workflow_id, info.workflow_run_id, info.activity_id
-        )
-        get_core_context_store().clear_activity_aborted(
-            info.workflow_id, info.activity_id
-        )
-        if stop is None:
-            return
-        if stop.verdict is Verdict.HALT:
-            await _terminate_workflow_for_halt(
-                info.workflow_id, stop.reason or "Governance halt"
-            )
-        if info.attempt != 1:
-            raise ApplicationError(
-                "Governed commands permit exactly one Activity attempt",
-                type="GovernedCommandAttemptRejected",
-                non_retryable=True,
-            )
-        try:
-            args = list(input.args) if input.args is not None else []
-            if len(args) != 1:
-                raise GovernedCommandInputError("governed command input rejected")
-            request = GovernedCommandRequest.from_value(args[0])
-            if self._sandbox.trust_application_agent and request.receipt is not None:
-                raise GovernedCommandInputError("governed command input rejected")
-            argv = self._sandbox.profiles.derive(request)
-            self._sandbox.profiles.profile_fingerprint(request.profile_id)
-        except (GovernedCommandInputError, TypeError, ValueError) as error:
-            raise ApplicationError(
-                "Governed command input rejected",
-                type="GovernedCommandInvalid",
-                non_retryable=True,
-            ) from error
-
-        authorization_id: str | None = None
-        if self._sandbox.receipt_verifier is not None:
-            try:
-                dispatcher_config = self._sandbox.dispatcher._config
-                execution_config = dispatcher_config.sandbox
-                asset_bundle = execution_config.asset_bundle
-                authorization_id = self._sandbox.receipt_verifier.verify(
-                    request,
-                    expected_workflow_id=info.workflow_id,
-                    command_argv=argv,
-                    asset_bundle=asset_bundle,
-                    profile_fingerprint=self._sandbox.profiles.profile_fingerprint(
-                        request.profile_id
-                    ),
-                )
-            except Exception as error:
-                raise ApplicationError(
-                    "Governed command receipt rejected",
-                    type="GovernedCommandUnauthorized",
-                    non_retryable=True,
-                ) from error
-
-        from openbox_sandbox.dispatcher import (
-            Directive,
-            Disposition,
-            GovernanceDecision,
-            GovernedCommand,
-        )
-
-        command = GovernedCommand(
-            workflow_id=info.workflow_id,
-            run_id=info.workflow_run_id,
-            activity_id=info.activity_id,
-            argv=argv,
-            profile_id=request.profile_id,
-            timeout_seconds=self._sandbox.timeout_seconds,
-            workflow_type=info.workflow_type,
-            task_queue=info.task_queue,
-            attempt=info.attempt,
-            arguments={item.name: item.value for item in request.arguments},
-        )
-        telemetry_owner = None
-        if self._sandbox.otel_bridge is not None:
-            try:
-                # Join the workflow's W3C trace from the activity task headers
-                # (the Temporal TracingInterceptor's "_tracer-data" payload),
-                # so the governed span shares the workflow trace even when the
-                # tracing interceptor is not outermost in the activity chain.
-                from opentelemetry import context as otel_context
-
-                propagated = _extract_trace_context(input.headers)
-                token = (
-                    otel_context.attach(propagated)
-                    if propagated is not None
-                    else None
-                )
-                try:
-                    telemetry_owner = self._sandbox.otel_bridge.begin(
-                    workflow_id=info.workflow_id,
-                    run_id=info.workflow_run_id,
-                    activity_id=info.activity_id,
-                    attempt=info.attempt,
-                    profile_id=request.profile_id,
-                        workflow_type=info.workflow_type,
-                        task_queue=info.task_queue,
-                    )
-                finally:
-                    if token is not None:
-                        otel_context.detach(token)
-            except Exception:
-                telemetry_owner = None
-        dispatch_result = None
-        typed_result: GovernedCommandTypedResult | None = None
-        terminal_error: BaseException | None = None
-        try:
-            with self._sandbox.heartbeat_sink.bind(
-                activity.heartbeat,
-                workflow_id=info.workflow_id,
-                run_id=info.workflow_run_id,
-                activity_id=info.activity_id,
-                attempt=info.attempt,
-                profile_id=request.profile_id,
-                telemetry_owner=telemetry_owner,
-            ):
-                heartbeat_task = asyncio.create_task(
-                    self._heartbeat_periodically(
-                        self._sandbox.heartbeat_interval_seconds
-                    )
-                )
-                if request.governance is not None:
-                    decision = GovernanceDecision.parse(request.governance)
-                    dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
-                        command, decision
-                    )
-                elif (
-                    self._sandbox.evaluate_at_interceptor
-                    and self._client is not None
-                    and request.receipt is None
-                ):
-                    # Single-client convergence: the plugin's governance
-                    # client (wrapping the one shared Core runtime) evaluates
-                    # the governed command at activity time; the dispatcher
-                    # executes the resulting verdict without a second client.
-                    from datetime import datetime
-
-                    now = datetime.now(UTC).isoformat()
-                    event = {
-                        "source": "governed-dispatcher",
-                        "event_type": "ActivityStarted",
-                        "workflow_id": info.workflow_id,
-                        "run_id": info.workflow_run_id,
-                        "workflow_type": info.workflow_type,
-                        "task_queue": info.task_queue,
-                        "timestamp": now,
-                        "activity_id": info.activity_id,
-                        "activity_type": GOVERNED_COMMAND_ACTIVITY_TYPE,
-                        "attempt": info.attempt,
-                        "profile_id": request.profile_id,
-                        "activity_input": [{"argv": list(argv)}],
-                        "operation": {
-                            "profile_id": request.profile_id,
-                            "arguments": {
-                                item.name: item.value for item in request.arguments
-                            },
-                        },
-                    }
-                    response = await self._client.evaluate_event(event)
-                    if response is None:
-                        raise ApplicationError(
-                            "Governed command evaluation unavailable",
-                            type="GovernedCommandNotExecuted",
-                            non_retryable=True,
-                        )
-                    import uuid as _uuid
-
-                    decision_value: dict[str, Any] = {
-                        "governance_event_id": str(_uuid.uuid4()),
-                        "verdict": response.verdict.value,
-                        "risk_score": response.risk_score,
-                        "action": response.verdict.value,
-                        "fallback_used": False,
-                        "behavioral_violations": list(
-                            response.behavioral_violations or []
-                        ),
-                    }
-                    if response.constraints is not None:
-                        decision_value["constraints"] = list(response.constraints)
-                    if response.policy_id is not None:
-                        decision_value["policy_id"] = response.policy_id
-                    if response.reason is not None:
-                        decision_value["reason"] = response.reason
-                    decision = GovernanceDecision.parse(decision_value)
-                    dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
-                        command, decision
-                    )
-                elif self._sandbox.trust_application_agent:
-                    dispatch_operation = (
-                        self._sandbox.dispatcher.dispatch_trusted_constrain(command)
-                    )
-                elif authorization_id is not None:
-                    dispatch_operation = (
-                        self._sandbox.dispatcher.dispatch_authorized_constrain(
-                            command, authorization_id=authorization_id
-                        )
-                    )
-                else:
-                    dispatch_operation = self._sandbox.dispatcher.dispatch(command)
-                dispatch_task = asyncio.create_task(dispatch_operation)
-                cancellation_task = asyncio.create_task(
-                    self._wait_for_temporal_cancellation()
-                )
-                try:
-                    done, _ = await asyncio.wait(
-                        {dispatch_task, cancellation_task, heartbeat_task},
-                        return_when=asyncio.FIRST_COMPLETED,
-                    )
-                    if heartbeat_task in done:
-                        # Re-raise the exact heartbeat failure. The surrounding
-                        # finally still cancels dispatch and waits for cleanup.
-                        await heartbeat_task
-                    if cancellation_task in done:
-                        dispatch_task.cancel()
-                        try:
-                            await dispatch_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            # The runtime client maps cancellation to a typed
-                            # transport result and the dispatcher performs owned
-                            # cleanup before returning or raising.
-                            pass
-                        raise asyncio.CancelledError()
-                    dispatch_result = await dispatch_task
-                finally:
-                    if not dispatch_task.done():
-                        dispatch_task.cancel()
-                        try:
-                            await dispatch_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            # A typed cancellation/transport result may surface
-                            # after the dispatcher has completed owned cleanup.
-                            pass
-                    heartbeat_task.cancel()
-                    cancellation_task.cancel()
-                    for task in (heartbeat_task, cancellation_task):
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-            activity.heartbeat(
-                {
-                    "phase": "governed_dispatch_terminal",
-                    "workflow_id": info.workflow_id,
-                    "run_id": info.workflow_run_id,
-                    "activity_id": info.activity_id,
-                    "attempt": info.attempt,
-                    "profile_id": request.profile_id,
-                    "disposition": dispatch_result.disposition.value,
-                }
-            )
-            if dispatch_result.disposition in (
-                Disposition.EXECUTED_ON_HOST,
-                Disposition.EXECUTED_IN_SANDBOX,
-            ):
-                execution = dispatch_result.execution
-                if execution is None:
-                    raise CommandResultValidationError()
-                typed_result = self._sandbox.profiles.parse_result(
-                    request.profile_id, execution.stdout
-                )
-        except asyncio.CancelledError as error:
-            terminal_error = error
-            try:
-                await self._send_registered_completion(
-                    info,
-                    request,
-                    start_time,
-                    status="cancelled",
-                    dispatch_result=None,
-                    error_code="cancelled",
-                )
-            except BaseException:
-                pass
-            raise
-        except CommandResultValidationError as error:
-            terminal_error = error
-            await self._send_registered_completion(
-                info,
-                request,
-                start_time,
-                status="failed",
-                dispatch_result=dispatch_result,
-                error_code="typed_result_invalid",
-            )
-            raise ApplicationError(
-                "Governed command typed result rejected",
-                type="GovernedCommandResultInvalid",
-                non_retryable=True,
-            ) from error
-        except Exception as error:
-            terminal_error = error
-            await self._send_registered_completion(
-                info,
-                request,
-                start_time,
-                status="failed",
-                dispatch_result=None,
-                error_code="dispatcher_failure",
-            )
-            raise ApplicationError(
-                "Governed dispatcher failed",
-                type="GovernedDispatcherFailure",
-                non_retryable=True,
-            ) from error
-        except BaseException as error:
-            terminal_error = error
-            raise
-        finally:
-            if self._sandbox.otel_bridge is not None:
-                try:
-                    self._sandbox.otel_bridge.finalize(
-                        telemetry_owner,
-                        dispatch_result=dispatch_result,
-                        error=terminal_error,
-                    )
-                except Exception:
-                    pass
-
-        await self._send_registered_completion(
-            info,
-            request,
-            start_time,
-            status=(
-                "completed"
-                if dispatch_result.error is None
-                and dispatch_result.disposition
-                in (Disposition.EXECUTED_ON_HOST, Disposition.EXECUTED_IN_SANDBOX)
-                else "failed"
-            ),
-            dispatch_result=dispatch_result,
-            error_code=(
-                None
-                if dispatch_result.error is None
-                else dispatch_result.error.code.value
-            ),
-        )
-        if dispatch_result.directive is Directive.HALT:
-            await _terminate_workflow_for_halt(
-                info.workflow_id, "governance halt directive"
-            )
-        # Fail-closed: a post-execution governance error (e.g. ActivityCompleted
-        # transport failure) must not be reported as a successful sandbox run.
-        if dispatch_result.error is not None:
-            error_code = dispatch_result.error.code.value
-            error_type = (
-                "GovernedCommandExecutionIndeterminate"
-                if dispatch_result.disposition is Disposition.EXECUTION_INDETERMINATE
-                else "GovernedCommandNotExecuted"
-            )
-            raise ApplicationError(
-                f"Governed command terminal outcome: {error_code}",
-                type=error_type,
-                non_retryable=True,
-            )
-        if dispatch_result.disposition in (
-            Disposition.EXECUTED_ON_HOST,
-            Disposition.EXECUTED_IN_SANDBOX,
-        ):
-            return activity_result(
-                request.profile_id,
-                dispatch_result,
-                typed_result=typed_result,
-            )
-        error_code = (
-            "governed_command_not_executed"
-            if dispatch_result.error is None
-            else dispatch_result.error.code.value
-        )
-        error_type = (
-            "GovernedCommandExecutionIndeterminate"
-            if dispatch_result.disposition is Disposition.EXECUTION_INDETERMINATE
-            else "GovernedCommandNotExecuted"
-        )
-        raise ApplicationError(
-            f"Governed command terminal outcome: {error_code}",
-            type=error_type,
-            non_retryable=True,
-        )
 
     @staticmethod
     async def _wait_for_temporal_cancellation() -> None:
@@ -1504,7 +1109,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 f"Governance blocked: {e.reason}",
                 type="GovernanceBlock",
                 non_retryable=True,
-            )
+            ) from None
         except GuardrailsValidationError as e:
             from temporalio.exceptions import ApplicationError
 
@@ -1513,7 +1118,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 f"Guardrails validation failed: {e}",
                 type="GuardrailsValidationFailed",
                 non_retryable=True,
-            )
+            ) from None
 
     # ─── Guardrails redaction ─────────────────────────────────────────────
 

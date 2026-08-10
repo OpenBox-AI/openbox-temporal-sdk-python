@@ -241,7 +241,6 @@ def _build_payload(
         f"[GOV] _build_payload: found activity context wf={activity_context.get('workflow_id')}"
     )
 
-    workflow_id = activity_context.get("workflow_id")
     activity_id = activity_context.get("activity_id")
 
     # Tag span_data with activity_id for server-side correlation
@@ -447,7 +446,7 @@ def evaluate_sync(
         if _on_api_error == FAIL_CLOSED:
             raise GovernanceBlockedError(
                 "halt", f"Governance evaluation error: {e}", identifier
-            )
+            ) from None
 
 
 async def evaluate_async(
@@ -521,4 +520,4 @@ async def evaluate_async(
         if _on_api_error == FAIL_CLOSED:
             raise GovernanceBlockedError(
                 "halt", f"Governance evaluation error: {e}", identifier
-            )
+            ) from None

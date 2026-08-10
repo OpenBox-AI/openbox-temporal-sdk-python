@@ -399,8 +399,10 @@ def _httpx_response_hook(span, request, response) -> None:
     except Exception:
         pass  # Best effort
 
-    # NOTE: "completed" governance evaluation is handled in _patched_send
-    # where request/response bodies are guaranteed to be available.
+    # The captured values are intentionally discarded here: "completed"
+    # governance evaluation is handled in _patched_send where request/response
+    # bodies are guaranteed to be available.
+    del resp_body, resp_headers
 
 
 async def _httpx_async_request_hook(span, request) -> None:
@@ -529,8 +531,10 @@ async def _httpx_async_response_hook(span, request, response) -> None:
     except Exception:
         pass  # Best effort
 
-    # NOTE: "completed" governance evaluation is handled in _patched_async_send
-    # where request/response bodies are guaranteed to be available.
+    # The captured values are intentionally discarded here: "completed"
+    # governance evaluation is handled in _patched_async_send where
+    # request/response bodies are guaranteed to be available.
+    del resp_body, resp_headers
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -8,8 +8,12 @@ once by :mod:`openbox_core.client`.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from openbox_core.contracts.results import ApprovalResult, EvaluationResult
+
+if TYPE_CHECKING:
+    from openbox_core.client import EvaluationClient
 
 from .types import GovernanceVerdictResponse, GuardrailsCheckResult, Verdict
 

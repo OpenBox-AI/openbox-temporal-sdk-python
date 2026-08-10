@@ -4,13 +4,14 @@ import base64
 import os
 
 import pytest
-from openbox_core.identity import load_ed25519_seed as _load_ed25519_seed
-
-from openbox.config import (
-    _GlobalConfig,
-    _validate_did,
-    initialize,
+from openbox_core.identity import (
+    load_ed25519_seed as _load_ed25519_seed,
 )
+from openbox_core.identity import (
+    validate_agent_did as _validate_did,
+)
+
+from openbox.config import _GlobalConfig, initialize
 from openbox.errors import (
     OpenBoxConfigError,
     OpenBoxSigningError,

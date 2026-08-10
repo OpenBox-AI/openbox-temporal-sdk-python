@@ -824,7 +824,7 @@ class TestInboundInterceptor:
 
         execute_input = MagicMock()
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — mock-injected exception propagates
             await inbound.execute_workflow(execute_input)
 
         # Find the WorkflowFailed call
@@ -878,7 +878,7 @@ class TestInboundInterceptor:
 
         execute_input = MagicMock()
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — mock-injected exception propagates
             await inbound.execute_workflow(execute_input)
 
         # Find the WorkflowFailed call

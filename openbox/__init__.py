@@ -124,8 +124,6 @@ __all__ = [
 _SANDBOX_NAMES = (
     "AipEd25519RequestSigner",
     "GovernedCommandActivityResult",
-    "GovernedCommandDeployment",
-    "GovernedCommandDeploymentError",
     "GovernedCommandInputError",
     "GovernedCommandReceipt",
     "GovernedCommandReceiptError",
@@ -137,7 +135,6 @@ _SANDBOX_NAMES = (
     "TemporalCommandProfileBundle",
     "TemporalHeartbeatSink",
     "TemporalSandboxConfig",
-    "load_governed_command_deployment",
 )
 
 
