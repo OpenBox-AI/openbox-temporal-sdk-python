@@ -13,10 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from .profiles import (
     TemporalCommandProfileBundle,
@@ -44,8 +45,8 @@ _FORBIDDEN_FIELD_PARTS = (
 )
 # The registry is process-lifetime configuration. Both derived bundles use one
 # fixed validity window so their canonical fingerprints stay deterministic.
-_REGISTRY_ISSUED_AT = datetime(2000, 1, 1, tzinfo=timezone.utc)
-_REGISTRY_EXPIRES_AT = datetime(9999, 1, 1, tzinfo=timezone.utc)
+_REGISTRY_ISSUED_AT = datetime(2000, 1, 1, tzinfo=UTC)
+_REGISTRY_EXPIRES_AT = datetime(9999, 1, 1, tzinfo=UTC)
 _REGISTRY_KEY_ID = "typed-registry"
 
 
@@ -426,7 +427,7 @@ class GovernedCommandRegistry:
         object.__setattr__(bundle, "_profiles", MappingProxyType(profiles))
         return bundle
 
-    def dispatcher_profile_bundle(self) -> "CommandProfileBundle":
+    def dispatcher_profile_bundle(self) -> CommandProfileBundle:
         """Build the independent dispatcher admission bundle."""
         from openbox_sandbox.dispatcher.profiles import (
             ArgumentRule,

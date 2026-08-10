@@ -5,7 +5,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -21,8 +21,8 @@ from openbox.config import GovernanceConfig
 from openbox.core_adapter import get_core_context_store
 from openbox.governance_state import TemporalGovernanceState
 from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
-from openbox.types import GovernanceVerdictResponse, Verdict
 from openbox.span_processor import WorkflowSpanProcessor
+from openbox.types import GovernanceVerdictResponse, Verdict
 
 from .conftest import posted_payload
 
@@ -41,14 +41,14 @@ class OuterData:
 
     name: str = ""
     nested: NestedData = field(default_factory=NestedData)
-    items: List[str] = field(default_factory=list)
+    items: list[str] = field(default_factory=list)
 
 
 @dataclass
 class DataWithList:
     """Dataclass with list of nested dataclasses."""
 
-    entries: List[NestedData] = field(default_factory=list)
+    entries: list[NestedData] = field(default_factory=list)
 
 
 @dataclass
@@ -63,7 +63,7 @@ class ActivityInput:
 class MockTemporalPayload:
     """Mock Temporal Payload object for testing serialization."""
 
-    def __init__(self, data: bytes, metadata: Optional[dict] = None):
+    def __init__(self, data: bytes, metadata: dict | None = None):
         self.data = data
         self.metadata = metadata or {}
 
@@ -238,7 +238,7 @@ class TestRfc3339Now:
 
     def test_returns_recent_time(self):
         """Test that returned time is within recent timeframe."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         result = _rfc3339_now()
 
@@ -254,9 +254,9 @@ class TestRfc3339Now:
             result_padded = result_no_z
 
         result_time = datetime.fromisoformat(result_padded)
-        result_time = result_time.replace(tzinfo=timezone.utc)
+        result_time = result_time.replace(tzinfo=UTC)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # The result should be within 1 second of now
         assert abs((now - result_time).total_seconds()) < 1

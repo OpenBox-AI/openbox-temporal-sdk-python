@@ -9,11 +9,12 @@ Tests cover:
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from openbox_core.errors import ContractError
 from temporalio.exceptions import ApplicationError
 
 from openbox.activities import (
@@ -22,14 +23,15 @@ from openbox.activities import (
     _rfc3339_now,
     _terminate_workflow_for_halt,
     raise_governance_block,
-    send_governance_event as send_governance_event_compat,
     send_governance_event,
+)
+from openbox.activities import (
+    send_governance_event as send_governance_event_compat,
 )
 from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION
 from openbox.types import GovernanceVerdictResponse, Verdict
 
 from .conftest import posted_payload
-from openbox_core.errors import ContractError
 
 
 class TestRfc3339Now:
@@ -64,14 +66,14 @@ class TestRfc3339Now:
 
     def test_timestamp_is_recent(self):
         """Test that the timestamp is approximately the current time."""
-        before = datetime.now(timezone.utc)
+        before = datetime.now(UTC)
         result = _rfc3339_now()
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
 
         # Parse the result
         dt_str = result[:-1]  # Remove 'Z'
         dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%f")
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
 
         # The function truncates to milliseconds, so we need to account for that.
         # Truncate 'before' to milliseconds as well for fair comparison.

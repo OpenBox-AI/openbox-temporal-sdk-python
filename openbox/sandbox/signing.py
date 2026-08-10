@@ -6,8 +6,9 @@ import base64
 import hashlib
 import secrets
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from openbox.errors import OpenBoxConfigError
 
@@ -44,13 +45,13 @@ class AipEd25519RequestSigner:
             raise OpenBoxConfigError("AIP request signer configuration rejected")
         self._agent_did = agent_did
         self._private_key = private_key
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
         self._nonce = nonce or (lambda: secrets.token_urlsafe(24))
 
     @classmethod
     def from_base64_seed(
         cls, agent_did: str, agent_private_key: str
-    ) -> "AipEd25519RequestSigner":
+    ) -> AipEd25519RequestSigner:
         """Load a base64 raw 32-byte Ed25519 seed without retaining the string."""
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -86,7 +87,7 @@ class AipEd25519RequestSigner:
         current = self._clock()
         if not isinstance(current, datetime) or current.tzinfo is None:
             raise OpenBoxConfigError("AIP signing clock rejected")
-        timestamp = current.astimezone(timezone.utc).isoformat()
+        timestamp = current.astimezone(UTC).isoformat()
         nonce = self._nonce()
         if not isinstance(nonce, str) or not nonce:
             raise OpenBoxConfigError("AIP signing nonce rejected")

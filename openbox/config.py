@@ -7,14 +7,12 @@ imported only inside non-workflow functions.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Set
 
 from openbox_core.config import API_KEY_PATTERN, OpenBoxConfig
 
 from .errors import (  # backward-compatible exports
     OpenBoxAuthError,
     OpenBoxConfigError,
-    OpenBoxInsecureURLError,
     OpenBoxNetworkError,
 )
 
@@ -37,19 +35,19 @@ def _build_auth_headers(api_key: str) -> dict:
 class GovernanceConfig:
     """Configuration for Temporal governance interceptors."""
 
-    skip_workflow_types: Set[str] = field(default_factory=set)
-    skip_signals: Set[str] = field(default_factory=set)
-    enforce_task_queues: Optional[Set[str]] = None
+    skip_workflow_types: set[str] = field(default_factory=set)
+    skip_signals: set[str] = field(default_factory=set)
+    enforce_task_queues: set[str] | None = None
     on_api_error: str = "fail_open"
     api_timeout: float = 30.0
     max_body_size: int = 65536
     send_start_event: bool = True
     send_activity_start_event: bool = True
-    skip_activity_types: Set[str] = field(
+    skip_activity_types: set[str] = field(
         default_factory=lambda: {"send_governance_event"}
     )
     hitl_enabled: bool = True
-    skip_hitl_activity_types: Set[str] = field(
+    skip_hitl_activity_types: set[str] = field(
         default_factory=lambda: {"send_governance_event"}
     )
     hitl_poll_interval_ms: int = 5000
@@ -128,7 +126,7 @@ def resolve_signing_defaults(agent_did, signer):
     return agent_did, signer
 
 
-def _create_core_ssl_context(core_ca_path: Optional[str]):
+def _create_core_ssl_context(core_ca_path: str | None):
     """Compatibility seam: build a TLS context pinned to the given CA bundle."""
     if core_ca_path is None:
         return None
@@ -137,7 +135,7 @@ def _create_core_ssl_context(core_ca_path: Optional[str]):
     return ssl.create_default_context(cafile=core_ca_path)
 
 
-def resolve_core_ssl_context(core_ca_path: Optional[str] = None):
+def resolve_core_ssl_context(core_ca_path: str | None = None):
     """Return the initialized Core TLS context, reusing matching CA config."""
     configured_path = _config.core_ca_path
     if core_ca_path is None:
@@ -147,7 +145,7 @@ def resolve_core_ssl_context(core_ca_path: Optional[str] = None):
     return _create_core_ssl_context(core_ca_path)
 
 
-def _extract_reason_code(http_error) -> Optional[str]:
+def _extract_reason_code(http_error) -> str | None:
     """Historical urllib error-body parser retained for test/caller compatibility."""
     import json
 
@@ -167,7 +165,7 @@ def _validate_api_key_with_server(
     api_key: str,
     timeout: float,
     *,
-    agent_did: Optional[str] = None,
+    agent_did: str | None = None,
     signer=None,
     ssl_context=None,
 ) -> None:
@@ -233,8 +231,8 @@ class _GlobalConfig:
         self.api_url: str = ""
         self.api_key: str = ""
         self.governance_timeout: float = 30.0
-        self.agent_did: Optional[str] = None
-        self.core_ca_path: Optional[str] = None
+        self.agent_did: str | None = None
+        self.core_ca_path: str | None = None
         self._signer = None
         self._ssl_context = None
         self._core_config: OpenBoxConfig | None = None
@@ -245,9 +243,9 @@ class _GlobalConfig:
         api_key: str,
         governance_timeout: float = 30.0,
         *,
-        agent_did: Optional[str] = None,
+        agent_did: str | None = None,
         signer=None,
-        core_ca_path: Optional[str] = None,
+        core_ca_path: str | None = None,
         ssl_context=None,
         core_config: OpenBoxConfig | None = None,
     ):
@@ -332,9 +330,9 @@ def initialize(
     governance_timeout: float = 30.0,
     validate: bool = True,
     *,
-    agent_did: Optional[str] = None,
-    agent_private_key: Optional[str] = None,
-    core_ca_path: Optional[str] = None,
+    agent_did: str | None = None,
+    agent_private_key: str | None = None,
+    core_ca_path: str | None = None,
 ) -> None:
     """Initialize and validate shared Core configuration for Temporal."""
     # Preserve the Temporal no-secret error text before shared normalization.

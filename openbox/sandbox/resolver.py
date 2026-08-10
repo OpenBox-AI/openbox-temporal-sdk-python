@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openbox_sandbox import (
     SandboxEngineConfig as _SandboxEngineConfig,
+)
+from openbox_sandbox import (
     SandboxExecutionEngine as _SandboxExecutionEngine,
+)
+from openbox_sandbox import (
     StructuredCommandProfileBundle as _StructuredCommandProfileBundle,
 )
 from openbox_sandbox.deployment import load_sandbox_deployment
@@ -21,7 +25,6 @@ from openbox_sandbox.release import (
 )
 from openbox_sandbox.runtime import (
     OutputLimits,
-    PolicyDocument,
     UnixAgentRuntimeClient,
     UnixAgentRuntimeClientConfig,
 )
@@ -115,7 +118,7 @@ def _build_engine_from_release(
     engine = _SandboxExecutionEngine._from_components(
         engine_config,
         sandbox=runtime,
-        clock=lambda: datetime.now(timezone.utc),
+        clock=lambda: datetime.now(UTC),
         sandbox_id=lambda: f"sbx-{uuid.uuid4()}",
     )
 
@@ -160,7 +163,7 @@ def resolve_sandbox_config(
             engine = _SandboxExecutionEngine._from_components(
                 engine_config,
                 sandbox=deployment._runtime,
-                clock=lambda: datetime.now(timezone.utc),
+                clock=lambda: datetime.now(UTC),
                 sandbox_id=lambda: f"sbx-{uuid.uuid4()}",
             )
     else:

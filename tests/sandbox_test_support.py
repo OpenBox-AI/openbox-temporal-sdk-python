@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,7 @@ from openbox_sandbox.runtime import (
 from openbox.sandbox.adapter import TemporalSandboxConfig
 from openbox.sandbox.heartbeat import TemporalHeartbeatSink
 
-NOW = datetime(2026, 7, 22, tzinfo=timezone.utc)
+NOW = datetime(2026, 7, 22, tzinfo=UTC)
 SANDBOX_ID = "sbx-550e8400-e29b-41d4-a716-446655440000"
 
 

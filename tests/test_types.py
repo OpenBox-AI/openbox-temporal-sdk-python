@@ -1,6 +1,5 @@
 """Comprehensive tests for the OpenBox SDK types module."""
 
-import pytest
 
 from openbox.types import (
     GovernanceVerdictResponse,

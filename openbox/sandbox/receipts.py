@@ -10,9 +10,10 @@ import hashlib
 import json
 import re
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -56,7 +57,7 @@ def _timestamp(value: object) -> datetime:
         ) from error
     if parsed.tzinfo is None:
         raise GovernedCommandReceiptError("governed command receipt rejected")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def request_arguments_sha256(request: GovernedCommandRequest) -> str:
@@ -249,7 +250,7 @@ def _validate_common_time_window(
     now = clock()
     if not isinstance(now, datetime) or now.tzinfo is None:
         raise GovernedCommandReceiptError(errors.verifier_rejected)
-    now = now.astimezone(timezone.utc)
+    now = now.astimezone(UTC)
     lifetime = expires_at - issued_at
     if (
         issued_at > now
@@ -286,7 +287,7 @@ class GovernedCommandReceiptVerifier:
 
     key_id: str
     public_key: bytes
-    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     _consumed_receipt_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _consumed_nonces: set[str] = field(default_factory=set, init=False, repr=False)
     _consumption_lock: threading.Lock = field(
@@ -373,7 +374,7 @@ class InsecureLocalReceiptVerifier:
     empty unsigned value) is ignored. Never use this verifier in production.
     """
 
-    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC)
     _consumed_receipt_ids: set[str] = field(default_factory=set, init=False, repr=False)
     _consumed_nonces: set[str] = field(default_factory=set, init=False, repr=False)
     _consumption_lock: threading.Lock = field(

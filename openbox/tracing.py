@@ -20,8 +20,9 @@ Usage:
 
 import json
 import logging
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, TypeVar
 
 from opentelemetry import trace
 
@@ -35,8 +36,8 @@ def _build_traced_span_data(
     func_name: str,
     module: str,
     stage: str,
-    error: Optional[str] = None,
-    duration_ms: Optional[float] = None,
+    error: str | None = None,
+    duration_ms: float | None = None,
     args: Any = None,
     result: Any = None,
 ) -> dict:
@@ -80,7 +81,7 @@ def _build_traced_span_data(
 
 
 # Get tracer for internal function tracing
-_tracer: Optional[trace.Tracer] = None
+_tracer: trace.Tracer | None = None
 
 
 def _get_tracer() -> trace.Tracer:
@@ -158,14 +159,14 @@ def _capture_error_attrs(span, e, capture_exception):
 
 
 def traced(
-    _func: Optional[F] = None,
+    _func: F | None = None,
     *,
-    name: Optional[str] = None,
+    name: str | None = None,
     capture_args: bool = True,
     capture_result: bool = True,
     capture_exception: bool = True,
     max_arg_length: int = 2000,
-) -> Union[F, Callable[[F], F]]:
+) -> F | Callable[[F], F]:
     """Decorator to trace function calls as OpenTelemetry spans.
 
     Spans are captured by WorkflowSpanProcessor and included in governance events.
@@ -268,7 +269,7 @@ def _set_args_attributes(
 # Convenience function to create a span context manager
 def create_span(
     name: str,
-    attributes: Optional[dict] = None,
+    attributes: dict | None = None,
 ) -> trace.Span:
     """
     Create a span context manager for manual tracing.

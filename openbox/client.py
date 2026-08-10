@@ -8,7 +8,6 @@ once by :mod:`openbox_core.client`.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from openbox_core.contracts.results import ApprovalResult, EvaluationResult
 
@@ -149,9 +148,9 @@ class GovernanceClient:
         api_key: str,
         timeout: float = 30.0,
         on_api_error: str = "fail_open",
-        agent_did: Optional[str] = None,
+        agent_did: str | None = None,
         signer=None,
-        core_ca_path: Optional[str] = None,
+        core_ca_path: str | None = None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
@@ -190,7 +189,7 @@ class GovernanceClient:
         agent_did: str | None,
         signer,
         ssl_context=None,
-    ) -> "GovernanceClient":
+    ) -> GovernanceClient:
         """Internal composition seam: no second Core client is constructed."""
         instance = cls.__new__(cls)
         instance._api_url = api_url.rstrip("/")
@@ -205,7 +204,7 @@ class GovernanceClient:
 
     async def evaluate_event(
         self, payload: dict
-    ) -> Optional[GovernanceVerdictResponse]:
+    ) -> GovernanceVerdictResponse | None:
         """Evaluate through the strict shared parser and adapt Temporal semantics.
 
         Shared fail-open produces an explicit fallback ALLOW; legacy Temporal
@@ -225,7 +224,7 @@ class GovernanceClient:
 
     async def poll_approval(
         self, workflow_id: str, run_id: str, activity_id: str
-    ) -> Optional[dict]:
+    ) -> dict | None:
         """Poll through the shared client and return the historical raw dict."""
         result: ApprovalResult | None = await self._core_client.apoll_approval(
             workflow_id, run_id, activity_id
@@ -235,7 +234,7 @@ class GovernanceClient:
     async def close(self) -> None:
         await self._core_client.aclose()
 
-    def _handle_api_error(self, error_msg: str) -> Optional[GovernanceVerdictResponse]:
+    def _handle_api_error(self, error_msg: str) -> GovernanceVerdictResponse | None:
         if self._on_api_error == "fail_closed":
             return GovernanceVerdictResponse(
                 verdict=Verdict.HALT, reason=error_msg, fallback_used=True

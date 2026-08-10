@@ -1,6 +1,6 @@
 """Tests for openbox.multi_agent: handoff payloads, emit_handoff, session headers."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -39,7 +39,7 @@ def test_build_handoff_payload_minimal():
 
 
 def test_build_handoff_payload_with_timestamp():
-    ts = datetime(2026, 5, 27, 12, 0, 0, 500000, tzinfo=timezone.utc)
+    ts = datetime(2026, 5, 27, 12, 0, 0, 500000, tzinfo=UTC)
     payload = build_handoff_payload("did:aip:sender", "sess-123", ts)
     assert payload["timestamp"] == "2026-05-27T12:00:00.500Z"
 

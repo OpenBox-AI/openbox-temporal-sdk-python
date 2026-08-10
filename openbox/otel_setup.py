@@ -24,7 +24,7 @@ Supported database libraries:
 """
 
 import logging
-from typing import TYPE_CHECKING, Any, List, Optional, Set, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 if TYPE_CHECKING:
     from .span_processor import WorkflowSpanProcessor
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Global state — hooks in sub-modules reference these via late import of this module
 _span_processor: Optional["WorkflowSpanProcessor"] = None
-_ignored_url_prefixes: Set[str] = set()
+_ignored_url_prefixes: set[str] = set()
 _instrument_http: bool = True
 
 # Hook-level governance is handled by hook_governance module
@@ -78,18 +78,18 @@ def setup_opentelemetry_for_governance(
     api_url: str,
     api_key: str,
     *,
-    ignored_urls: Optional[list] = None,
+    ignored_urls: list | None = None,
     instrument_http: bool = True,
     instrument_databases: bool = True,
-    db_libraries: Optional[Set[str]] = None,
+    db_libraries: set[str] | None = None,
     instrument_file_io: bool = False,
-    sqlalchemy_engine: Optional[Any] = None,
+    sqlalchemy_engine: Any | None = None,
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
-    max_body_size: Optional[int] = None,
-    agent_did: Optional[str] = None,
+    max_body_size: int | None = None,
+    agent_did: str | None = None,
     signer: Any = None,
-    core_ca_path: Optional[str] = None,
+    core_ca_path: str | None = None,
     register_span_processor: bool = True,
 ) -> None:
     """
@@ -273,9 +273,9 @@ def setup_opentelemetry_for_governance(
 
 
 def _instrument_sqlalchemy(
-    db_libraries: Optional[Set[str]],
-    sqlalchemy_engine: Optional[Any],
-    instrumented: List[str],
+    db_libraries: set[str] | None,
+    sqlalchemy_engine: Any | None,
+    instrumented: list[str],
 ) -> None:
     """Handle sqlalchemy instrumentation with optional engine validation."""
     if (
@@ -321,9 +321,9 @@ def _validate_sqlalchemy_engine(engine: Any) -> None:
 
 
 def setup_database_instrumentation(
-    db_libraries: Optional[Set[str]] = None,
-    sqlalchemy_engine: Optional[Any] = None,
-) -> List[str]:
+    db_libraries: set[str] | None = None,
+    sqlalchemy_engine: Any | None = None,
+) -> list[str]:
     """
     Setup OpenTelemetry database instrumentors.
 

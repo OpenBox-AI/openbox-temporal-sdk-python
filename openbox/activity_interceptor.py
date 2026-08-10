@@ -20,7 +20,7 @@ import asyncio
 import json
 import time
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any, Literal, NoReturn, Optional
+from typing import Any, Literal, NoReturn
 
 from .types import rfc3339_now as _rfc3339_now  # shared utility
 
@@ -67,6 +67,8 @@ def _update_list_items(current_list: list, new_list: list, _logger=None) -> None
             current_list[i] = new_item
 
 
+from datetime import UTC
+
 from opentelemetry import trace
 from temporalio import activity
 from temporalio.worker import (
@@ -78,25 +80,7 @@ from temporalio.worker import (
 from .activities import _terminate_workflow_for_halt
 from .client import GovernanceClient
 from .config import GovernanceConfig
-from .errors import GovernanceHaltError, GuardrailsValidationError
-from .sandbox.adapter import TemporalSandboxConfig, activity_result
-from .sandbox.profiles import CommandResultValidationError
-from .sandbox.types import (
-    GOVERNED_COMMAND_ACTIVITY_TYPE,
-    GovernedCommandInputError,
-    GovernedCommandRequest,
-    GovernedCommandTypedResult,
-)
-from .span_processor import WorkflowSpanProcessor
-from .span_processor import WorkflowSpanBuffer
-from .types import (
-    GovernanceBlockedError,
-    GovernanceVerdictResponse,
-    Verdict,
-    WorkflowEventType,
-)
-from .verdict_handler import enforce_verdict
-from .core_adapter import core_activity_scope, get_core_context_store
+from .core_adapter import get_core_context_store
 from .errors import (
     GOVERNANCE_PATCH_ERROR_TYPE,
     GovernanceBlockedError,
@@ -106,7 +90,21 @@ from .errors import (
 from .governance_state import TemporalGovernanceState
 from .multi_agent import read_session_from_header
 from .patch import PatchRequest, patch_request
-from .types import GovernanceVerdictResponse, Verdict, WorkflowEventType
+from .sandbox.adapter import TemporalSandboxConfig, activity_result
+from .sandbox.profiles import CommandResultValidationError
+from .sandbox.types import (
+    GOVERNED_COMMAND_ACTIVITY_TYPE,
+    GovernedCommandInputError,
+    GovernedCommandRequest,
+    GovernedCommandTypedResult,
+)
+from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+from .types import (
+    GovernanceBlockedError,
+    GovernanceVerdictResponse,
+    Verdict,
+    WorkflowEventType,
+)
 from .verdict_handler import enforce_verdict
 
 
@@ -213,10 +211,10 @@ class ActivityGovernanceInterceptor(Interceptor):
         api_url: str,
         api_key: str,
         span_processor: WorkflowSpanProcessor,
-        config: Optional[GovernanceConfig] = None,
-        client: Optional[GovernanceClient] = None,
-        sandbox: Optional[TemporalSandboxConfig] = None,
-        state: Optional[TemporalGovernanceState] = None,
+        config: GovernanceConfig | None = None,
+        client: GovernanceClient | None = None,
+        sandbox: TemporalSandboxConfig | None = None,
+        state: TemporalGovernanceState | None = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
@@ -265,8 +263,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         span_processor: WorkflowSpanProcessor,
         state: TemporalGovernanceState,
         config: GovernanceConfig,
-        client: Optional[GovernanceClient] = None,
-        sandbox: Optional[TemporalSandboxConfig] = None,
+        client: GovernanceClient | None = None,
+        sandbox: TemporalSandboxConfig | None = None,
     ):
         super().__init__(next_interceptor)
         self._api_url = api_url
@@ -346,7 +344,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input = self._serialize_input(input, info)
 
         # Send ActivityStarted event (optional)
-        governance_verdict: Optional[GovernanceVerdictResponse] = None
+        governance_verdict: GovernanceVerdictResponse | None = None
         if self._config.send_activity_start_event:
             governance_verdict = await self._send_activity_event(
                 info,
@@ -450,9 +448,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         authorization_id: str | None = None
         if self._sandbox.receipt_verifier is not None:
             try:
-                dispatcher_config = getattr(self._sandbox.dispatcher, "_config")
-                execution_config = getattr(dispatcher_config, "sandbox")
-                asset_bundle = getattr(execution_config, "asset_bundle")
+                dispatcher_config = self._sandbox.dispatcher._config
+                execution_config = dispatcher_config.sandbox
+                asset_bundle = execution_config.asset_bundle
                 authorization_id = self._sandbox.receipt_verifier.verify(
                     request,
                     expected_workflow_id=info.workflow_id,
@@ -472,8 +470,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         from openbox_sandbox.dispatcher import (
             Directive,
             Disposition,
-            GovernedCommand,
             GovernanceDecision,
+            GovernedCommand,
         )
 
         command = GovernedCommand(
@@ -550,9 +548,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     # client (wrapping the one shared Core runtime) evaluates
                     # the governed command at activity time; the dispatcher
                     # executes the resulting verdict without a second client.
-                    from datetime import datetime, timezone
+                    from datetime import datetime
 
-                    now = datetime.now(timezone.utc).isoformat()
+                    now = datetime.now(UTC).isoformat()
                     event = {
                         "source": "governed-dispatcher",
                         "event_type": "ActivityStarted",
@@ -872,9 +870,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         authorization_id: str | None = None
         if self._sandbox.receipt_verifier is not None:
             try:
-                dispatcher_config = getattr(self._sandbox.dispatcher, "_config")
-                execution_config = getattr(dispatcher_config, "sandbox")
-                asset_bundle = getattr(execution_config, "asset_bundle")
+                dispatcher_config = self._sandbox.dispatcher._config
+                execution_config = dispatcher_config.sandbox
+                asset_bundle = execution_config.asset_bundle
                 authorization_id = self._sandbox.receipt_verifier.verify(
                     request,
                     expected_workflow_id=info.workflow_id,
@@ -894,8 +892,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         from openbox_sandbox.dispatcher import (
             Directive,
             Disposition,
-            GovernedCommand,
             GovernanceDecision,
+            GovernedCommand,
         )
 
         command = GovernedCommand(
@@ -972,9 +970,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     # client (wrapping the one shared Core runtime) evaluates
                     # the governed command at activity time; the dispatcher
                     # executes the resulting verdict without a second client.
-                    from datetime import datetime, timezone
+                    from datetime import datetime
 
-                    now = datetime.now(timezone.utc).isoformat()
+                    now = datetime.now(UTC).isoformat()
                     event = {
                         "source": "governed-dispatcher",
                         "event_type": "ActivityStarted",
@@ -1244,7 +1242,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         *,
         status: str,
         dispatch_result: Any,
-        error_code: Optional[str],
+        error_code: str | None,
     ) -> None:
         """Post ActivityCompleted when the dispatcher did not already own it.
 
@@ -1504,7 +1502,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
     def _apply_input_redaction(
         self,
-        verdict: Optional[GovernanceVerdictResponse],
+        verdict: GovernanceVerdictResponse | None,
         input: ExecuteActivityInput,
         activity_input: list,
     ) -> list:
@@ -1542,7 +1540,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         return _serialize_value(original_args)
 
     def _apply_output_redaction(
-        self, verdict: Optional[GovernanceVerdictResponse], result: Any
+        self, verdict: GovernanceVerdictResponse | None, result: Any
     ) -> Any:
         """Apply guardrails output redaction if present."""
         if not (
@@ -1732,7 +1730,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
     async def _send_activity_event(
         self, info, event_type: str, **extra
-    ) -> Optional[GovernanceVerdictResponse]:
+    ) -> GovernanceVerdictResponse | None:
         """Send activity event via GovernanceClient."""
         serialized_extra = {}
         for key, value in extra.items():

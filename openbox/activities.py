@@ -24,7 +24,7 @@ code allowed) rather than workflow context (must be deterministic).
 """
 
 import logging
-from typing import Any, Dict, NoReturn, Optional
+from typing import Any, NoReturn
 
 import httpx
 from temporalio import activity
@@ -79,8 +79,8 @@ async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
 
 def raise_governance_block(
     reason: str,
-    policy_id: Optional[str] = None,
-    risk_score: Optional[float] = None,
+    policy_id: str | None = None,
+    risk_score: float | None = None,
 ) -> NoReturn:
     """Raise non-retryable ApplicationError for BLOCK verdict — blocks activity only."""
     details = {"policy_id": policy_id, "risk_score": risk_score}
@@ -106,7 +106,7 @@ def _build_verdict_result(verdict: Verdict, reason, policy_id, risk_score) -> di
 
 async def _handle_stop_verdict(
     verdict: Verdict, reason, policy_id, risk_score, event_type, event_payload
-) -> Optional[dict]:
+) -> dict | None:
     """Handle BLOCK/HALT verdicts. Returns result for signals, raises for others."""
     logger.info(
         f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})"
@@ -143,7 +143,7 @@ class GovernanceActivities:
     Credentials live on the instance (never in activity inputs → never in
     workflow history → not visible to anyone with namespace read access).
     The worker registers bound methods of a single instance, created at
-    worker-init time by the plugin / create_openbox_worker factory.
+    worker-init time by the OpenBoxPlugin.
     """
 
     def __init__(
@@ -153,7 +153,7 @@ class GovernanceActivities:
         *,
         agent_did=None,
         signer=None,
-        core_ca_path: Optional[str] = None,
+        core_ca_path: str | None = None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
@@ -170,8 +170,8 @@ class GovernanceActivities:
 
     @activity.defn(name="send_governance_event")
     async def send_governance_event(
-        self, input: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self, input: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Send a governance event to OpenBox Core.
 
         Called from WorkflowInboundInterceptor via workflow.execute_activity()
@@ -302,7 +302,7 @@ def build_governance_activities(
     *,
     agent_did=None,
     signer=None,
-    core_ca_path: Optional[str] = None,
+    core_ca_path: str | None = None,
 ) -> GovernanceActivities:
     """Factory used by plugin.py and worker.py to build the activities instance.
 
@@ -331,7 +331,7 @@ def build_governance_activities(
 # exists for direct callers (tests, scripts) who already hold credentials and
 # want to invoke the HTTP logic without constructing the class themselves.
 # ─────────────────────────────────────────────────────────────────────────────
-async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def send_governance_event(input: dict[str, Any]) -> dict[str, Any] | None:
     """Backward-compat wrapper — delegates to GovernanceActivities.
 
     Tests and direct callers can keep passing api_url/api_key in the input

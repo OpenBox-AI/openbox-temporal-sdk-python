@@ -12,8 +12,9 @@ machinery inside the file hook.
 import ast
 from pathlib import Path
 
-import openbox
 import openbox_core
+
+import openbox
 
 OPENBOX_PKG = Path(openbox.__file__).parent
 CORE_PKG = Path(openbox_core.__file__).parent

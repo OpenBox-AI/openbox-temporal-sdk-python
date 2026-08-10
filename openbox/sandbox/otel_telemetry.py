@@ -12,8 +12,9 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, cast
+from typing import Any, cast
 
 QUEUE_CAPACITY = 1024
 MAX_PHASE_FACTS = 64
@@ -508,20 +509,20 @@ class GovernedCommandTelemetryBridge:
                 0,
             )
         try:
-            disposition = _finite(getattr(getattr(result, "disposition"), "value"), _DISPOSITIONS)
-            directive = _finite(getattr(getattr(result, "directive"), "value"), _DIRECTIVES)
+            disposition = _finite(result.disposition.value, _DISPOSITIONS)
+            directive = _finite(result.directive.value, _DIRECTIVES)
             dispatch_error = getattr(result, "error", None)
             error_code = (
                 "none"
                 if dispatch_error is None
-                else _finite(getattr(getattr(dispatch_error, "code"), "value"), _ERROR_CODES)
+                else _finite(dispatch_error.code.value, _ERROR_CODES)
             )
             execution = getattr(result, "execution", None)
             timeout_status = _finite(
                 (
                     None
                     if execution is None
-                    else getattr(getattr(execution, "timeout_status"), "value")
+                    else execution.timeout_status.value
                 ),
                 _TIMEOUT_STATUSES,
             )
@@ -529,7 +530,7 @@ class GovernedCommandTelemetryBridge:
                 (
                     None
                     if execution is None
-                    else getattr(getattr(execution, "cleanup_status"), "value")
+                    else execution.cleanup_status.value
                 ),
                 _CLEANUP_STATUSES,
             )

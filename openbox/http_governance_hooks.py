@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 # Late import: otel_setup imports us, so we get a partially-loaded module ref.
 # That's fine — we only access _otel._span_processor and _otel._ignored_url_prefixes
@@ -38,7 +38,7 @@ _httpx_http_span: contextvars.ContextVar = contextvars.ContextVar(
 
 # Timing for HTTP hooks: span_id → perf_counter start time
 # Used by request_hook (started) to pass timing to response_hook (completed)
-_http_hook_timings: Dict[int, float] = {}
+_http_hook_timings: dict[int, float] = {}
 _HTTP_HOOK_TIMINGS_MAX = 1000
 
 # Text content types that are safe to capture as body
@@ -66,7 +66,7 @@ def _should_ignore_url(url: str) -> bool:
     return False
 
 
-def _is_text_content_type(content_type: Optional[str]) -> bool:
+def _is_text_content_type(content_type: str | None) -> bool:
     """Check if content type indicates text content (safe to decode)."""
     if not content_type:
         return True  # Assume text if no content-type
@@ -74,7 +74,7 @@ def _is_text_content_type(content_type: Optional[str]) -> bool:
     return any(content_type.startswith(t) for t in _TEXT_CONTENT_TYPES)
 
 
-def _truncate_body(body: Optional[str], max_size: Optional[int]) -> Optional[str]:
+def _truncate_body(body: str | None, max_size: int | None) -> str | None:
     """Truncate body to max_size chars if set."""
     if body and max_size and len(body) > max_size:
         return body[:max_size] + f"...[truncated, {len(body)} total chars]"
@@ -86,12 +86,12 @@ def _build_http_span_data(
     http_method: str,
     http_url: str,
     stage: str,
-    request_body: Optional[str] = None,
-    request_headers: Optional[dict] = None,
-    response_body: Optional[str] = None,
-    response_headers: Optional[dict] = None,
-    http_status_code: Optional[int] = None,
-    duration_ms: Optional[float] = None,
+    request_body: str | None = None,
+    request_headers: dict | None = None,
+    response_body: str | None = None,
+    response_headers: dict | None = None,
+    http_status_code: int | None = None,
+    duration_ms: float | None = None,
 ) -> dict:
     """Build span data dict for an HTTP request (used by governance hooks).
 
@@ -627,7 +627,7 @@ def _prepare_completed_governance(
     return http_span, url, span_data
 
 
-def setup_httpx_body_capture(span_processor: "WorkflowSpanProcessor") -> None:
+def setup_httpx_body_capture(span_processor: WorkflowSpanProcessor) -> None:
     """Setup httpx body capture using Client.send patching.
 
     This is separate from OTel instrumentation because OTel hooks
