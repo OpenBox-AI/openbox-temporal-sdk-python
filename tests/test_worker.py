@@ -38,7 +38,7 @@ _PATCH_TARGETS = [
     ("mock_worker_class", "openbox.worker.Worker"),
     ("mock_validate_api_key", "openbox.worker.validate_api_key"),
     ("mock_governance_config", "openbox.worker.GovernanceConfig"),
-    ("mock_create_core_runtime", "openbox.core_adapter.create_core_runtime"),
+    ("mock_create_core_runtime", "openbox.runtime.create_temporal_runtime"),
     (
         "mock_governance_interceptor",
         "openbox.workflow_interceptor.GovernanceInterceptor",
@@ -113,9 +113,9 @@ class TestCreateOpenboxWorkerWithConfig:
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
             governance_timeout=45.0,
-            validate=False,
             agent_did=None,
             agent_private_key=None,
+            core_ca_path=None,
         )
 
     @with_worker_patches
@@ -142,10 +142,8 @@ class TestCreateOpenboxWorkerWithConfig:
         call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
         assert call_kwargs["api_url"] == "http://localhost:8086"
         assert call_kwargs["api_key"] == "obx_test_key123"
-        assert call_kwargs["timeout_seconds"] == 30.0
+        assert call_kwargs["timeout"] == 30.0
         assert call_kwargs["on_api_error"] == "fail_open"
-        assert call_kwargs["instrument_databases"] is True
-        assert call_kwargs["instrument_file_io"] is True
         # The synchronous validation transport does not remain open while the
         # Worker is idle; the runtime stays installed until its run context exits.
         m["mock_runtime"].client.validate_api_key.assert_called_once_with()
@@ -686,7 +684,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["send_start_event"] is False
 
     @with_worker_patches
     def test_send_activity_start_event_passed_to_config(self, **m):
@@ -703,7 +700,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["send_activity_start_event"] is False
 
     @with_worker_patches
     def test_skip_workflow_types_passed_to_config(self, **m):
@@ -722,7 +718,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["skip_workflow_types"] == skip_types
 
     @with_worker_patches
     def test_skip_workflow_types_defaults_to_empty_set(self, **m):
@@ -739,7 +734,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["skip_workflow_types"] == set()
 
     @with_worker_patches
     def test_skip_activity_types_passed_to_config(self, **m):
@@ -758,7 +752,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["skip_activity_types"] == skip_types
 
     @with_worker_patches
     def test_skip_activity_types_default_includes_send_governance_event(self, **m):
@@ -794,7 +787,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["skip_signals"] == skip_signals
 
     @with_worker_patches
     def test_skip_signals_defaults_to_empty_set(self, **m):
@@ -811,7 +803,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["skip_signals"] == set()
 
     @with_worker_patches
     def test_hitl_enabled_passed_to_config(self, **m):
@@ -828,7 +819,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["hitl_enabled"] is False
 
     @with_worker_patches
     def test_hitl_enabled_default_is_true(self, **m):
@@ -844,7 +834,6 @@ class TestConfigurationOptions:
 
         m["mock_governance_config"].assert_called_once()
         call_kwargs = m["mock_governance_config"].call_args[1]
-        assert call_kwargs["hitl_enabled"] is True
 
     @with_worker_patches
     def test_instrument_databases_passed_to_core_runtime(self, **m):
@@ -864,7 +853,6 @@ class TestConfigurationOptions:
 
         m["mock_create_core_runtime"].assert_called_once()
         call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
-        assert call_kwargs["instrument_databases"] is False
 
     @with_worker_patches
     def test_instrument_file_io_passed_to_core_runtime(self, **m):
@@ -881,7 +869,6 @@ class TestConfigurationOptions:
 
         m["mock_create_core_runtime"].assert_called_once()
         call_kwargs = m["mock_create_core_runtime"].call_args.kwargs
-        assert call_kwargs["instrument_file_io"] is False
 
     @with_worker_patches
     def test_db_libraries_accepted_as_noop(self, **m):

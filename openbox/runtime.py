@@ -49,7 +49,6 @@ def create_temporal_runtime(
         timeout_seconds=core_config.timeout_seconds,
         on_api_error=core_config.on_api_error,
         identity=identity,
-        verify=global_config.get_ssl_context(),
         sdk_engine="temporal",
     )
     return OpenBoxRuntime(
