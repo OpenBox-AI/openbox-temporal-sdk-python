@@ -8,7 +8,8 @@ from openbox_core.client import EvaluationClient
 from openbox_core.runtime import OpenBoxRuntime
 
 from .config import GovernanceConfig, get_global_config
-from .temporal_adapter import TemporalFrameworkAdapter
+from .core_adapter import TemporalFrameworkAdapter, get_core_context_store
+from .governance_state import TemporalGovernanceState
 
 
 def create_temporal_runtime(
@@ -21,8 +22,15 @@ def create_temporal_runtime(
     agent_did: str | None,
     signer: Any,
     core_ca_path: str | None,
+    state: TemporalGovernanceState,
 ) -> OpenBoxRuntime:
-    """Build the single live Core client/runtime owned by a Worker or plugin."""
+    """Build the single live Core client/runtime owned by a Worker or plugin.
+
+    ``state`` is the run-scoped ``TemporalGovernanceState`` shared with the
+    interceptors: the adapter records completed-hook stops and HITL
+    pending-approval markers into it, and the activity interceptor consumes
+    them through the same instance.
+    """
     from openbox_core.identity import AgentIdentity
 
     global_config = get_global_config()
@@ -51,8 +59,14 @@ def create_temporal_runtime(
         identity=identity,
         sdk_engine="temporal",
     )
+    adapter = TemporalFrameworkAdapter(
+        state,
+        hitl_enabled=governance.hitl_enabled,
+        skip_hitl_activity_types=governance.skip_hitl_activity_types,
+        context_store=get_core_context_store(),
+    )
     return OpenBoxRuntime(
         core_config,
-        adapter=TemporalFrameworkAdapter(),
+        adapter=adapter,
         client=client,
     )

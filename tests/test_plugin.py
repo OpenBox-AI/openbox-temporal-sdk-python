@@ -19,9 +19,10 @@ PATCH_BASE = "openbox.plugin"
 def _make_plugin(**overrides):
     """Create OpenBoxPlugin with all heavy dependencies mocked.
 
-    create_core_runtime() and runtime.install_instrumentation() are stubbed so
-    no network or real instrumentation happens. A real TemporalGovernanceState
-    is used so tests can assert the same instance flows to both interceptors.
+    create_temporal_runtime() and setup_opentelemetry_for_governance() are
+    stubbed so no network or real instrumentation happens. A real
+    TemporalGovernanceState is used so tests can assert the same instance
+    flows to the runtime and both interceptors.
     """
     defaults = dict(
         openbox_url="http://localhost:8086",
@@ -38,8 +39,11 @@ def _make_plugin(**overrides):
     with (
         patch(f"{PATCH_BASE}.validate_api_key") as mock_validate,
         patch(
-            "openbox.core_adapter.create_core_runtime", return_value=mock_runtime
+            "openbox.runtime.create_temporal_runtime", return_value=mock_runtime
         ) as mock_create_runtime,
+        patch(
+            "openbox.otel_setup.setup_opentelemetry_for_governance"
+        ) as mock_setup_otel,
         patch("openbox.workflow_interceptor.GovernanceInterceptor") as mock_wi,
         patch("openbox.activity_interceptor.ActivityGovernanceInterceptor") as mock_ai,
         patch(f"{PATCH_BASE}.GovernanceClient") as mock_gc,
@@ -50,6 +54,7 @@ def _make_plugin(**overrides):
         mocks = {
             "validate_api_key": mock_validate,
             "create_core_runtime": mock_create_runtime,
+            "setup_otel": mock_setup_otel,
             "runtime": mock_runtime,
             "workflow_interceptor": mock_wi,
             "activity_interceptor": mock_ai,
@@ -75,8 +80,9 @@ class TestPluginInit:
     def test_builds_core_runtime_and_installs_instrumentation(self):
         """Plugin builds the base-SDK runtime and installs hook instrumentation.
 
-        Hook governance lives in openbox_core, installed once via
-        runtime.install_instrumentation().
+        Hook governance lives in openbox_core, wired through the runtime's
+        client; Temporal-local instrumentation is installed once via
+        setup_opentelemetry_for_governance().
         """
         plugin, mocks = _make_plugin()
 
@@ -87,30 +93,35 @@ class TestPluginInit:
         kw = mocks["create_core_runtime"].call_args.kwargs
         assert kw["api_url"] == "http://localhost:8086"
         assert kw["api_key"] == "obx_test_key_123"
+        assert kw["timeout"] == 30.0
+        assert kw["on_api_error"] == "fail_open"
         assert isinstance(kw["state"], TemporalGovernanceState)
         assert kw["state"] is plugin._state
 
-        # Validation transport is closed before Worker execution; instrumentation
-        # remains owned by the runtime until the Worker run context exits.
-        mocks["runtime"].client.validate_api_key.assert_called_once_with()
-        mocks["runtime"].client.close.assert_called_once_with()
-        mocks["runtime"].install_instrumentation.assert_called_once_with()
+        # Instrumentation is installed by the plugin, once, with the flags
+        # configured on the plugin.
+        mocks["setup_otel"].assert_called_once()
+        setup_kw = mocks["setup_otel"].call_args.kwargs
+        assert setup_kw["api_url"] == "http://localhost:8086"
+        assert setup_kw["instrument_databases"] is True
+        assert setup_kw["instrument_file_io"] is True
         assert plugin._runtime is mocks["runtime"]
 
     def test_runtime_closes_when_worker_context_exits(self):
+        """The plugin closes the shared runtime when the Worker run context
+        exits (run_worker's finally), like the deleted factory's lifecycle
+        plugin did."""
         plugin, mocks = _make_plugin()
 
         async def exercise() -> None:
-            assert plugin.run_context is not None
-            async with plugin.run_context():
-                pass
+            await plugin.run_worker(Mock(), AsyncMock())
 
         asyncio.run(exercise())
         mocks["runtime"].aclose.assert_awaited_once_with()
 
     def test_core_runtime_receives_instrumentation_flags(self):
         """instrument_databases / instrument_file_io / policy / timeout flow to
-        the runtime builder."""
+        the runtime builder / instrumentation setup."""
         plugin, mocks = _make_plugin(
             instrument_databases=False,
             instrument_file_io=False,
@@ -118,10 +129,11 @@ class TestPluginInit:
             governance_policy="fail_closed",
         )
         kw = mocks["create_core_runtime"].call_args.kwargs
-        assert kw["instrument_databases"] is False
-        assert kw["instrument_file_io"] is False
-        assert kw["timeout_seconds"] == 15.0
+        assert kw["timeout"] == 15.0
         assert kw["on_api_error"] == "fail_closed"
+        setup_kw = mocks["setup_otel"].call_args.kwargs
+        assert setup_kw["instrument_databases"] is False
+        assert setup_kw["instrument_file_io"] is False
 
     def test_shared_state_flows_to_both_interceptors(self):
         """The SAME TemporalGovernanceState is handed to both interceptors —
@@ -147,7 +159,13 @@ class TestPluginInit:
         )
         mocks["governance_client"]._from_core_client.assert_called_once_with(
             mocks["runtime"].client,
+            api_url="http://localhost:8086",
+            api_key="obx_test_key_123",
+            timeout=20.0,
             on_api_error="fail_closed",
+            agent_did=None,
+            signer=None,
+            ssl_context=None,
         )
 
     def test_is_simple_plugin_subclass(self):

@@ -195,6 +195,11 @@ def create_mock_httpx_client(response_data, status_code=200):
     mock_client = MagicMock()
     mock_client.post = mock_client_instance.post
     mock_client.aclose = AsyncMock(return_value=None)
+    # The merged client uses the httpx client as an async context manager
+    # (``async with client as actual``), so the mock must yield ITSELF on
+    # enter — otherwise ``actual`` is an auto-created child mock.
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
 
     return mock_client, mock_client_instance
 
@@ -1275,6 +1280,9 @@ class TestActivityInterceptor:
         mock_client = MagicMock()
         mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
         mock_client.aclose = AsyncMock(return_value=None)
+        # The merged client enters the transport as an async context manager.
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)
@@ -1308,6 +1316,9 @@ class TestActivityInterceptor:
         mock_client = MagicMock()
         mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
         mock_client.aclose = AsyncMock(return_value=None)
+        # The merged client enters the transport as an async context manager.
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)
