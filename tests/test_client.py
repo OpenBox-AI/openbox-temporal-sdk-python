@@ -26,7 +26,7 @@ def test_constructor_delegates_transport_ownership_to_core_client() -> None:
             timeout=12.0,
             on_api_error="fail_closed",
         )
-    assert value._core_client is client_type.return_value
+    assert value._core_client._base is client_type.return_value
     client_type.assert_called_once_with(
         "https://core.example",
         "obx_test_key",
@@ -42,11 +42,14 @@ def test_worker_owned_core_client_is_adapted_without_reconstruction() -> None:
     with patch("openbox_core.client.EvaluationClient") as client_type:
         value = GovernanceClient._from_core_client(
             shared,
+            api_url="https://core.example",
+            api_key="obx_test_key",
+            timeout=30.0,
             on_api_error="fail_open",
+            agent_did=None,
+            signer=None,
         )
     assert value._core_client is shared
-    assert not hasattr(value, "_api_key")
-    assert not hasattr(value, "_signer")
     client_type.assert_not_called()
 
 
@@ -65,6 +68,11 @@ async def test_evaluate_maps_shared_result_without_reparsing() -> None:
     shared.aevaluate.return_value = shared_result
     value = GovernanceClient._from_core_client(
         shared,
+        api_url="https://core.example",
+        api_key="obx_test_key",
+        timeout=30.0,
+        agent_did=None,
+        signer=None,
         on_api_error="fail_open",
     )
 
@@ -83,6 +91,11 @@ async def test_fail_open_fallback_remains_distinguishable_and_returns_none() -> 
     shared.aevaluate.return_value = EvaluationResult.fallback_allow("Core unavailable")
     value = GovernanceClient._from_core_client(
         shared,
+        api_url="https://core.example",
+        api_key="obx_test_key",
+        timeout=30.0,
+        agent_did=None,
+        signer=None,
         on_api_error="fail_open",
     )
     assert await value.evaluate_event({}) is None
@@ -94,6 +107,11 @@ async def test_fail_closed_network_error_maps_to_marked_halt() -> None:
     shared.aevaluate.side_effect = GovernanceAPIError("Core unavailable")
     value = GovernanceClient._from_core_client(
         shared,
+        api_url="https://core.example",
+        api_key="obx_test_key",
+        timeout=30.0,
+        agent_did=None,
+        signer=None,
         on_api_error="fail_closed",
     )
     result = await value.evaluate_event({})
@@ -109,6 +127,11 @@ async def test_contract_error_is_never_converted_to_fail_open() -> None:
     shared.aevaluate.side_effect = error
     value = GovernanceClient._from_core_client(
         shared,
+        api_url="https://core.example",
+        api_key="obx_test_key",
+        timeout=30.0,
+        agent_did=None,
+        signer=None,
         on_api_error="fail_open",
     )
     with pytest.raises(ContractError) as exc_info:
@@ -125,6 +148,11 @@ async def test_approval_and_close_delegate_to_same_shared_client() -> None:
     )
     value = GovernanceClient._from_core_client(
         shared,
+        api_url="https://core.example",
+        api_key="obx_test_key",
+        timeout=30.0,
+        agent_did=None,
+        signer=None,
         on_api_error="fail_open",
     )
 

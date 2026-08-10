@@ -1150,7 +1150,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -1346,7 +1346,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -1577,7 +1577,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -1727,7 +1727,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -1819,7 +1819,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -1991,7 +1991,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -2120,7 +2120,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -2190,7 +2190,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -2374,7 +2374,7 @@ class TestSendGovernanceEvent:
             "obx_test_key",
             )
         activity_instance._governance_client = client
-        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+        with pytest.raises(ApplicationError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
