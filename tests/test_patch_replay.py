@@ -1,4 +1,4 @@
-"""Replay determinism tests for Retryable BLOCK Workflow Restart.
+"""Replay determinism tests for BLOCK-with-Patch Workflow Restart.
 
 These record REAL histories (real governance interceptors + real
 send_governance_event activity against a fake HTTP Core) and replay them on a
@@ -27,7 +27,7 @@ PATCH_BASE = "openbox.plugin"
 
 
 def _BLOCK(new_input):
-    return {"verdict": "block", "retry_plan": {"new_input": new_input}}
+    return {"verdict": "block", "patch": {"new_input": new_input}}
 
 
 _ALLOW = {"verdict": "allow"}
@@ -99,7 +99,7 @@ class SimpleWorkflow:
         )
 
 
-class TestRetryableBlockReplay:
+class TestPatchReplay:
     @pytest.fixture
     async def env(self):
         async with await WorkflowEnvironment.start_local() as env:
@@ -136,7 +136,7 @@ class TestRetryableBlockReplay:
 
     async def test_replay_continue_as_new_history_clean(self, env):
         """THE determinism guarantee: a first-run history that records the patch
-        marker AND a Continue-As-New (WorkflowStarted BLOCK+plan) replays with no
+        marker AND a Continue-As-New (WorkflowStarted BLOCK+patch) replays with no
         non-determinism error."""
         server = _start_fake_core({"WorkflowStarted": [_BLOCK("v2"), _ALLOW]})
         url = f"http://127.0.0.1:{server.server_address[1]}"

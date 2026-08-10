@@ -4,6 +4,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Added
 
 - Optional governed-command integration with bounded Workflow contracts, a deterministic one-attempt helper, dedicated Worker/plugin registration, heartbeat-aware cancellation, and typed Temporal result mapping. Production mode structurally injects the real governed dispatcher plus its `GovernedCommand` factory, builds the command from genuine `activity.info()` identity, invokes only `dispatcher.dispatch(command)`, and validates/maps its `DispatchResult` without a hard dispatcher-package dependency. Host-result rejection is post-dispatch and does not prevent a host attempt; zero-host operation requires exact `CONSTRAIN` policy plus a deployment with no available dispatcher host path. Temporal and dispatcher profile bundles must use equivalent definitions/version. The mapped result is reported terminal metadata correlated with lifecycle signals, not a portable signed runtime receipt or independent proof. Pre-authorized same-domain trust and verified authorization receipts remain compatibility modes; authorization receipts prove permission, not execution.
@@ -11,6 +12,32 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 ### Changed
 
 - Lifecycle governance Activities and Activity interceptors now adapt the Worker/plugin-owned `openbox_core.EvaluationClient` instead of constructing duplicate HTTP clients.
+=======
+## [1.4.0] - 2026-07-23
+
+**BREAKING:** Renames the retryable-BLOCK remediation vocabulary introduced in `1.3.0` to `patch`, matching the cross-repository rename of `retry_plan` → `patch` (see the base SDK `1.2.0` changelog and `docs/proposal-block-patch-workflow-restart.md`). No behavior change — this is a terminology rename plus the required base-SDK wire-key bump.
+
+### Changed (BREAKING)
+
+- **Wire key:** the governance directive field is now `patch` (was `retry_plan`), matching the base SDK `1.2.0` `EvaluationResult.patch` / `ApprovalResult.patch` contract.
+- **Public API renames:**
+  - `RetryableBlockRequest` → `PatchRequest`; `GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION` → `GOVERNANCE_PATCH_SCHEMA_VERSION` (public `openbox` exports).
+  - `max_retryable_block_restarts` → `max_patch_restarts` (`create_openbox_worker()` / `OpenBoxPlugin` / `GovernanceConfig` kwarg).
+  - `GovernanceRetryLimitExceeded` → `GovernancePatchLimitExceeded`; `GovernanceRetryInputInvalid` → `GovernancePatchInputInvalid` (`ApplicationError.type` values).
+  - `openbox/retryable_block.py` → `openbox/patch.py`; `openbox/retry_coordinator.py` → `openbox/patch_coordinator.py` (internal modules — import directly only if you bypass the public `openbox` exports).
+- **Base SDK dependency raised to `openbox-sdk-python>=1.2.0`** (was `>=1.1.0`) — the patch rename requires `handle_patch` from base SDK `1.2.0`.
+
+### Replay compatibility (not breaking)
+
+- The Temporal patch-version marker value (`openbox-retryable-block-v1`) and the workflow-memo restart-count key (`openbox_retryable_block_restart_count`) are UNCHANGED — already-running restart chains keep replaying deterministically and keep their restart budget across the upgrade.
+- The legacy `ApplicationError` type `GovernanceRetryableBlock` is still accepted by every extractor (an in-flight restart chain started before this release may still carry it); new executions only ever emit `GovernancePatch`.
+
+### Migration notes
+
+- If you read the raw governance API response yourself (rather than through this SDK), change `retry_plan` to `patch` in your parsing code.
+- Rename `max_retryable_block_restarts=` to `max_patch_restarts=` at any `create_openbox_worker()` / `OpenBoxPlugin(...)` call site.
+- Rename any direct import of `RetryableBlockRequest` to `PatchRequest` (from `openbox` or `openbox.patch`).
+>>>>>>> origin/main
 
 ## [1.3.0] - 2026-07-21
 

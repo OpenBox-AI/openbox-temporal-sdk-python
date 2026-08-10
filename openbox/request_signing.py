@@ -20,7 +20,7 @@ from openbox_core.identity import (
     HEADER_SIGNATURE,
     HEADER_TIMESTAMP,
     AgentIdentity,
-    sign_serialized_request,
+    prepare_signed_request as _prepare_signed_request,
 )
 from openbox_core.serialization import serialize_body
 
@@ -56,19 +56,21 @@ def prepare_signed_request(
     # with the base SDK's framework identifier.
     from .hook_governance import build_auth_headers
 
-    body = serialize_body(payload)
-    headers = build_auth_headers(api_key)
     identity = (
         AgentIdentity(agent_did=agent_did, signer=signer)
         if agent_did and signer is not None
         else None
     )
-    return sign_serialized_request(
+    from openbox import __version__
+
+    return _prepare_signed_request(
         method,
         path,
-        body,
-        headers=headers,
+        payload,
+        api_key=api_key,
         identity=identity,
+        sdk_engine="temporal",
+        sdk_version=__version__,
         # Preserve the module-level deterministic seams from the legacy helper.
         _timestamp=(datetime.now(timezone.utc).isoformat() if identity else None),
         _nonce=(secrets.token_urlsafe(24) if identity else None),

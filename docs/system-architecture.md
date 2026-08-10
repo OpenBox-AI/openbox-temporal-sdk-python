@@ -289,17 +289,17 @@ OpenBoxError (base)
 
 #### TemporalGovernanceState
 
-**Responsibility:** Hold the small amount of Temporal semantics that must survive past a base-SDK hook callback — signal verdicts, HITL pending markers, completed-hook stop bridge, and retryable-BLOCK requests. Workflow-safe, thread-safe, and shared by both interceptors.
+**Responsibility:** Hold the small amount of Temporal semantics that must survive past a base-SDK hook callback — signal verdicts, HITL pending markers, completed-hook stop bridge, and BLOCK-with-patch requests. Workflow-safe, thread-safe, and shared by both interceptors.
 
 The base SDK (`openbox_core`) owns hook context, hook payload building, hook evaluation, and the within-activity abort short-circuit (its `ContextStore`). This object holds only the effects the base runtime cannot express itself. All keys are **run-scoped**: state from a prior run with the same `workflow_id` is ignored and cleared.
 
 **Code Location:** `openbox/governance_state.py`
 
-**Retryable BLOCK Restart Bridge:** The workflow interceptor receives retryable-BLOCK requests from governance responses (activity results, signals, hooks, approval polls) and submits them to a run-local `RetryableBlockCoordinator`. The coordinator stores the first request (first-wins semantics); the inbound workflow boundary later reads it, validates the restart budget (incrementing a memo counter bounded by `max_retryable_block_restarts`), and calls `continue_as_new(new_input, memo=...)` with the replacement input and updated counter.
+**BLOCK-with-Patch Restart Bridge:** The workflow interceptor receives BLOCK-with-patch requests from governance responses (activity results, signals, hooks, approval polls) and submits them to a run-local `PatchCoordinator`. The coordinator stores the first request (first-wins semantics); the inbound workflow boundary later reads it, validates the restart budget (incrementing a memo counter bounded by `max_patch_restarts`), and calls `continue_as_new(new_input, memo=...)` with the replacement input and updated counter.
 
-**Versioned Error Transport:** Activity-side retry requests use a stable, non-retryable `ApplicationError` with type `"GovernanceRetryableBlock"` carrying a versioned request envelope. The workflow boundary extracts and validates the envelope before attempting a restart. Unknown versions fail safely as plain BLOCK; Temporal-level failures (replay, malformed detail) do not trigger a Workflow Task loop.
+**Versioned Error Transport:** Activity-side patch requests use a stable, non-retryable `ApplicationError` with type `"GovernancePatch"` carrying a versioned request envelope. The workflow boundary extracts and validates the envelope before attempting a restart. Unknown versions fail safely as plain BLOCK; Temporal-level failures (replay, malformed detail) do not trigger a Workflow Task loop. Already-recorded histories may still carry the legacy pre-rename type `"GovernanceRetryableBlock"` on an in-flight restart chain — every extractor accepts both values, but only `"GovernancePatch"` is emitted going forward.
 
-**Replay Safety (Patch Marker `"openbox-retryable-block-v1"`):** The Continue-As-New command is protected by a Temporal patch marker so old histories (pre-feature) skip the new branch and replay unchanged. New histories take the retryable-BLOCK path deterministically.
+**Replay Safety (Patch Marker `"openbox-retryable-block-v1"`):** The Continue-As-New command is protected by a Temporal patch marker so old histories (pre-feature) skip the new branch and replay unchanged. New histories take the BLOCK-with-patch path deterministically. This marker value (and the workflow-memo restart-count key, `"openbox_retryable_block_restart_count"`) are historical Temporal compatibility identifiers frozen at their pre-rename names — renaming either would break replay of already-running restart chains.
 
 ---
 
@@ -620,7 +620,7 @@ Authorization: Bearer {api_key}
 └────────────┘          └──────────────┘   └──────────────┘
 ```
 
-### Retryable BLOCK Restart Flow
+### BLOCK-with-Patch Restart Flow
 
 ```
 ┌──────────────────────────────────────────┐
@@ -630,15 +630,15 @@ Authorization: Bearer {api_key}
              │
              ▼
 ┌──────────────────────────────────────────┐
-│ Base SDK handle_retryable_block() helper │
-│ (checks for valid BLOCK + retry_plan)    │
+│ Base SDK handle_patch() helper           │
+│ (checks for valid BLOCK + patch)         │
 └────────────┬─────────────────────────────┘
              │
       ┌──────┴──────────┐
       │                 │
       ▼                 ▼
   ┌────────┐        ┌─────────────────┐
-  │No plan │        │RetryDirective   │
+  │No patch│        │PatchDirective   │
   └────────┘        │(new_input)      │
      │              └────────┬────────┘
      ▼                       │
@@ -650,7 +650,7 @@ behavior               │                      │
                        │                      │
                        ▼                      ▼
               Non-retryable         Submit to run-local
-              ApplicationError      RetryableBlockCoordinator
+              ApplicationError      PatchCoordinator
               (transport signal)    (first-wins)
                        │                      │
                        └──────┬───────────────┘
@@ -678,12 +678,12 @@ behavior               │                      │
          │                    │
          ▼                    ▼
     ApplicationError   Continue-As-New
-    (GovernanceRetry   (same Workflow ID,
+    (GovernancePatch   (same Workflow ID,
     LimitExceeded)     new Run ID, fresh
                        history)
 ```
 
-**Code Location:** `openbox/workflow_interceptor.py`, `openbox/retry_coordinator.py`
+**Code Location:** `openbox/workflow_interceptor.py`, `openbox/patch_coordinator.py`
 
 ### Hook-Level Governance Flow
 

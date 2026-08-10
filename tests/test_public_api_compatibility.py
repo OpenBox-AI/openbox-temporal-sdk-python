@@ -50,9 +50,9 @@ EXPECTED_EXPORTS = {
     "should_skip_hitl",
     # emit_handoff — multi-agent primitive kept in the public surface.
     "emit_handoff",
-    # Retryable-BLOCK restart envelope + schema version.
-    "RetryableBlockRequest",
-    "GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION",
+    # BLOCK-with-patch restart envelope + schema version.
+    "PatchRequest",
+    "GOVERNANCE_PATCH_SCHEMA_VERSION",
 }
 
 REMOVED_EXPORTS = {
