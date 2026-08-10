@@ -1311,7 +1311,21 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
     # ─── Verdict checks ───────────────────────────────────────────────────
 
     async def _check_pending_verdicts(self, info) -> None:
-        """Check for blocking verdicts from prior signal governance or buffer."""
+        """Enforce a SignalReceived BLOCK/HALT recorded for this run by the
+        workflow interceptor. Run-scoped: a stale verdict from a prior run with
+        the same workflow_id is ignored and cleared inside the state lookup."""
+        entry = self._state.get_signal_verdict(
+            info.workflow_id, info.workflow_run_id
+        )
+        if entry is not None:
+            verdict, reason = entry
+            if verdict.should_stop():
+                await self._enforce_stop_verdict(
+                    verdict,
+                    reason or "Workflow blocked by governance",
+                    info.workflow_id,
+                )
+            return
         buffer = self._span_processor.get_buffer(info.workflow_id)
 
         # Clear stale buffer from previous workflow run
@@ -1382,8 +1396,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ):
             return False
 
-        buffer = self._span_processor.get_buffer(info.workflow_id)
-        if not (buffer and buffer.pending_approval):
+        if not self._state.has_pending_approval(
+            info.workflow_id, info.workflow_run_id, info.activity_id
+        ):
             return False
 
         activity.logger.info(
@@ -1403,7 +1418,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         )
         if approved:
             activity.logger.info(f"Approval granted for workflow_id={info.workflow_id}")
-            buffer.pending_approval = False
+            self._state.clear_pending_approval(
+                info.workflow_id, info.workflow_run_id, info.activity_id
+            )
             return True
         return False
 
@@ -1469,12 +1486,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 hitl_enabled=self._config.hitl_enabled,
                 skip_types=self._config.skip_hitl_activity_types,
             ):
-                buffer = self._span_processor.get_buffer(info.workflow_id)
-                if buffer:
-                    buffer.pending_approval = True
-                    activity.logger.info(
-                        f"Pending approval stored: workflow_id={info.workflow_id}"
-                    )
+                self._state.mark_pending_approval(
+                    info.workflow_id, info.workflow_run_id, info.activity_id
+                )
+                activity.logger.info(
+                    f"Pending approval stored: workflow_id={info.workflow_id}"
+                )
                 raise_approval_pending(
                     f"Approval required: {verdict_response.reason or 'Activity requires human approval'}"
                 )

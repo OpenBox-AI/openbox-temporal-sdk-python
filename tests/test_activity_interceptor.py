@@ -1111,6 +1111,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1163,6 +1164,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1200,6 +1202,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1230,6 +1233,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1262,6 +1266,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1294,6 +1299,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1325,6 +1331,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1361,6 +1368,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1392,6 +1400,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1430,6 +1439,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1456,6 +1466,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1483,6 +1494,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1697,6 +1709,7 @@ class TestEdgeCases:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
             client=make_verdict_client(),
@@ -1799,6 +1812,7 @@ class TestEdgeCases:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
             client=client,
@@ -1937,6 +1951,7 @@ class TestActivityMultiAgentSession:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
             client=client,
@@ -1990,6 +2005,7 @@ class TestCoreContextBindingCarriesPolicyFields:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
             client=make_verdict_client(),
