@@ -22,6 +22,7 @@ from openbox.core_adapter import get_core_context_store
 from openbox.governance_state import TemporalGovernanceState
 from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
 from openbox.types import GovernanceVerdictResponse, Verdict
+from openbox.span_processor import WorkflowSpanProcessor
 
 from .conftest import posted_payload
 
@@ -140,6 +141,7 @@ def make_interceptor(state, config=None, *, next_result="result", client=None):
         next_interceptor=mock_next,
         api_url="http://localhost:8086",
         api_key="obx_test_key123",
+        span_processor=WorkflowSpanProcessor(),
         state=state,
         config=config,
         client=client or make_verdict_client(),
@@ -607,13 +609,14 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
         )
 
         assert interceptor.api_url == "http://localhost:8086"
         assert interceptor.api_key == "obx_test_key123"
-        assert interceptor.state is state
+        assert interceptor._state is state
         assert isinstance(interceptor.config, GovernanceConfig)
 
     def test_initialization_with_default_config(self, state):
@@ -621,6 +624,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -631,6 +635,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086/",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -641,6 +646,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086///",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -651,6 +657,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
         mock_next = MagicMock()
