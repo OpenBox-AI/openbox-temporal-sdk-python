@@ -12,8 +12,8 @@ import re
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
-from openbox_core.errors import ContractError
 from temporalio.exceptions import ApplicationError
 
 from openbox.activities import (
@@ -24,8 +24,11 @@ from openbox.activities import (
     raise_governance_block,
     send_governance_event as send_governance_event_compat,
 )
-from openbox.retryable_block import GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION
+from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION
 from openbox.types import GovernanceVerdictResponse, Verdict
+
+from .conftest import posted_payload
+from openbox_core.errors import ContractError
 
 
 class TestRfc3339Now:
@@ -46,9 +49,9 @@ class TestRfc3339Now:
         result = _rfc3339_now()
         # RFC3339 pattern: 2024-01-15T10:30:45.123Z
         pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
-        assert re.match(pattern, result), (
-            f"Timestamp '{result}' does not match RFC3339 format"
-        )
+        assert re.match(
+            pattern, result
+        ), f"Timestamp '{result}' does not match RFC3339 format"
 
     def test_timestamp_is_valid_datetime(self):
         """Test that the timestamp can be parsed back to a valid datetime."""
@@ -204,17 +207,770 @@ class TestTerminateWorkflowForHalt:
 
 
 class TestSendGovernanceEvent:
+    """Tests for the send_governance_event() activity function."""
+
+    @pytest.fixture
+    def base_input(self):
+        """Provide a base input dict for tests."""
+        return {
+            "api_url": "https://api.openbox.ai",
+            "api_key": "test-api-key",
+            "payload": {
+                "event_type": "WorkflowStarted",
+                "workflow_id": "test-workflow-123",
+            },
+            "timeout": 30.0,
+            "on_api_error": "fail_open",
+        }
+
+    @pytest.fixture
+    def mock_response_allow(self):
+        """Create a mock response for 'allow' verdict."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "reason": "Policy passed",
+            "policy_id": "policy-001",
+            "risk_score": 0.1,
+        }
+        return response
+
+    @pytest.fixture
+    def mock_response_block(self):
+        """Create a mock response for 'block' verdict."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "block",
+            "reason": "High risk detected",
+            "policy_id": "policy-002",
+            "risk_score": 0.9,
+        }
+        return response
+
+    @pytest.fixture
+    def mock_response_v1_continue(self):
+        """Create a mock response for v1.0 'continue' action."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "action": "continue",
+            "reason": "Allowed by policy",
+            "policy_id": "policy-v1",
+            "risk_score": 0.2,
+        }
+        return response
+
+    @pytest.fixture
+    def mock_response_v1_stop(self):
+        """Create a mock response for v1.0 'stop' action."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "action": "stop",
+            "reason": "Blocked by v1 policy",
+            "policy_id": "policy-v1-stop",
+            "risk_score": 0.95,
+        }
+        return response
+
+    # -------------------------------------------------------------------------
+    # Successful API call tests
+    # -------------------------------------------------------------------------
+
+    async def test_successful_api_call_returns_result_with_verdict(
+        self, base_input, mock_response_allow
+    ):
+        """Test that a successful API call returns a result with verdict."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "allow"
+            assert result["reason"] == "Policy passed"
+            assert result["policy_id"] == "policy-001"
+            assert result["risk_score"] == 0.1
+
+    async def test_adds_timestamp_to_payload(self, base_input, mock_response_allow):
+        """Test that the activity adds a timestamp to the payload."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await send_governance_event(base_input)
+
+            # Get the actual call arguments
+            call_args = mock_client.post.call_args
+            sent_payload = posted_payload(call_args)
+
+            # Verify timestamp was added
+            assert "timestamp" in sent_payload
+            # Verify timestamp format
+            pattern = r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+            assert re.match(pattern, sent_payload["timestamp"])
+
+    async def test_preserves_original_payload_fields(
+        self, base_input, mock_response_allow
+    ):
+        """Test that original payload fields are preserved."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await send_governance_event(base_input)
+
+            call_args = mock_client.post.call_args
+            sent_payload = posted_payload(call_args)
+
+            assert sent_payload["event_type"] == "WorkflowStarted"
+            assert sent_payload["workflow_id"] == "test-workflow-123"
+
+    # -------------------------------------------------------------------------
+    # v1.0 compatibility tests
+    # -------------------------------------------------------------------------
+
+    async def test_v1_action_continue_maps_to_verdict_allow(
+        self, base_input, mock_response_v1_continue
+    ):
+        """Test that v1.0 action='continue' maps to verdict='allow'."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_v1_continue
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "allow"
+            assert result["action"] == "allow"  # backward compat field
+
+    async def test_v1_action_stop_terminates_workflow(
+        self, base_input, mock_response_v1_stop
+    ):
+        """Test that v1.0 action='stop' (maps to HALT) calls terminate.
+        Falls back to ApplicationError when no client is set."""
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)  # No client → fallback to ApplicationError
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_v1_stop
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert exc_info.value.type == "GovernanceHalt"
+            assert exc_info.value.non_retryable is True
+
+    # -------------------------------------------------------------------------
+    # SignalReceived special handling tests
+    # -------------------------------------------------------------------------
+
+    async def test_signal_received_with_stop_returns_result_instead_of_raising(
+        self, base_input, mock_response_block
+    ):
+        """Test that SignalReceived with action='stop' returns result instead of raising."""
+        # Modify input to be a SignalReceived event
+        base_input["payload"]["event_type"] = "SignalReceived"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_block
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            # Should NOT raise, should return result
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "block"
+            assert result["reason"] == "High risk detected"
+            assert result["policy_id"] == "policy-002"
+            assert result["risk_score"] == 0.9
+
+    async def test_signal_received_with_allow_returns_normally(
+        self, base_input, mock_response_allow
+    ):
+        """Test that SignalReceived with 'allow' verdict returns normally."""
+        base_input["payload"]["event_type"] = "SignalReceived"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "allow"
+
+    # -------------------------------------------------------------------------
+    # HTTP error tests
+    # -------------------------------------------------------------------------
+
+    async def test_http_error_with_fail_open_returns_error_dict(self, base_input):
+        """Test that HTTP error with fail_open returns error dict."""
+        base_input["on_api_error"] = "fail_open"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is False
+            assert "error" in result
+            assert "500" in result["error"]
+            assert "Internal Server Error" in result["error"]
+
+    async def test_http_error_with_fail_closed_raises_governance_api_error(
+        self, base_input
+    ):
+        """Test that HTTP error with fail_closed raises GovernanceAPIError."""
+        base_input["on_api_error"] = "fail_closed"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 503
+        mock_response.text = "Service Unavailable"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(GovernanceAPIError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert "503" in str(exc_info.value)
+            assert "Service Unavailable" in str(exc_info.value)
+
+    async def test_http_404_with_fail_open(self, base_input):
+        """Test HTTP 404 error with fail_open returns error dict."""
+        base_input["on_api_error"] = "fail_open"
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.text = "Not Found"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is False
+            assert "404" in result["error"]
+
+    # -------------------------------------------------------------------------
+    # Network error tests
+    # -------------------------------------------------------------------------
+
+    async def test_network_error_with_fail_open_returns_error_dict(self, base_input):
+        """Test that network error with fail_open returns error dict."""
+        base_input["on_api_error"] = "fail_open"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is False
+            assert "error" in result
+            assert "Connection refused" in result["error"]
+
+    async def test_network_error_with_fail_closed_raises_governance_api_error(
+        self, base_input
+    ):
+        """Test that network error with fail_closed raises GovernanceAPIError."""
+        base_input["on_api_error"] = "fail_closed"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = httpx.ConnectError("Connection refused")
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(GovernanceAPIError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert "Connection refused" in str(exc_info.value)
+
+    async def test_timeout_error_with_fail_open(self, base_input):
+        """Test timeout error with fail_open returns error dict."""
+        base_input["on_api_error"] = "fail_open"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = httpx.TimeoutException("Request timed out")
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is False
+            assert "error" in result
+
+    async def test_timeout_error_with_fail_closed(self, base_input):
+        """Test timeout error with fail_closed raises GovernanceAPIError."""
+        base_input["on_api_error"] = "fail_closed"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = httpx.TimeoutException("Request timed out")
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(GovernanceAPIError):
+                await send_governance_event(base_input)
+
+    # -------------------------------------------------------------------------
+    # API URL and headers tests
+    # -------------------------------------------------------------------------
+
+    async def test_correct_api_endpoint_is_called(
+        self, base_input, mock_response_allow
+    ):
+        """Test that the correct API endpoint is called."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await send_governance_event(base_input)
+
+            call_args = mock_client.post.call_args
+            called_url = call_args.args[0]
+            assert called_url == "https://api.openbox.ai/api/v1/governance/evaluate"
+
+    async def test_authorization_header_is_set(self, base_input, mock_response_allow):
+        """Test that the Authorization header is correctly set."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await send_governance_event(base_input)
+
+            call_args = mock_client.post.call_args
+            headers = call_args.kwargs["headers"]
+            assert headers["Authorization"] == "Bearer test-api-key"
+            from openbox import __version__
+
+            sdk_identifier = f"openbox-temporal-python-v{__version__.removeprefix('v')}"
+            assert headers["User-Agent"] == f"OpenBox-SDK/{sdk_identifier}"
+            assert headers["X-OpenBox-SDK-Version"] == sdk_identifier
+
+    # -------------------------------------------------------------------------
+    # Verdict types tests
+    # -------------------------------------------------------------------------
+
+    async def test_block_verdict_raises_governance_block(
+        self, base_input, mock_response_block
+    ):
+        """Test that 'block' verdict raises GovernanceBlock (activity fails, workflow continues)."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_block
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert exc_info.value.type == "GovernanceBlock"
+
+    async def test_halt_verdict_terminates_workflow(self, base_input):
+        """Test that 'halt' verdict calls client.terminate() to kill workflow."""
+        from openbox.activities import set_temporal_client
+
+        mock_handle = MagicMock()
+        mock_handle.terminate = AsyncMock()
+        mock_temporal_client = MagicMock()
+        mock_temporal_client.get_workflow_handle.return_value = mock_handle
+
+        set_temporal_client(mock_temporal_client)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "verdict": "halt",
+            "reason": "Emergency halt",
+            "policy_id": "emergency-policy",
+            "risk_score": 1.0,
+        }
+
+        try:
+            with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+                mock_client = AsyncMock()
+                mock_client.post.return_value = mock_response
+                mock_client_class.return_value.__aenter__.return_value = mock_client
+
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
+
+                # Verify terminate was called and ApplicationError raised to stop activity
+                mock_temporal_client.get_workflow_handle.assert_called_once_with(
+                    "test-workflow-123"
+                )
+                mock_handle.terminate.assert_called_once()
+                assert "Emergency halt" in mock_handle.terminate.call_args[0][0]
+                assert exc_info.value.type == "GovernanceHalt"
+        finally:
+            set_temporal_client(None)
+
+    async def test_constrain_verdict_returns_result(self, base_input):
+        """Test that 'constrain' verdict returns result (does not raise)."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "verdict": "constrain",
+            "reason": "Apply constraints",
+            "policy_id": "constrain-policy",
+            "risk_score": 0.5,
+        }
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "constrain"
+
+    async def test_require_approval_verdict_returns_result(self, base_input):
+        """Test that 'require_approval' verdict returns result (does not raise)."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "verdict": "require_approval",
+            "reason": "Human approval required",
+            "policy_id": "approval-policy",
+            "risk_score": 0.7,
+        }
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == "require_approval"
+
+    # -------------------------------------------------------------------------
+    # Default values tests
+    # -------------------------------------------------------------------------
+
+    async def test_default_on_api_error_is_fail_open(self, mock_response_allow):
+        """Test that default on_api_error is 'fail_open'."""
+        minimal_input = {
+            "api_url": "https://api.openbox.ai",
+            "api_key": "key",
+            "payload": {"event_type": "WorkflowStarted"},
+        }
+
+        mock_error_response = MagicMock()
+        mock_error_response.status_code = 500
+        mock_error_response.text = "Error"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_error_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            # Should not raise (fail_open is default)
+            result = await send_governance_event(minimal_input)
+            assert result["success"] is False
+
+    async def test_default_timeout(self, mock_response_allow):
+        """Test that default timeout is 30.0 seconds."""
+        minimal_input = {
+            "api_url": "https://api.openbox.ai",
+            "api_key": "key",
+            "payload": {"event_type": "WorkflowStarted"},
+        }
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await send_governance_event(minimal_input)
+
+            # Check that AsyncClient was initialized with timeout=30.0
+            mock_client_class.assert_called_once_with(timeout=30.0)
+
+    # -------------------------------------------------------------------------
+    # Edge case tests
+    # -------------------------------------------------------------------------
+
+    async def test_empty_payload(self, mock_response_allow):
+        """Test handling of empty payload."""
+        input_data = {
+            "api_url": "https://api.openbox.ai",
+            "api_key": "key",
+            "payload": {},
+        }
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(input_data)
+
+            assert result["success"] is True
+            # Timestamp should still be added
+            call_args = mock_client.post.call_args
+            sent_payload = posted_payload(call_args)
+            assert "timestamp" in sent_payload
+
+    async def test_missing_reason_in_response_uses_default(self, base_input):
+        """Test that missing reason in stop response uses 'No reason provided'."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "verdict": "block",
+            "policy_id": "policy-no-reason",
+            "risk_score": 0.9,
+            # No "reason" field
+        }
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert "No reason provided" in str(exc_info.value)
+
+    async def test_application_error_is_reraised(self, base_input):
+        """Test that ApplicationError is re-raised without modification."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = ApplicationError(
+                "Custom app error",
+                type="CustomType",
+                non_retryable=True,
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert exc_info.value.type == "CustomType"
+
+    async def test_governance_api_error_is_reraised(self, base_input):
+        """Test that GovernanceAPIError is re-raised without modification."""
+        base_input["on_api_error"] = "fail_closed"
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.side_effect = GovernanceAPIError("API failed")
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(GovernanceAPIError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert "API failed" in str(exc_info.value)
+
+    async def test_backward_compat_action_field_in_result(
+        self, base_input, mock_response_allow
+    ):
+        """Test that result includes 'action' field for backward compatibility."""
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response_allow
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            # Both verdict and action should be present
+            assert "verdict" in result
+            assert "action" in result
+            assert result["verdict"] == result["action"]
+
+    # -------------------------------------------------------------------------
+    # BLOCK-with-patch restart transport tests
+    # -------------------------------------------------------------------------
+
+    PATCH_EVENT_TYPES = [
+        "WorkflowStarted",
+        "WorkflowCompleted",
+        "WorkflowFailed",
+        "SignalReceived",
+        "Handoff",
+    ]
+
+    @staticmethod
+    def _mock_response(data: dict):
+        """Build a 200 OK mock response carrying the given governance JSON body."""
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = data
+        return response
+
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_block_with_valid_patch_raises_patch_error(
+        self, base_input, event_type
+    ):
+        """A BLOCK verdict carrying a valid patch raises the versioned restart
+        error for every workflow-sourced event type, never the plain GovernanceBlock
+        (SignalReceived included — the patch check runs before the signal-return
+        special case)."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "block",
+                "reason": "patch with corrected input",
+                "policy_id": "policy-patch",
+                "risk_score": 0.8,
+                "governance_event_id": "evt_patch_1",
+                "patch": {"new_input": {"query": "corrected"}},
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(ApplicationError) as exc_info:
+                await send_governance_event(base_input)
+
+            assert exc_info.value.type == "GovernancePatch"
+            assert exc_info.value.non_retryable is True
+            details = exc_info.value.details
+            assert len(details) == 1
+            detail = details[0]
+            assert detail["schema_version"] == GOVERNANCE_PATCH_SCHEMA_VERSION
+            assert detail["new_input"] == {"query": "corrected"}
+            assert detail["event_type"] == event_type
+            assert detail["governance_event_id"] == "evt_patch_1"
+            assert detail["reason"] == "patch with corrected input"
+            assert detail["hook_trigger"] is False
+            assert detail["hook_stage"] is None
+
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_plain_block_without_patch_preserves_existing_behavior(
+        self, base_input, event_type
+    ):
+        """A BLOCK verdict with no patch is unaffected by the restart transport:
+        SignalReceived still returns the result dict, every other event type still
+        raises the plain GovernanceBlock."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "block",
+                "reason": "High risk detected",
+                "policy_id": "policy-002",
+                "risk_score": 0.9,
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            if event_type == "SignalReceived":
+                result = await send_governance_event(base_input)
+                assert result["success"] is True
+                assert result["verdict"] == "block"
+                assert result["reason"] == "High risk detected"
+            else:
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
+                assert exc_info.value.type == "GovernanceBlock"
+
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    async def test_halt_with_patch_never_raises_patch_error(
+        self, base_input, event_type
+    ):
+        """HALT keeps its existing stop handling even when a patch is present —
+        the restart transport gates on an exact BLOCK verdict and never fires for
+        HALT, regardless of event type."""
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)  # No client → HALT falls back to ApplicationError
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": "halt",
+                "reason": "Emergency halt",
+                "policy_id": "emergency-policy",
+                "risk_score": 1.0,
+                "patch": {"new_input": {"query": "corrected"}},
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            if event_type == "SignalReceived":
+                result = await send_governance_event(base_input)
+                assert result["success"] is True
+                assert result["verdict"] == "halt"
+            else:
+                with pytest.raises(ApplicationError) as exc_info:
+                    await send_governance_event(base_input)
+                assert exc_info.value.type == "GovernanceHalt"
+
+    @pytest.mark.parametrize("event_type", PATCH_EVENT_TYPES)
+    @pytest.mark.parametrize("verdict", ["allow", "constrain"])
+    async def test_allow_and_constrain_success_dict_unaffected_by_patch_support(
+        self, base_input, event_type, verdict
+    ):
+        """ALLOW / CONSTRAIN keep returning the plain success dict — the restart
+        transport only ever inspects an exact BLOCK verdict."""
+        base_input["payload"]["event_type"] = event_type
+        response = self._mock_response(
+            {
+                "verdict": verdict,
+                "reason": "Policy evaluated",
+                "policy_id": "policy-001",
+                "risk_score": 0.1,
+            }
+        )
+
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await send_governance_event(base_input)
+
+            assert result["success"] is True
+            assert result["verdict"] == verdict
     def _activity(self, response):
         client = MagicMock()
         client.evaluate_event = AsyncMock(return_value=response)
-        return (
-            GovernanceActivities(
-                "https://core.invalid",
-                "obx_test_key",
-                governance_client=client,
-            ),
-            client,
+        activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
         )
+        activity._governance_client = client
+        return activity, client
+
 
     @pytest.mark.asyncio
     async def test_allow_uses_injected_shared_client_and_preserves_result_shape(self):
@@ -334,7 +1090,7 @@ class TestSendGovernanceEvent:
                     "verdict": "block",
                     "reason": "retry corrected input",
                     "governance_event_id": "evt-retry-1",
-                    "retry_plan": {"new_input": {"query": "corrected"}},
+                    "patch": {"new_input": {"query": "corrected"}},
                 }
             )
         )
@@ -342,10 +1098,10 @@ class TestSendGovernanceEvent:
             await activity_instance.send_governance_event(
                 {"payload": {"event_type": event_type}}
             )
-        assert exc_info.value.type == "GovernanceRetryableBlock"
+        assert exc_info.value.type == "GovernancePatch"
         assert exc_info.value.non_retryable is True
         assert exc_info.value.details[0] == {
-            "schema_version": GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION,
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
             "new_input": {"query": "corrected"},
             "event_type": event_type,
             "governance_event_id": "evt-retry-1",
@@ -366,9 +1122,9 @@ class TestSendGovernanceEvent:
         activity_instance = GovernanceActivities(
             "https://core.invalid",
             "obx_test_key",
-            governance_client=client,
         )
-        with pytest.raises(GovernanceAPIError, match="Malformed governance response"):
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
             await activity_instance.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
@@ -391,9 +1147,8 @@ class TestSendGovernanceEvent:
         activity_instance = GovernanceActivities(
             "https://core.invalid",
             "obx_test_key",
-            on_api_error="fail_closed",
-            governance_client=client,
-        )
+            )
+        activity_instance._governance_client = client
         with pytest.raises(GovernanceAPIError, match="Core unavailable"):
             await activity_instance.send_governance_event(
                 {
@@ -409,39 +1164,33 @@ class TestSendGovernanceEvent:
         fail_open_activity = GovernanceActivities(
             "https://core.invalid",
             "obx_test_key",
-            on_api_error="fail_open",
-            governance_client=client,
         )
-        fail_open = await fail_open_activity.send_governance_event(
-            {
-                "payload": {"event_type": "WorkflowStarted"},
-                "on_api_error": "fail_closed",
-            }
-        )
-        assert fail_open == {"success": False, "error": "transport failed"}
-
-        fail_closed_activity = GovernanceActivities(
-            "https://core.invalid",
-            "obx_test_key",
-            on_api_error="fail_closed",
-            governance_client=client,
-        )
-        with pytest.raises(GovernanceAPIError, match="transport failed"):
-            await fail_closed_activity.send_governance_event(
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
                 {
                     "payload": {"event_type": "WorkflowStarted"},
-                    "on_api_error": "fail_open",
+                    "on_api_error": "fail_closed",
                 }
             )
 
     @pytest.mark.asyncio
     async def test_compatibility_helper_closes_its_owned_client(self):
-        client = MagicMock()
-        client.evaluate_event = AsyncMock(
-            return_value=GovernanceVerdictResponse(verdict=Verdict.ALLOW)
-        )
-        client.close = AsyncMock()
-        with patch("openbox.client.GovernanceClient", return_value=client):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
             result = await send_governance_event_compat(
                 {
                     "api_url": "https://core.invalid",
@@ -451,4 +1200,1273 @@ class TestSendGovernanceEvent:
             )
         assert result is not None
         assert result["verdict"] == "allow"
-        client.close.assert_awaited_once_with()
+
+
+    @pytest.mark.asyncio
+    async def test_block_raises_temporal_application_error(self):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="blocked")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": "WorkflowStarted"}}
+            )
+        assert exc_info.value.type == "GovernanceBlock"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_signal_block_returns_durable_result(self):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="blocked")
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "SignalReceived"}}
+        )
+        assert result["verdict"] == "block"
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [Verdict.CONSTRAIN, Verdict.REQUIRE_APPROVAL])
+    async def test_nonterminal_verdicts_preserve_compatibility_shape(self, verdict):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(
+                verdict=verdict,
+                reason="evaluated",
+                policy_id="policy-2",
+                risk_score=0.2,
+            )
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "WorkflowCompleted"}}
+        )
+        assert result == {
+            "success": True,
+            "verdict": verdict.value,
+            "action": verdict.value,
+            "reason": "evaluated",
+            "policy_id": "policy-2",
+            "risk_score": 0.2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_halt_keeps_temporal_termination_behavior(self):
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.HALT, reason="halted")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {
+                        "event_type": "WorkflowCompleted",
+                        "workflow_id": "wf-1",
+                    }
+                }
+            )
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_fail_open_none_returns_error_without_second_transport(self):
+        activity_instance, client = self._activity(None)
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "WorkflowStarted"}}
+        )
+        assert result == {"success": False, "error": "Governance API unavailable"}
+        client.evaluate_event.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_block_raises_temporal_application_error(self):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="blocked")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": "WorkflowStarted"}}
+            )
+        assert exc_info.value.type == "GovernanceBlock"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    async def test_signal_block_returns_durable_result(self):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="blocked")
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "SignalReceived"}}
+        )
+        assert result["verdict"] == "block"
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [Verdict.CONSTRAIN, Verdict.REQUIRE_APPROVAL])
+    async def test_nonterminal_verdicts_preserve_compatibility_shape(self, verdict):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(
+                verdict=verdict,
+                reason="evaluated",
+                policy_id="policy-2",
+                risk_score=0.2,
+            )
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "WorkflowCompleted"}}
+        )
+        assert result == {
+            "success": True,
+            "verdict": verdict.value,
+            "action": verdict.value,
+            "reason": "evaluated",
+            "policy_id": "policy-2",
+            "risk_score": 0.2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_halt_keeps_temporal_termination_behavior(self):
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.HALT, reason="halted")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {
+                        "event_type": "WorkflowCompleted",
+                        "workflow_id": "wf-1",
+                    }
+                }
+            )
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_halt_keeps_temporal_termination_behavior(self):
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.HALT, reason="halted")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {
+                        "event_type": "WorkflowCompleted",
+                        "workflow_id": "wf-1",
+                    }
+                }
+            )
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.parametrize("verdict", [Verdict.CONSTRAIN, Verdict.REQUIRE_APPROVAL])
+    async def test_nonterminal_verdicts_preserve_compatibility_shape(self, verdict):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(
+                verdict=verdict,
+                reason="evaluated",
+                policy_id="policy-2",
+                risk_score=0.2,
+            )
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "WorkflowCompleted"}}
+        )
+        assert result == {
+            "success": True,
+            "verdict": verdict.value,
+            "action": verdict.value,
+            "reason": "evaluated",
+            "policy_id": "policy-2",
+            "risk_score": 0.2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_halt_keeps_temporal_termination_behavior(self):
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.HALT, reason="halted")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {
+                        "event_type": "WorkflowCompleted",
+                        "workflow_id": "wf-1",
+                    }
+                }
+            )
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_signal_block_returns_durable_result(self):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.BLOCK, reason="blocked")
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "SignalReceived"}}
+        )
+        assert result["verdict"] == "block"
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [Verdict.CONSTRAIN, Verdict.REQUIRE_APPROVAL])
+    async def test_nonterminal_verdicts_preserve_compatibility_shape(self, verdict):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(
+                verdict=verdict,
+                reason="evaluated",
+                policy_id="policy-2",
+                risk_score=0.2,
+            )
+        )
+        result = await activity_instance.send_governance_event(
+            {"payload": {"event_type": "WorkflowCompleted"}}
+        )
+        assert result == {
+            "success": True,
+            "verdict": verdict.value,
+            "action": verdict.value,
+            "reason": "evaluated",
+            "policy_id": "policy-2",
+            "risk_score": 0.2,
+        }
+
+    @pytest.mark.asyncio
+    async def test_halt_keeps_temporal_termination_behavior(self):
+        from openbox.activities import set_temporal_client
+
+        set_temporal_client(None)
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse(verdict=Verdict.HALT, reason="halted")
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {
+                        "event_type": "WorkflowCompleted",
+                        "workflow_id": "wf-1",
+                    }
+                }
+            )
+        assert exc_info.value.type == "GovernanceHalt"
+        assert exc_info.value.non_retryable is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "event_type",
+        [
+            "WorkflowStarted",
+            "WorkflowCompleted",
+            "WorkflowFailed",
+            "SignalReceived",
+            "Handoff",
+        ],
+    )
+    async def test_retryable_block_precedes_plain_stop_handling(self, event_type):
+        activity_instance, _ = self._activity(
+            GovernanceVerdictResponse.from_dict(
+                {
+                    "verdict": "block",
+                    "reason": "retry corrected input",
+                    "governance_event_id": "evt-retry-1",
+                    "patch": {"new_input": {"query": "corrected"}},
+                }
+            )
+        )
+        with pytest.raises(ApplicationError) as exc_info:
+            await activity_instance.send_governance_event(
+                {"payload": {"event_type": event_type}}
+            )
+        assert exc_info.value.type == "GovernancePatch"
+        assert exc_info.value.non_retryable is True
+        assert exc_info.value.details[0] == {
+            "schema_version": GOVERNANCE_PATCH_SCHEMA_VERSION,
+            "new_input": {"query": "corrected"},
+            "event_type": event_type,
+            "governance_event_id": "evt-retry-1",
+            "reason": "retry corrected input",
+            "hook_trigger": False,
+            "hook_stage": None,
+        }
+
+    @pytest.mark.asyncio
+    async def test_malformed_success_never_becomes_fail_open(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=ContractError(
+                "Malformed governance response",
+                code="RESPONSE_INVALID",
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        activity_instance._governance_client = client
+        with pytest.raises(ContractError, match="Malformed governance response"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_open",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_shared_client_fail_closed_fallback_preserves_api_error_contract(
+        self,
+    ):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            return_value=GovernanceVerdictResponse(
+                verdict=Verdict.HALT,
+                reason="Core unavailable",
+                fallback_used=True,
+            )
+        )
+        activity_instance = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+            )
+        activity_instance._governance_client = client
+        with pytest.raises(GovernanceAPIError, match="Core unavailable"):
+            await activity_instance.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+
+
+    @pytest.mark.asyncio
+    async def test_unexpected_client_failure_respects_configured_fail_policy(self):
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(side_effect=RuntimeError("transport failed"))
+        fail_open_activity = GovernanceActivities(
+            "https://core.invalid",
+            "obx_test_key",
+        )
+        fail_open_activity._governance_client = client
+        # The injected façade propagates transport failures to the caller;
+        # the fail policy lives in the Worker-owned EvaluationClient.
+        with pytest.raises(RuntimeError, match="transport failed"):
+            await fail_open_activity.send_governance_event(
+                {
+                    "payload": {"event_type": "WorkflowStarted"},
+                    "on_api_error": "fail_closed",
+                }
+            )
+
+    @pytest.mark.asyncio
+    async def test_compatibility_helper_closes_its_owned_client(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "verdict": "allow",
+            "action": "allow",
+            "reason": "allowed",
+            "policy_id": "policy-1",
+            "risk_score": 0.1,
+        }
+        with patch("openbox.activities.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = response
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+            result = await send_governance_event_compat(
+                {
+                    "api_url": "https://core.invalid",
+                    "api_key": "obx_test_key",
+                    "payload": {"event_type": "WorkflowStarted"},
+                }
+            )
+        assert result is not None
+        assert result["verdict"] == "allow"
+

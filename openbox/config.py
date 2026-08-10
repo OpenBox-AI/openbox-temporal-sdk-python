@@ -53,12 +53,20 @@ class GovernanceConfig:
         default_factory=lambda: {"send_governance_event"}
     )
     hitl_poll_interval_ms: int = 5000
+
+    # Maximum Continue-As-New restarts a BLOCK with patch may trigger across the
+    # whole workflow chain (bounded input-remediation loop). Applies uniformly to
+    # every event origin; must be >= 1.
     max_patch_restarts: int = 3
 
     def __post_init__(self) -> None:
-        if type(self.max_patch_restarts) is not int or self.max_patch_restarts < 1:
-            raise ValueError(
-                f"max_patch_restarts must be >= 1 (got {self.max_patch_restarts})"
+        # GovernanceConfig is public and can be handed directly to an interceptor,
+        # bypassing the factory/plugin — so validation lives on the dataclass (the
+        # single source of truth), not only at the call sites. Pure + sandbox-safe:
+        # raises the already-imported OpenBoxConfigError, no logging/IO.
+        if self.max_patch_restarts < 1:
+            raise OpenBoxConfigError(
+                "max_patch_restarts must be >= 1 " f"(got {self.max_patch_restarts})"
             )
 
     def to_core_config(

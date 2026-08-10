@@ -148,9 +148,9 @@ def test_started_block_prevents_openai_call(server):
         manager.uninstall()
 
 
-def test_started_block_with_retry_plan_raises_governance_retryable_block(server):
-    """A BLOCK verdict with a valid retry plan on the started hook requests a
-    workflow restart (GovernanceRetryableBlock) instead of the plain
+def test_started_block_with_patch_raises_governance_patch(server):
+    """A BLOCK verdict with a valid patch on the started hook requests a
+    workflow restart (GovernancePatch) instead of the plain
     GovernanceBlock — checked before the generic BLOCK/HALT mapping. Started
     hooks are wire-tagged event_type=ActivityStarted + hook_trigger=True with
     hook_stage="started"."""
@@ -160,18 +160,18 @@ def test_started_block_with_retry_plan_raises_governance_retryable_block(server)
             "verdict": "block",
             "reason": "rerouting to an approved model",
             "governance_event_id": "evt_hook",
-            "retry_plan": {"new_input": {"model": "gpt-4o-mini"}},
+            "patch": {"new_input": {"model": "gpt-4o-mini"}},
         }
     )
     runtime, manager, _state = _temporal_runtime(fake_core)
     manager.install()
     try:
         ctx = ActivityContext(
-            workflow_id="wf-retry",
-            run_id="run-retry",
+            workflow_id="wf-patch",
+            run_id="run-patch",
             workflow_type="W",
             task_queue="q",
-            activity_id="act-retry",
+            activity_id="act-patch",
             activity_type="call_openai",
         )
         before = server.hits
@@ -182,7 +182,7 @@ def test_started_block_with_retry_plan_raises_governance_retryable_block(server)
     finally:
         manager.uninstall()
 
-    assert exc_info.value.type == "GovernanceRetryableBlock"
+    assert exc_info.value.type == "GovernancePatch"
     assert exc_info.value.non_retryable is True
     details = exc_info.value.details[0]
     assert details["new_input"] == {"model": "gpt-4o-mini"}
@@ -192,10 +192,10 @@ def test_started_block_with_retry_plan_raises_governance_retryable_block(server)
     assert details["hook_stage"] == "started"
 
 
-def test_completed_hook_block_with_retry_plan_records_retryable_request(server):
-    """A BLOCK verdict with a valid retry plan on the COMPLETED hook never
+def test_completed_hook_block_with_patch_records_patch_request(server):
+    """A BLOCK verdict with a valid patch on the COMPLETED hook never
     raises — completed telemetry never undoes the operation. It records the
-    full retryable request in TemporalGovernanceState (hook_stage="completed")
+    full patch request in TemporalGovernanceState (hook_stage="completed")
     for the activity interceptor to raise after user code returns."""
     chat_url = _chat_url(server)
     fake_core = FakeCore(
@@ -203,19 +203,19 @@ def test_completed_hook_block_with_retry_plan_records_retryable_request(server):
         {
             "verdict": "block",
             "reason": "flagged after the fact",
-            "retry_plan": {"new_input": {"model": "gpt-4o-mini"}},
-        },  # completed hook: retryable block
+            "patch": {"new_input": {"model": "gpt-4o-mini"}},
+        },  # completed hook: BLOCK with patch
     )
     state = TemporalGovernanceState()
     runtime, manager, _ = _temporal_runtime(fake_core, state=state)
     manager.install()
     try:
         ctx = ActivityContext(
-            workflow_id="wf-completed-retry",
-            run_id="run-completed-retry",
+            workflow_id="wf-completed-patch",
+            run_id="run-completed-patch",
             workflow_type="W",
             task_queue="q",
-            activity_id="act-completed-retry",
+            activity_id="act-completed-patch",
             activity_type="call_openai",
         )
         with activity_scope(ctx, store=runtime.context_store):
@@ -225,7 +225,7 @@ def test_completed_hook_block_with_retry_plan_records_retryable_request(server):
         manager.uninstall()
 
     stop = state.take_completed_stop(
-        "wf-completed-retry", "run-completed-retry", "act-completed-retry"
+        "wf-completed-patch", "run-completed-patch", "act-completed-patch"
     )
     assert stop is not None
     assert stop.verdict is Verdict.BLOCK

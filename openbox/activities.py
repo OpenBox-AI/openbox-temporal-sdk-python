@@ -31,7 +31,7 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from .errors import GovernanceAPIError  # noqa: F401
-from .types import Verdict
+from .types import GovernanceVerdictResponse, Verdict
 from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 logger = logging.getLogger(__name__)
@@ -252,12 +252,26 @@ class GovernanceActivities:
                     )
 
                 data = response.json()
-                verdict = Verdict.from_string(
-                    data.get("verdict") or data.get("action", "continue")
-                )
-                reason = data.get("reason")
-                policy_id = data.get("policy_id")
-                risk_score = data.get("risk_score", 0.0)
+                parsed = GovernanceVerdictResponse.from_dict(data)
+                verdict = parsed.verdict
+                reason = parsed.reason
+                policy_id = parsed.policy_id
+                risk_score = parsed.risk_score
+
+                # A BLOCK carrying a valid patch restarts the workflow run
+                # instead of merely failing this activity — check for it before
+                # the plain BLOCK/HALT stop handling below ever sees the verdict.
+                from .errors import GOVERNANCE_PATCH_ERROR_TYPE
+                from .patch import patch_request
+
+                patch_req = patch_request(parsed, event_type=event_type)
+                if patch_req is not None:
+                    raise ApplicationError(
+                        "Governance requested workflow restart",
+                        patch_req.to_dict(),
+                        type=GOVERNANCE_PATCH_ERROR_TYPE,
+                        non_retryable=True,
+                    )
 
                 if verdict.should_stop():
                     result = await _handle_stop_verdict(

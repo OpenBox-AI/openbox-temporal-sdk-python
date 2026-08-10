@@ -333,6 +333,7 @@ def create_openbox_worker(
         skip_activity_types=skip_activity_types or {"send_governance_event"},
         skip_signals=skip_signals or set(),
         hitl_enabled=hitl_enabled,
+        max_patch_restarts=max_patch_restarts,
     )
     from .runtime import create_temporal_runtime
 

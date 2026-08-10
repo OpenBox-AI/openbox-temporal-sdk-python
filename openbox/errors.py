@@ -33,9 +33,22 @@ GOVERNANCE_BLOCK_ERROR_TYPE: Final[str] = "GovernanceBlock"
 GOVERNANCE_API_ERROR_TYPE: Final[str] = "GovernanceAPIError"
 # Legacy alias retained for histories predating the rename.
 GOVERNANCE_STOP_ERROR_TYPE: Final[str] = "GovernanceStop"
+
+# BLOCK-with-patch restart transport. A governance BLOCK carrying a valid patch
+# crosses the activity/workflow boundary as a non-retryable ApplicationError of
+# this stable type; the workflow interceptor catches it and Continue-As-News.
 GOVERNANCE_PATCH_ERROR_TYPE: Final[str] = "GovernancePatch"
-GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE: Final[str] = "GovernancePatchLimitExceeded"
+# Legacy alias — the pre-rename emit value. Already-recorded Temporal histories
+# (open restart chains started before this rename shipped) may still carry this
+# type on a replayed/pending ActivityError, so every extractor must keep
+# accepting BOTH this and GOVERNANCE_PATCH_ERROR_TYPE above (mirrors the
+# GovernanceHalt/GovernanceStop precedent). New executions only ever emit
+# GOVERNANCE_PATCH_ERROR_TYPE; this alias is never raised going forward.
 GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE: Final[str] = "GovernanceRetryableBlock"
+# Raised when the bounded restart chain would exceed max_patch_restarts.
+GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE: Final[str] = "GovernancePatchLimitExceeded"
+# Raised when replacement input cannot be converted for Continue-As-New.
+GOVERNANCE_PATCH_INPUT_INVALID_ERROR_TYPE: Final[str] = "GovernancePatchInputInvalid"
 
 __all__ = [
     "GOVERNANCE_HALT_ERROR_TYPE",

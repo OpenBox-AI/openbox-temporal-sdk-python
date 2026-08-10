@@ -77,6 +77,7 @@ class OpenBoxPlugin(SimplePlugin):
         max_patch_restarts: int = 3,
         sandbox: Optional[TemporalSandboxConfig] = None,
         instrument_http: bool = True,
+
         instrument_databases: bool = True,
         db_libraries: Optional[Set[str]] = None,
         sqlalchemy_engine: Optional[Any] = None,
