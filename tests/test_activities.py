@@ -23,6 +23,7 @@ from openbox.activities import (
     _terminate_workflow_for_halt,
     raise_governance_block,
     send_governance_event as send_governance_event_compat,
+    send_governance_event,
 )
 from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION
 from openbox.types import GovernanceVerdictResponse, Verdict

@@ -89,7 +89,6 @@ class GovernanceConfig:
             on_api_error=self.on_api_error,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
-            core_ca_path=core_ca_path,
             sdk_engine="temporal",
             gate=GateConfig(
                 skip_workflow_types=set(self.skip_workflow_types),
@@ -130,16 +129,12 @@ def resolve_signing_defaults(agent_did, signer):
 
 
 def _create_core_ssl_context(core_ca_path: Optional[str]):
-    """Compatibility seam delegating CA handling to ``EvaluationClient``."""
+    """Compatibility seam: build a TLS context pinned to the given CA bundle."""
     if core_ca_path is None:
         return None
-    from openbox_core.client import EvaluationClient
+    import ssl
 
-    client = EvaluationClient("https://localhost", "unused", core_ca_path=core_ca_path)
-    try:
-        return client._resolve_verify()
-    finally:
-        client.close()
+    return ssl.create_default_context(cafile=core_ca_path)
 
 
 def resolve_core_ssl_context(core_ca_path: Optional[str] = None):
@@ -355,7 +350,6 @@ def initialize(
         timeout_seconds=governance_timeout,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
-        core_ca_path=core_ca_path,
         sdk_engine="temporal",
     )
     identity = core_config.load_identity()
@@ -367,11 +361,12 @@ def initialize(
         core_config.api_key,
         timeout_seconds=core_config.timeout_seconds,
         identity=identity,
-        core_ca_path=core_config.core_ca_path,
         sdk_engine=core_config.sdk_engine,
     )
     try:
-        ssl_context = client._resolve_verify() if core_ca_path is not None else None
+        ssl_context = (
+            _create_core_ssl_context(core_ca_path) if core_ca_path is not None else None
+        )
         if validate:
             if _urllib_validation_is_patched():
                 _validate_api_key_with_server(
