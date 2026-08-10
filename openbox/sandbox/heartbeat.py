@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import contextvars
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator
+from typing import Any
 
 
 @dataclass

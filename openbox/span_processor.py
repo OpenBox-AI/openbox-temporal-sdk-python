@@ -7,9 +7,9 @@ state (verdicts, abort/halt flags) for hook-level governance. Forwards spans
 to fallback exporters (Jaeger, OTLP, etc.) without buffering.
 """
 
-from typing import TYPE_CHECKING, Dict, Optional
-import threading
 import logging
+import threading
+from typing import TYPE_CHECKING, Optional
 
 _logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .types import Verdict
 
@@ -30,14 +30,14 @@ class WorkflowSpanBuffer:
     run_id: str
     workflow_type: str
     task_queue: str
-    parent_workflow_id: Optional[str] = None
-    spans: List[dict] = field(default_factory=list)  # kept for backward compat, always empty
-    status: Optional[str] = None  # "completed", "failed", "cancelled", "terminated"
-    error: Optional[Dict[str, Any]] = None
+    parent_workflow_id: str | None = None
+    spans: list[dict] = field(default_factory=list)  # kept for backward compat, always empty
+    status: str | None = None  # "completed", "failed", "cancelled", "terminated"
+    error: dict[str, Any] | None = None
 
     # Governance verdict (set by workflow interceptor, checked by activity interceptor)
-    verdict: Optional[Verdict] = None
-    verdict_reason: Optional[str] = None
+    verdict: Verdict | None = None
+    verdict_reason: str | None = None
 
     # Pending approval: True when activity is waiting for human approval
     pending_approval: bool = False
@@ -59,23 +59,23 @@ class WorkflowSpanProcessor:
     def __init__(
         self,
         fallback_processor: Optional["SpanProcessor"] = None,
-        ignored_url_prefixes: Optional[list] = None,
+        ignored_url_prefixes: list | None = None,
     ):
         self.fallback = fallback_processor
         self._ignored_url_prefixes = set(ignored_url_prefixes or [])
-        self._buffers: Dict[str, WorkflowSpanBuffer] = {}  # workflow_id -> buffer
-        self._trace_to_workflow: Dict[int, str] = {}  # trace_id (int) -> workflow_id
-        self._trace_to_activity: Dict[int, str] = {}  # trace_id (int) -> activity_id
-        self._verdicts: Dict[str, dict] = (
+        self._buffers: dict[str, WorkflowSpanBuffer] = {}  # workflow_id -> buffer
+        self._trace_to_workflow: dict[int, str] = {}  # trace_id (int) -> workflow_id
+        self._trace_to_activity: dict[int, str] = {}  # trace_id (int) -> activity_id
+        self._verdicts: dict[str, dict] = (
             {}
         )  # workflow_id -> {"verdict": Verdict, "reason": str}
-        self._activity_context: Dict[str, dict] = (
+        self._activity_context: dict[str, dict] = (
             {}
         )  # "{workflow_id}:{activity_id}" -> event data
-        self._aborted_activities: Dict[str, str] = (
+        self._aborted_activities: dict[str, str] = (
             {}
         )  # "{workflow_id}:{activity_id}" -> abort reason
-        self._halt_requests: Dict[str, str] = (
+        self._halt_requests: dict[str, str] = (
             {}
         )  # "{workflow_id}:{activity_id}" -> halt reason
         self._lock = threading.Lock()
@@ -101,7 +101,7 @@ class WorkflowSpanProcessor:
             self._buffers[workflow_id] = buffer
 
     def register_trace(
-        self, trace_id: int, workflow_id: str, activity_id: Optional[str] = None
+        self, trace_id: int, workflow_id: str, activity_id: str | None = None
     ) -> None:
         """Register trace_id → workflow_id (and activity_id) mapping for hook lookups."""
         with self._lock:
@@ -109,12 +109,12 @@ class WorkflowSpanProcessor:
             if activity_id:
                 self._trace_to_activity[trace_id] = activity_id
 
-    def get_buffer(self, workflow_id: str) -> Optional[WorkflowSpanBuffer]:
+    def get_buffer(self, workflow_id: str) -> WorkflowSpanBuffer | None:
         """Retrieve buffer without removing it."""
         with self._lock:
             return self._buffers.get(workflow_id)
 
-    def remove_buffer(self, workflow_id: str) -> Optional[WorkflowSpanBuffer]:
+    def remove_buffer(self, workflow_id: str) -> WorkflowSpanBuffer | None:
         """Remove and return buffer."""
         with self._lock:
             return self._buffers.pop(workflow_id, None)
@@ -147,8 +147,8 @@ class WorkflowSpanProcessor:
         self,
         workflow_id: str,
         verdict: Verdict,
-        reason: Optional[str] = None,
-        run_id: Optional[str] = None,
+        reason: str | None = None,
+        run_id: str | None = None,
     ) -> None:
         """Store governance verdict for a workflow. Called when SignalReceived returns BLOCK/HALT."""
         with self._lock:
@@ -161,7 +161,7 @@ class WorkflowSpanProcessor:
                 self._buffers[workflow_id].verdict = verdict
                 self._buffers[workflow_id].verdict_reason = reason
 
-    def get_verdict(self, workflow_id: str) -> Optional[dict]:
+    def get_verdict(self, workflow_id: str) -> dict | None:
         """Get stored verdict for a workflow."""
         with self._lock:
             return self._verdicts.get(workflow_id)
@@ -182,7 +182,7 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._activity_context[f"{workflow_id}:{activity_id}"] = context
 
-    def get_activity_context_by_trace(self, trace_id: int) -> Optional[dict]:
+    def get_activity_context_by_trace(self, trace_id: int) -> dict | None:
         """Look up activity context using trace_id from a child span (hook → activity linkage)."""
         with self._lock:
             workflow_id = self._trace_to_workflow.get(trace_id)
@@ -207,7 +207,7 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._aborted_activities[f"{workflow_id}:{activity_id}"] = reason
 
-    def get_activity_abort(self, workflow_id: str, activity_id: str) -> Optional[str]:
+    def get_activity_abort(self, workflow_id: str, activity_id: str) -> str | None:
         """Check if activity is aborted. Returns reason string or None."""
         with self._lock:
             return self._aborted_activities.get(f"{workflow_id}:{activity_id}")
@@ -228,7 +228,7 @@ class WorkflowSpanProcessor:
         with self._lock:
             self._halt_requests[f"{workflow_id}:{activity_id}"] = reason
 
-    def get_halt_requested(self, workflow_id: str, activity_id: str) -> Optional[str]:
+    def get_halt_requested(self, workflow_id: str, activity_id: str) -> str | None:
         """Check if HALT was requested by a hook. Returns reason or None."""
         with self._lock:
             return self._halt_requests.get(f"{workflow_id}:{activity_id}")

@@ -22,7 +22,7 @@ independently importable and testable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 from openbox_core.contracts.results import (
     ApprovalResult,
@@ -58,11 +58,11 @@ class PatchRequest:
 
     schema_version: int
     new_input: Any
-    governance_event_id: Optional[str]
-    reason: Optional[str]
+    governance_event_id: str | None
+    reason: str | None
     event_type: str
     hook_trigger: bool
-    hook_stage: Optional[str]
+    hook_stage: str | None
 
     def to_dict(self) -> dict:
         """Serialize to the ``ApplicationError`` detail payload (every field explicit)."""
@@ -77,7 +77,7 @@ class PatchRequest:
         }
 
     @classmethod
-    def from_dict(cls, data: Any) -> Optional["PatchRequest"]:
+    def from_dict(cls, data: Any) -> PatchRequest | None:
         """Reconstruct from a detail dict, or return ``None`` on ANY contract
         violation (fail safe as plain BLOCK). Never raises.
 
@@ -121,12 +121,12 @@ class PatchRequest:
 
 
 def patch_request(
-    result: Union[EvaluationResult, ApprovalResult],
+    result: EvaluationResult | ApprovalResult,
     *,
     event_type: str,
     hook_trigger: bool = False,
-    hook_stage: Optional[str] = None,
-) -> Optional[PatchRequest]:
+    hook_stage: str | None = None,
+) -> PatchRequest | None:
     """Wrap a base patch directive with Temporal origin metadata, or return ``None``.
 
     Delegates the entire verdict matrix (exact BLOCK + valid patch vs HALT / plain
@@ -149,7 +149,7 @@ def patch_request(
 
 def extract_patch_request(
     exc: BaseException,
-) -> Optional[PatchRequest]:
+) -> PatchRequest | None:
     """Recover a :class:`PatchRequest` from a Temporal exception chain.
 
     Walks ``cause`` / ``__cause__`` / ``__context__`` (mirrors
@@ -163,7 +163,7 @@ def extract_patch_request(
     Workflow Task retry loop.
     """
     seen: set[int] = set()
-    current: Optional[BaseException] = exc
+    current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if getattr(current, "type", None) in (

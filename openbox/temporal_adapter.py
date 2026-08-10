@@ -22,7 +22,7 @@ class TemporalFrameworkAdapter:
     async def handle_approval(
         self,
         result: EvaluationResult,
-        context: "ActivityContext | None" = None,
+        context: ActivityContext | None = None,
     ) -> None:
         from temporalio.exceptions import ApplicationError
 
@@ -41,7 +41,7 @@ class TemporalFrameworkAdapter:
     def on_completed_hook_result(
         self,
         result: EvaluationResult,
-        context: "ActivityContext | None" = None,
+        context: ActivityContext | None = None,
     ) -> None:
         # Completed work cannot be undone. Temporal-specific correlation state
         # remains owned by WorkflowSpanProcessor/hook_governance.

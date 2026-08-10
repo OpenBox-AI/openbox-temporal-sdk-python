@@ -67,9 +67,9 @@ class TestPluginInit:
             api_url="http://localhost:8086",
             api_key="obx_test_key_123",
             governance_timeout=45.0,
-            validate=False,
             agent_did=None,
             agent_private_key=None,
+            core_ca_path=None,
         )
 
     def test_builds_core_runtime_and_installs_instrumentation(self):

@@ -39,7 +39,6 @@ EXPECTED_EXPORTS = {
     "Verdict",
     "VerdictEnforcementResult",
     "WorkflowEventType",
-    "create_openbox_worker",
     "enforce_verdict",
     "extract_governance_error",
     "get_global_config",
@@ -120,11 +119,6 @@ class TestExports:
 
 
 class TestEntrypointSignatures:
-    def test_create_openbox_worker_kwargs_preserved(self):
-        parameters = set(inspect.signature(openbox.create_openbox_worker).parameters)
-        missing = WORKER_KWARGS - parameters
-        assert not missing, f"create_openbox_worker lost kwargs: {sorted(missing)}"
-
     def test_plugin_kwargs_preserved(self):
         parameters = set(inspect.signature(openbox.OpenBoxPlugin.__init__).parameters)
         missing = PLUGIN_KWARGS - parameters

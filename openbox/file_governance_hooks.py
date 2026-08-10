@@ -12,7 +12,6 @@ read, write, readline, readlines, writelines, close).
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from . import hook_governance as _hook_gov
 
@@ -25,12 +24,12 @@ def _build_file_span_data(
     file_mode: str,
     operation: str,
     stage: str,
-    error: Optional[str] = None,
-    duration_ms: Optional[float] = None,
-    bytes_read: Optional[int] = None,
-    bytes_written: Optional[int] = None,
-    lines_count: Optional[int] = None,
-    operations: Optional[list] = None,
+    error: str | None = None,
+    duration_ms: float | None = None,
+    bytes_read: int | None = None,
+    bytes_written: int | None = None,
+    lines_count: int | None = None,
+    operations: list | None = None,
 ) -> dict:
     """Build span data dict for a file operation (used by governance hooks).
 
@@ -96,6 +95,7 @@ def setup_file_io_instrumentation() -> bool:
         True if instrumentation was successful
     """
     import builtins
+
     from opentelemetry import trace
 
     # Check if already instrumented
@@ -104,7 +104,7 @@ def setup_file_io_instrumentation() -> bool:
         return True
 
     _original_open = builtins.open
-    setattr(builtins, "_openbox_original_open", _original_open)
+    builtins._openbox_original_open = _original_open
     _tracer = trace.get_tracer("openbox.file_io")
 
     # Paths to skip (noisy system files)
@@ -374,7 +374,7 @@ def setup_file_io_instrumentation() -> bool:
     import io
 
     if not hasattr(io, "_openbox_original_open"):
-        setattr(io, "_openbox_original_open", io.open)
+        io._openbox_original_open = io.open
         io.open = traced_open
 
     logger.info("Instrumented: file I/O (builtins.open + io.open)")

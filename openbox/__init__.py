@@ -41,7 +41,6 @@ from .types import (
     Verdict,
     WorkflowEventType,
 )
-from .worker import create_openbox_worker
 from .workflow_interceptor import GovernanceInterceptor
 
 try:
@@ -71,7 +70,6 @@ from .verdict_handler import VerdictEnforcementResult, enforce_verdict
 # Instrumentation — owned by the openbox_core base runtime
 #
 # HTTP/DB/file/function hook instrumentation is installed by the base runtime
-# (create_openbox_worker / OpenBoxPlugin call runtime.install_instrumentation()).
 # There is no Temporal-local OpenTelemetry setup to import.
 #
 # Tracing Decorators - NOT imported here to avoid sandbox issues!
@@ -85,7 +83,6 @@ from .verdict_handler import VerdictEnforcementResult, enforce_verdict
 
 
 __all__ = [
-    "create_openbox_worker",
     "OpenBoxPlugin",
     "initialize",
     "get_global_config",

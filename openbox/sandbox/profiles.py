@@ -6,10 +6,11 @@ import hashlib
 import hmac
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from .types import (
     GovernedCommandInputError,
@@ -87,7 +88,7 @@ def _timestamp(value: object) -> datetime:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError:
         raise CommandProfileBundleError() from None
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,7 @@ class _ArgumentMapping:
     max_bytes: int | None = None
 
     @classmethod
-    def parse(cls, value: object) -> "_ArgumentMapping":
+    def parse(cls, value: object) -> _ArgumentMapping:
         if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
             raise CommandProfileBundleError()
         kind = value["kind"]
@@ -214,7 +215,7 @@ class _ResultField:
     max_bytes: int | None = None
 
     @classmethod
-    def parse(cls, value: object) -> "_ResultField":
+    def parse(cls, value: object) -> _ResultField:
         if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
             raise CommandProfileBundleError()
         kind = value["kind"]
@@ -265,7 +266,7 @@ class _ResultSchema:
     fields: tuple[_ResultField, ...]
 
     @classmethod
-    def parse(cls, value: object) -> "_ResultSchema":
+    def parse(cls, value: object) -> _ResultSchema:
         item = _object(value, {"name", "max_bytes", "fields"})
         name, maximum, raw_fields = item["name"], item["max_bytes"], item["fields"]
         if (
@@ -425,7 +426,7 @@ class TemporalCommandProfileBundle:
         expires_at: datetime,
         profiles: Sequence[Mapping[str, Any]],
         now: datetime,
-    ) -> "TemporalCommandProfileBundle":
+    ) -> TemporalCommandProfileBundle:
         """Build immutable mappings from profiles owned by this process."""
         return _trusted_bundle(
             cls,
@@ -444,7 +445,7 @@ class TemporalCommandProfileBundle:
         secret: bytes,
         expected_key_id: str,
         now: datetime | None = None,
-    ) -> "TemporalCommandProfileBundle":
+    ) -> TemporalCommandProfileBundle:
         if not isinstance(secret, bytes) or len(secret) < 32 or not expected_key_id:
             raise CommandProfileBundleError()
         body = document.encode() if isinstance(document, str) else document
@@ -498,7 +499,7 @@ class TemporalCommandProfileBundle:
             _timestamp(payload["issued_at"]),
             _timestamp(payload["expires_at"]),
         )
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         if issued > current or expires <= current or issued >= expires:
             raise CommandProfileBundleError()
         profile_values = payload["profiles"]
@@ -523,7 +524,7 @@ class TemporalCommandProfileBundle:
     def derive(
         self, request: GovernedCommandRequest, *, now: datetime | None = None
     ) -> tuple[str, ...]:
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         profile = self._profiles.get(request.profile_id)
         if profile is None or not self.issued_at <= current < self.expires_at:
             raise GovernedCommandInputError("governed command input rejected")
@@ -533,7 +534,7 @@ class TemporalCommandProfileBundle:
         self, profile_id: str, *, now: datetime | None = None
     ) -> str:
         """Return a stable identity for one validated profile definition."""
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         profile = self._profiles.get(profile_id)
         if profile is None or not self.issued_at <= current < self.expires_at:
             raise GovernedCommandInputError("governed command input rejected")
@@ -547,7 +548,7 @@ class TemporalCommandProfileBundle:
         now: datetime | None = None,
     ) -> GovernedCommandTypedResult | None:
         """Return only profile-admitted values, never the raw output body."""
-        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        current = (now or datetime.now(UTC)).astimezone(UTC)
         profile = self._profiles.get(profile_id)
         if profile is None or not self.issued_at <= current < self.expires_at:
             raise CommandResultValidationError()
@@ -578,9 +579,9 @@ def _trusted_bundle(
         or len(profiles) > 1024
     ):
         raise CommandProfileBundleError()
-    issued = issued_at.astimezone(timezone.utc)
-    expires = expires_at.astimezone(timezone.utc)
-    current = now.astimezone(timezone.utc)
+    issued = issued_at.astimezone(UTC)
+    expires = expires_at.astimezone(UTC)
+    current = now.astimezone(UTC)
     if issued > current or expires <= current or issued >= expires:
         raise CommandProfileBundleError()
 

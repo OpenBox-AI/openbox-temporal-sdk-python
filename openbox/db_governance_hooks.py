@@ -16,7 +16,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace as otel_trace
 
@@ -26,22 +27,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Track installed wrapt patches (informational — wrapt patches can't be cleanly removed)
-_installed_patches: List[Tuple[str, str]] = []
+_installed_patches: list[tuple[str, str]] = []
 
 # Track SQLAlchemy event listeners for cleanup: (engine, event_name, listener_fn)
-_sqlalchemy_listeners: List[Tuple[Any, str, Callable]] = []
+_sqlalchemy_listeners: list[tuple[Any, str, Callable]] = []
 
 # pymongo dedup: thread-local depth counter for wrapt wrapper nesting.
 _pymongo_wrapt_depth = threading.local()
 
 # pymongo: store command string from started event (keyed by request_id)
-_pymongo_pending_commands: Dict[int, str] = {}
+_pymongo_pending_commands: dict[int, str] = {}
 _PYMONGO_PENDING_MAX = 1000
 
-_span_processor: Optional["WorkflowSpanProcessor"] = None
+_span_processor: WorkflowSpanProcessor | None = None
 
 
-def configure(span_processor: "WorkflowSpanProcessor") -> None:
+def configure(span_processor: WorkflowSpanProcessor) -> None:
     """Store span_processor reference for span data building."""
     global _span_processor
     _span_processor = span_processor
@@ -81,16 +82,16 @@ def _generate_span_id() -> str:
 def _build_db_span_data(
     span: Any,
     db_system: str,
-    db_name: Optional[str],
+    db_name: str | None,
     db_operation: str,
     db_statement: str,
-    server_address: Optional[str],
-    server_port: Optional[int],
+    server_address: str | None,
+    server_port: int | None,
     stage: str,
-    duration_ms: Optional[float] = None,
-    error: Optional[str] = None,
-    rowcount: Optional[int] = None,
-    gov_span_id: Optional[str] = None,
+    duration_ms: float | None = None,
+    error: str | None = None,
+    rowcount: int | None = None,
+    gov_span_id: str | None = None,
 ) -> dict:
     """Build span data dict for a DB operation."""
     from . import hook_governance as _hook_gov
@@ -142,14 +143,14 @@ def _build_db_span_data(
 
 
 def _db_identifier(
-    db_system: str, server_address: Optional[str],
-    server_port: Optional[int], db_name: Optional[str],
+    db_system: str, server_address: str | None,
+    server_port: int | None, db_name: str | None,
 ) -> str:
     """Build a stable identifier string for DB governance evaluations."""
     return f"{db_system}://{server_address or 'unknown'}:{server_port or 0}/{db_name or ''}"
 
 
-def _get_rowcount(cursor) -> Optional[int]:
+def _get_rowcount(cursor) -> int | None:
     """Safely extract rowcount from a cursor."""
     try:
         rc = getattr(cursor, "rowcount", -1)
@@ -201,9 +202,9 @@ async def _evaluate_db_async(
 
 def _run_governed_query_sync(
     query_method, args, kwargs, *,
-    db_system: str, db_name: Optional[str], operation: str, stmt: str,
-    host: Optional[str], port: Optional[int],
-    cursor=None, gov_span_id: Optional[str] = None,
+    db_system: str, db_name: str | None, operation: str, stmt: str,
+    host: str | None, port: int | None,
+    cursor=None, gov_span_id: str | None = None,
 ):
     """Execute a DB query with sync governance (started + completed)."""
     from .types import GovernanceBlockedError
@@ -242,8 +243,8 @@ def _run_governed_query_sync(
 
 async def _run_governed_query_async(
     query_method, args, kwargs, *,
-    db_system: str, db_name: Optional[str], operation: str, stmt: str,
-    host: Optional[str], port: Optional[int],
+    db_system: str, db_name: str | None, operation: str, stmt: str,
+    host: str | None, port: int | None,
     cursor=None,
 ):
     """Execute a DB query with async governance (started + completed)."""
@@ -296,8 +297,8 @@ def _extract_dbapi_context(tracer_self, args):
 # CursorTracer patch
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_orig_traced_execution: Optional[Callable] = None
-_orig_traced_execution_async: Optional[Callable] = None
+_orig_traced_execution: Callable | None = None
+_orig_traced_execution_async: Callable | None = None
 
 
 def install_cursor_tracer_hooks() -> bool:
@@ -343,8 +344,8 @@ def install_cursor_tracer_hooks() -> bool:
             self, cursor, _governed_query_async, *args, **kwargs
         )
 
-    setattr(CursorTracer, "traced_execution", _gov_traced_execution)
-    setattr(CursorTracer, "traced_execution_async", _gov_traced_execution_async)
+    CursorTracer.traced_execution = _gov_traced_execution
+    CursorTracer.traced_execution_async = _gov_traced_execution_async
     logger.info("CursorTracer patched with governance hooks (all dbapi libs)")
     return True
 
@@ -358,8 +359,8 @@ def _uninstall_cursor_tracer_hooks() -> None:
 
     try:
         from opentelemetry.instrumentation.dbapi import CursorTracer
-        setattr(CursorTracer, "traced_execution", _orig_traced_execution)
-        setattr(CursorTracer, "traced_execution_async", _orig_traced_execution_async)
+        CursorTracer.traced_execution = _orig_traced_execution
+        CursorTracer.traced_execution_async = _orig_traced_execution_async
     except ImportError:
         pass
 
@@ -397,8 +398,8 @@ def install_asyncpg_hooks() -> bool:
         return True
 
     try:
-        import wrapt
         import asyncpg  # noqa: F401
+        import wrapt
     except ImportError:
         logger.debug("asyncpg or wrapt not available for governance hooks")
         return False
@@ -522,7 +523,7 @@ def setup_pymongo_hooks() -> None:
     _setup_pymongo_wrapt_hooks()
 
 
-def _extract_pymongo_address(event) -> Tuple[str, int]:
+def _extract_pymongo_address(event) -> tuple[str, int]:
     """Extract (host, port) from a pymongo monitoring event."""
     try:
         addr = event.connection_id
@@ -603,11 +604,11 @@ def _setup_pymongo_wrapt_hooks() -> None:
 # redis (native OTel hooks)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_redis_span_meta: Dict[int, Tuple[float, str, str, str, int, str]] = {}
+_redis_span_meta: dict[int, tuple[float, str, str, str, int, str]] = {}
 _REDIS_META_MAX = 1000
 
 
-def setup_redis_hooks() -> Tuple[Callable, Callable]:
+def setup_redis_hooks() -> tuple[Callable, Callable]:
     """Return (request_hook, response_hook) for RedisInstrumentor."""
 
     def _request_hook(span, instance, args, kwargs):
@@ -656,7 +657,7 @@ def setup_redis_hooks() -> Tuple[Callable, Callable]:
 # sqlalchemy (native before/after_cursor_execute events)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_sa_timings: Dict[Tuple[int, int], float] = {}
+_sa_timings: dict[tuple[int, int], float] = {}
 _SA_TIMINGS_MAX = 1000
 
 

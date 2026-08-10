@@ -10,9 +10,8 @@ Tests cover:
 """
 
 import base64
-import json
-from dataclasses import asdict, dataclass
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 

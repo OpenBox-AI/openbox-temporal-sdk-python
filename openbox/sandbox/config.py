@@ -1,4 +1,4 @@
-"""Simplified sandbox configuration for create_openbox_worker()."""
+"""Simplified sandbox configuration for the OpenBoxPlugin."""
 
 from __future__ import annotations
 
@@ -12,14 +12,11 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SandboxConfig:
-    """One-stop sandbox configuration for create_openbox_worker().
+    """One-stop sandbox configuration for the OpenBoxPlugin.
 
     Minimal usage::
 
-        worker = create_openbox_worker(
-            ...,
-            sandbox=SandboxConfig(registry=my_registry),
-        )
+        worker = Worker(..., plugins=[OpenBoxPlugin(..., sandbox=SandboxConfig(registry=my_registry))])
 
     The registry is the only required field — it defines which commands the
     application is authorized to execute. Everything else is auto-discovered

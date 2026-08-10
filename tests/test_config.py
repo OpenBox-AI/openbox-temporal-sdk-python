@@ -15,12 +15,13 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
+from openbox.errors import OpenBoxInsecureURLError
+
 from openbox.config import (
     API_KEY_PATTERN,
     GovernanceConfig,
     OpenBoxAuthError,
     OpenBoxConfigError,
-    OpenBoxInsecureURLError,
     OpenBoxNetworkError,
     _GlobalConfig,
     _validate_api_key_format,

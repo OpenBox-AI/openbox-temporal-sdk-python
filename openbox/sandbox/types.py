@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 GOVERNED_COMMAND_ACTIVITY_TYPE = "openbox_governed_command"
 _MAX_ARGUMENTS = 64
@@ -49,7 +50,7 @@ class GovernedCommandReceipt:
     signature: str
 
     @classmethod
-    def from_value(cls, value: Any) -> "GovernedCommandReceipt":
+    def from_value(cls, value: Any) -> GovernedCommandReceipt:
         if isinstance(value, cls):
             return value
         if not isinstance(value, dict) or set(value) != {
@@ -158,7 +159,7 @@ class GovernedCommandRequest:
         return value
 
     @classmethod
-    def from_value(cls, value: Any) -> "GovernedCommandRequest":
+    def from_value(cls, value: Any) -> GovernedCommandRequest:
         if isinstance(value, cls):
             return value
         if not isinstance(value, dict) or set(value) not in (

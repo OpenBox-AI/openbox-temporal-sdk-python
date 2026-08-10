@@ -15,10 +15,11 @@ import os
 import re
 import stat
 import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 
 from openbox_sandbox.dispatcher import (
@@ -42,7 +43,7 @@ from temporalio.service import TLSConfig
 from temporalio.worker import Worker, WorkerDeploymentConfig
 
 from openbox.errors import OpenBoxConfigError
-from openbox.worker import create_openbox_worker
+from openbox.plugin import OpenBoxPlugin
 
 from .adapter import TemporalSandboxConfig
 from .errors import GovernedCommandDeploymentError
@@ -548,11 +549,9 @@ class GovernedCommandDeployment:
                 raise GovernedCommandDeploymentError()
             self._state = "consumed"
         try:
-            return create_openbox_worker(
-                client=client,
-                task_queue=self.task_queue,
-                workflows=workflows,
-                activities=activities,
+            from temporalio.worker import Worker as TemporalWorker
+
+            openbox_plugin = OpenBoxPlugin(
                 openbox_url=self.core_base_url,
                 openbox_api_key=self._bearer_token,
                 agent_did=self._agent_did,
@@ -565,6 +564,13 @@ class GovernedCommandDeployment:
                 instrument_databases=False,
                 instrument_file_io=False,
                 enable_trace_propagation=False,
+            )
+            return TemporalWorker(
+                client=client,
+                task_queue=self.task_queue,
+                workflows=workflows,
+                activities=activities,
+                plugins=[openbox_plugin],
                 graceful_shutdown_timeout=timedelta(
                     seconds=self.graceful_shutdown_seconds or 0
                 ),

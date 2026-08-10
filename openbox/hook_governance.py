@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -35,10 +35,10 @@ _api_url: str = ""
 _api_key: str = ""
 _api_timeout: float = 30.0
 _on_api_error: str = FAIL_OPEN
-_max_body_size: Optional[int] = None
-_span_processor: Optional["WorkflowSpanProcessor"] = None
+_max_body_size: int | None = None
+_span_processor: WorkflowSpanProcessor | None = None
 # AIP signing material (set by configure()).
-_agent_did: Optional[str] = None
+_agent_did: str | None = None
 _signer: Any = None
 _core_ssl_context: Any = None
 # Connected Worker mode injects its one shared EvaluationClient here. Direct
@@ -49,8 +49,8 @@ _evaluation_client: Any = None
 # for requests; the locks below only guard creation against concurrent activities
 # racing to initialize a fresh client (which would leak connection pools when
 # one of the losers gets garbage collected).
-_sync_client: Optional[httpx.Client] = None
-_async_client: Optional[httpx.AsyncClient] = None
+_sync_client: httpx.Client | None = None
+_async_client: httpx.AsyncClient | None = None
 _sync_client_lock = threading.Lock()
 _async_client_lock = threading.Lock()
 
@@ -58,14 +58,14 @@ _async_client_lock = threading.Lock()
 def configure(
     api_url: str,
     api_key: str,
-    span_processor: "WorkflowSpanProcessor",
+    span_processor: WorkflowSpanProcessor,
     *,
     api_timeout: float = 30.0,
     on_api_error: str = "fail_open",
-    max_body_size: Optional[int] = None,
-    agent_did: Optional[str] = None,
+    max_body_size: int | None = None,
+    agent_did: str | None = None,
     signer: Any = None,
-    core_ca_path: Optional[str] = None,
+    core_ca_path: str | None = None,
 ) -> None:
     """Set governance config. Called once by setup_opentelemetry_for_governance().
 
@@ -144,12 +144,12 @@ def is_configured() -> bool:
     return bool(_api_url and _span_processor is not None)
 
 
-def get_span_processor() -> "WorkflowSpanProcessor | None":
+def get_span_processor() -> WorkflowSpanProcessor | None:
     """Return the configured span processor (or None)."""
     return _span_processor
 
 
-def get_max_body_size() -> Optional[int]:
+def get_max_body_size() -> int | None:
     """Return max body size for HTTP capture (None = no limit)."""
     return _max_body_size
 
@@ -210,8 +210,8 @@ def build_auth_headers(api_key: str) -> dict:
 
 def _build_payload(
     span: Any,
-    span_data: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
+    span_data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Build governance evaluation payload from activity context + span data.
 
     Returns None if no activity context found (not inside a governed activity).
@@ -266,7 +266,7 @@ def _build_payload(
     return payload
 
 
-def _resolve_activity_ids(span) -> Optional[tuple]:
+def _resolve_activity_ids(span) -> tuple | None:
     """Resolve span → (workflow_id, activity_id) via trace_id lookup.
 
     Returns (workflow_id, activity_id) tuple or None if resolution fails.
@@ -287,7 +287,7 @@ def _resolve_activity_ids(span) -> Optional[tuple]:
     return activity_ctx.get("workflow_id", ""), activity_ctx.get("activity_id", "")
 
 
-def _check_activity_abort(span) -> Optional[str]:
+def _check_activity_abort(span) -> str | None:
     """Check if the activity owning this span has been aborted.
 
     Returns abort reason if aborted, None otherwise.
@@ -317,7 +317,7 @@ def _set_activity_abort(span, reason: str) -> None:
     processor.set_activity_abort(ids[0], ids[1], reason)
 
 
-def _handle_verdict(data: Dict[str, Any], identifier: str, span: Any = None) -> None:
+def _handle_verdict(data: dict[str, Any], identifier: str, span: Any = None) -> None:
     """Check API response verdict and raise GovernanceBlockedError if blocked.
 
     Args:
@@ -380,7 +380,7 @@ def _send_and_handle(response: Any, identifier: str, span: Any = None) -> None:
 def evaluate_sync(
     span: Any,
     identifier: str,
-    span_data: Optional[Dict[str, Any]] = None,
+    span_data: dict[str, Any] | None = None,
 ) -> None:
     """Synchronous governance evaluation. Blocks until verdict is received.
 
@@ -453,7 +453,7 @@ def evaluate_sync(
 async def evaluate_async(
     span: Any,
     identifier: str,
-    span_data: Optional[Dict[str, Any]] = None,
+    span_data: dict[str, Any] | None = None,
 ) -> None:
     """Async governance evaluation. Awaits until verdict is received.
 

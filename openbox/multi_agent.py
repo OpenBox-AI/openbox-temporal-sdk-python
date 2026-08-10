@@ -24,8 +24,9 @@ activity context, never in the workflow sandbox). Safe to export eagerly from
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from datetime import UTC, datetime
+from typing import Any
 
 # App-facing memo key (start_workflow(memo={...})) → SDK reads on the workflow side.
 MEMO_KEY = "openbox_multi_agent_session_id"
@@ -37,14 +38,14 @@ HEADER_KEY = "openbox-multi-agent-session-id"
 def _to_rfc3339(ts: datetime) -> str:
     """Format a datetime as RFC3339 (UTC, millisecond precision, trailing Z)."""
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        ts = ts.replace(tzinfo=UTC)
+    return ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def build_handoff_payload(
     from_agent_did: str,
     multi_agent_session_id: str,
-    ts: Optional[datetime] = None,
+    ts: datetime | None = None,
 ) -> dict:
     """Build + validate a Handoff event payload.
 
@@ -79,11 +80,11 @@ def build_handoff_payload(
 async def emit_handoff(
     multi_agent_session_id: str,
     from_agent_did: str,
-    ts: Optional[datetime] = None,
+    ts: datetime | None = None,
     *,
     timeout: float = 30.0,
     on_api_error: str = "fail_open",
-) -> Optional[dict]:
+) -> dict | None:
     """Emit a multi-agent Handoff event from within a Temporal workflow.
 
     Routes through the ``send_governance_event`` activity (which signs + sends),
@@ -142,7 +143,7 @@ async def emit_handoff(
     return outcome  # ALLOW dict / fail-open None unchanged
 
 
-def read_session_from_memo() -> Optional[str]:
+def read_session_from_memo() -> str | None:
     """Session id from the workflow memo, or None. Deterministic / replay-safe."""
     from temporalio import workflow
 
@@ -157,8 +158,8 @@ def inject_session_header(
 
 
 def read_session_from_header(
-    headers: Optional[Mapping[str, Any]], payload_converter: Any
-) -> Optional[str]:
+    headers: Mapping[str, Any] | None, payload_converter: Any
+) -> str | None:
     """Session id from a Temporal headers mapping, or None."""
     payload = headers.get(HEADER_KEY) if headers else None
     if payload is None:

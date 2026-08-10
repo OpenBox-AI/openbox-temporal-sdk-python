@@ -9,8 +9,7 @@ tests.  It is intentionally absent from deterministic workflow import paths.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
-from typing import Optional, Tuple
+from datetime import UTC, datetime
 
 from openbox_core.identity import (
     EMPTY_BODY_SHA256,
@@ -20,6 +19,8 @@ from openbox_core.identity import (
     HEADER_SIGNATURE,
     HEADER_TIMESTAMP,
     AgentIdentity,
+)
+from openbox_core.identity import (
     prepare_signed_request as _prepare_signed_request,
 )
 from openbox_core.serialization import serialize_body
@@ -41,12 +42,12 @@ __all__ = [
 def prepare_signed_request(
     method: str,
     path: str,
-    payload: Optional[dict],
+    payload: dict | None,
     *,
     api_key: str,
-    agent_did: Optional[str],
+    agent_did: str | None,
     signer,
-) -> Tuple[dict, bytes]:
+) -> tuple[dict, bytes]:
     """Build Temporal auth headers and shared exact signed body bytes.
 
     Callers must transmit the returned body with ``content=``.  A partial
@@ -54,7 +55,6 @@ def prepare_signed_request(
     """
     # Keep Temporal's established header values rather than replacing them
     # with the base SDK's framework identifier.
-    from .hook_governance import build_auth_headers
 
     identity = (
         AgentIdentity(agent_did=agent_did, signer=signer)
@@ -72,7 +72,7 @@ def prepare_signed_request(
         sdk_engine="temporal",
         sdk_version=__version__,
         # Preserve the module-level deterministic seams from the legacy helper.
-        _timestamp=(datetime.now(timezone.utc).isoformat() if identity else None),
+        _timestamp=(datetime.now(UTC).isoformat() if identity else None),
         _nonce=(secrets.token_urlsafe(24) if identity else None),
     )
 

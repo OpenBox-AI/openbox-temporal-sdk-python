@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 # openbox/plugin.py
 """
 OpenBox Plugin for Temporal Workers.
@@ -19,8 +20,9 @@ Usage:
 
 import dataclasses
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Set
+from typing import TYPE_CHECKING, Any
 
 from temporalio.plugin import SimplePlugin
 from temporalio.worker import Worker, WorkerConfig, WorkflowRunner
@@ -29,10 +31,10 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 from .client import GovernanceClient
 from .config import GovernanceConfig
 from .config import initialize as validate_api_key
+
 if TYPE_CHECKING:  # pragma: no cover — type-only reference
     from .sandbox.adapter import (
         TemporalSandboxConfig,
-        require_matching_governance_signing,
     )
 from .span_processor import WorkflowSpanProcessor
 
@@ -42,7 +44,7 @@ logger = logging.getLogger(__name__)
 class OpenBoxPlugin(SimplePlugin):
     """Temporal Plugin for OpenBox governance and observability.
 
-    Drop-in replacement for create_openbox_worker(). Registers governance
+    Registers governance
     interceptors, OTel instrumentation, and the send_governance_event activity.
 
     Example:
@@ -63,24 +65,24 @@ class OpenBoxPlugin(SimplePlugin):
         openbox_api_key: str,
         # AIP DID + Ed25519 signing (both-or-neither). Required for
         # signing_required=true agents; every Core request is signed locally.
-        agent_did: Optional[str] = None,
-        agent_private_key: Optional[str] = None,
-        core_ca_path: Optional[str] = None,
+        agent_did: str | None = None,
+        agent_private_key: str | None = None,
+        core_ca_path: str | None = None,
         governance_timeout: float = 30.0,
         governance_policy: str = "fail_open",
         send_start_event: bool = True,
         send_activity_start_event: bool = True,
-        skip_workflow_types: Optional[Set[str]] = None,
-        skip_activity_types: Optional[Set[str]] = None,
-        skip_signals: Optional[Set[str]] = None,
+        skip_workflow_types: set[str] | None = None,
+        skip_activity_types: set[str] | None = None,
+        skip_signals: set[str] | None = None,
         hitl_enabled: bool = True,
         max_patch_restarts: int = 3,
-        sandbox: Optional[TemporalSandboxConfig] = None,
+        sandbox: TemporalSandboxConfig | None = None,
         instrument_http: bool = True,
 
         instrument_databases: bool = True,
-        db_libraries: Optional[Set[str]] = None,
-        sqlalchemy_engine: Optional[Any] = None,
+        db_libraries: set[str] | None = None,
+        sqlalchemy_engine: Any | None = None,
         instrument_file_io: bool = True,
         # Propagate W3C traceparent/baggage through Temporal headers so spans
         # started by the caller (e.g., an HTTP server) stitch to workflow and
