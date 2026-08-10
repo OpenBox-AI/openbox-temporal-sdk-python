@@ -50,8 +50,7 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
     # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
     # client, context runtime, generic instrumentation, conformance kit.
-    # Retryable-BLOCK restart needs handle_retryable_block (base SDK >= 1.1.0).
-
+    # BLOCK-with-patch restart needs handle_patch (base SDK >= 1.2.0).
     "openbox-sdk-python>=1.2.0",
 ]
 
