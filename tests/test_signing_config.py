@@ -7,10 +7,10 @@ import pytest
 
 from openbox.config import (
     _GlobalConfig,
-    _load_ed25519_seed,
     _validate_did,
     initialize,
 )
+from openbox_core.identity import load_ed25519_seed as _load_ed25519_seed
 from openbox.errors import (
     OpenBoxConfigError,
     OpenBoxSigningError,
