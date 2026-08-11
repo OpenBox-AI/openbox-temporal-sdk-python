@@ -37,6 +37,7 @@ if TYPE_CHECKING:  # pragma: no cover — type-only reference
     from .sandbox.adapter import (
         TemporalSandboxConfig,
     )
+    from .sandbox.config import SandboxConfig
 
 logger = logging.getLogger(__name__)
 
