@@ -23,7 +23,7 @@ This document defines coding standards, architectural patterns, and best practic
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Public API Layer                             │
-│  - create_openbox_worker()                                      │
+│  - OpenBoxPlugin(...)()                                      │
 │  - initialize()                                                 │
 │  - GovernanceConfig, Verdict, WorkflowEventType                 │
 └────────────────────────┬────────────────────────────────────────┘
@@ -292,7 +292,7 @@ class GovernanceConfig:
     on_api_error: str = "fail_open"
     api_timeout: float = 30.0
 
-def create_openbox_worker(
+def OpenBoxPlugin(...)(
     client: Client,
     task_queue: str,
     *,
@@ -563,7 +563,7 @@ async def env():
 async def test_workflow_with_governance(env):
     """Test workflow with governance interceptor."""
     # Setup
-    worker = create_openbox_worker(
+    worker = OpenBoxPlugin(...)(
         client=env.client,
         task_queue="test-queue",
         workflows=[MyWorkflow],
@@ -593,7 +593,7 @@ async def test_workflow_with_governance(env):
 **Standard:** Google-style docstrings
 
 ```python
-def create_openbox_worker(
+def OpenBoxPlugin(...)(
     client: Client,
     task_queue: str,
     *,
@@ -620,7 +620,7 @@ def create_openbox_worker(
         OpenBoxNetworkError: Cannot reach OpenBox Core
 
     Example:
-        >>> worker = create_openbox_worker(
+        >>> worker = OpenBoxPlugin(...)(
         ...     client=client,
         ...     task_queue="my-queue",
         ...     workflows=[MyWorkflow],

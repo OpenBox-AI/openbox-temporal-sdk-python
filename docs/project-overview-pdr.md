@@ -16,7 +16,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 ### Core Value Proposition
 
-- **Zero-code instrumentation** via `create_openbox_worker()` factory function
+- **Zero-code instrumentation** via `OpenBoxPlugin` plugin function
 - **Comprehensive telemetry capture**: workflow events, activity I/O, HTTP calls, database queries, file operations
 - **Real-time per-operation governance** via hook-level evaluation (HTTP, database, file I/O, traced functions)
 - **Graduated governance verdicts**: 5-tier response (ALLOW → CONSTRAIN → REQUIRE_APPROVAL → BLOCK → HALT)
@@ -172,7 +172,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 
 #### FR-11: Worker Factory Function
 - **Requirement**: Provide simple factory function for zero-code setup
-- **Function**: `create_openbox_worker()` in `worker.py`
+- **Function**: `OpenBoxPlugin(...)` in `worker.py`
 - **Configuration Parameters**:
   - `session_id` (optional) - Session identifier for governance context
   - `agent_name` (optional) - Agent name for governance evaluation
@@ -308,7 +308,7 @@ OpenBox SDK for Temporal Workflows is a Python SDK that provides **workflow-boun
 ### 5. Success Metrics
 
 #### SM-1: Adoption Metrics
-- **Zero-code setup**: >80% of users use `create_openbox_worker()` factory
+- **Zero-code setup**: >80% of users use `OpenBoxPlugin` plugin
 - **Instrumentation coverage**: All 6 event types captured
 - **Hook governance adoption**: >50% of users enable hook-level governance
 - **HITL adoption**: >50% of users enable approval polling
@@ -348,7 +348,7 @@ Temporal-native behavior.
 interceptors share the same `state`.
 
 **Compatibility:**
-- `create_openbox_worker(...)` and `OpenBoxPlugin(...)` signatures are unchanged.
+- `OpenBoxPlugin(...)` and `OpenBoxPlugin(...)` signatures are unchanged.
 - `@traced` now wraps the base SDK's `governed()` decorator.
 - `db_libraries` / `sqlalchemy_engine` are still accepted but no longer have any
   effect — the base runtime installs every available DB instrumentor and governs

@@ -54,7 +54,7 @@ openbox-temporal-sdk-python/
 
 **Purpose:** Export workflow-safe components only
 **Key Exports:**
-- `create_openbox_worker()` - Recommended factory function
+- `OpenBoxPlugin(...)` - Recommended factory function
 - `OpenBoxPlugin` - Temporal plugin (when `temporalio >= 1.23.0`)
 - `initialize()`, `get_global_config()` - SDK initialization / config accessor
 - `GovernanceConfig` - Configuration dataclass
@@ -221,10 +221,10 @@ openbox-temporal-sdk-python/
 
 ### 8. Worker Factory (`worker.py`)
 
-**Purpose:** Zero-code setup via `create_openbox_worker()` factory
+**Purpose:** Zero-code setup via `OpenBoxPlugin` plugin
 **Function Signature (keyword-only after `task_queue`):**
 ```python
-def create_openbox_worker(
+def OpenBoxPlugin(...)(
     client: Client,
     task_queue: str,
     *,
@@ -360,7 +360,7 @@ class GovernanceActivities:
 def build_governance_activities(api_url: str, api_key: str) -> GovernanceActivities
 ```
 
-The plugin / `create_openbox_worker()` factory build one instance and register
+The plugin / `OpenBoxPlugin` plugin build one instance and register
 its bound `send_governance_event` method with the Temporal Worker.
 Credentials live on `self` — they do **not** flow through activity inputs,
 so the API key is never written to workflow history.
@@ -608,11 +608,11 @@ Hook instrumentation internals (HTTP/DB/file/function payload shape, body captur
 
 ### 2. Forgetting to Add send_governance_event Activity
 **Problem:** Workflow interceptor calls activity that doesn't exist
-**Solution:** Use `create_openbox_worker()` which adds it automatically, or manually add to activities list
+**Solution:** Use `OpenBoxPlugin(...)` which adds it automatically, or manually add to activities list
 
 ### 3. Hook Governance / Body Capture Not Working
 **Problem:** HTTP/DB/file operations aren't governed or bodies aren't captured
-**Solution:** Governance instrumentation is installed automatically by `create_openbox_worker()` / `OpenBoxPlugin` (they build an `openbox_core` runtime and call `install_instrumentation()`). The hook payload shape, body-capture rules, and enforcement are owned by `openbox_core` — configure those via the base SDK, not here.
+**Solution:** Governance instrumentation is installed automatically by `OpenBoxPlugin(...)` / `OpenBoxPlugin` (they build an `openbox_core` runtime and call `install_instrumentation()`). The hook payload shape, body-capture rules, and enforcement are owned by `openbox_core` — configure those via the base SDK, not here.
 
 ### 4. Stale Verdicts After Workflow Restart
 **Problem:** BLOCK verdict from previous run affects new run
@@ -624,7 +624,7 @@ Hook instrumentation internals (HTTP/DB/file/function payload shape, body captur
 
 ### 6. Hook Governance Not Blocking Operations
 **Problem:** An HTTP request proceeds even though a hook returned BLOCK
-**Solution:** Ensure the worker/plugin was created via `create_openbox_worker()` / `OpenBoxPlugin` so the base runtime is installed. Enforcement (blocking/halting) is applied by `openbox_core` and mapped to Temporal effects by `TemporalFrameworkAdapter`; there is no Temporal-local hook config to set.
+**Solution:** Ensure the worker/plugin was created via `OpenBoxPlugin(...)` / `OpenBoxPlugin` so the base runtime is installed. Enforcement (blocking/halting) is applied by `openbox_core` and mapped to Temporal effects by `TemporalFrameworkAdapter`; there is no Temporal-local hook config to set.
 
 ---
 

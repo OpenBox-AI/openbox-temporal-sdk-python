@@ -127,7 +127,7 @@ OpenBoxPlugin.configure_worker(config):
   → super().configure_worker(config)            # appends interceptors, activities
 ```
 
-Both interceptors now take `state=` (a `TemporalGovernanceState`), not a span processor. `create_openbox_worker(...)` follows the same sequence with the same public signature.
+Both interceptors now take `state=` (a `TemporalGovernanceState`), not a span processor. `OpenBoxPlugin(...)` follows the same sequence with the same public signature.
 
 **Key design choices:**
 - The base runtime is built and owned by the worker/plugin; `install_instrumentation()` runs once for the process lifetime (idempotent)
