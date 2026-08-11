@@ -86,19 +86,29 @@ The helper sets `RetryPolicy(maximum_attempts=1)` and `WAIT_CANCELLATION_COMPLET
 
 An authorization receipt records permission to execute; it does not show that execution occurred. The bounded Activity result reports terminal disposition, exit code, timeout and cleanup status, and output byte counts correlated with Temporal lifecycle signals. It is not a portable signed runtime receipt or independent proof of execution.
 
-## Dedicated Worker
+## Worker composition
+
+The governed command runs inside the native Worker. The plugin registers the
+command activity and the sandbox composition:
 
 ```python
-from openbox.sandbox import create_sandbox_worker
+from temporalio.worker import Worker
+from openbox import OpenBoxPlugin
 
-worker = create_sandbox_worker(
+worker = Worker(
     temporal_client,
-    "openbox-sandbox-activities",
-    sandbox=sandbox,
+    task_queue="my-queue",
+    workflows=[MyWorkflow],
+    plugins=[OpenBoxPlugin(
+        openbox_url=...,
+        openbox_api_key=...,
+        sandbox=sandbox,
+    )],
 )
 ```
 
-`create_sandbox_worker()` is intentionally command-only: it registers no Workflows and only the defensive governed-command Activity. Use `OpenBoxSandboxPlugin` when adding the command components to an existing Worker.
+The plugin registers no Workflows of its own. It adds the defensive
+governed-command Activity to the Worker you already own.
 
 ## Compatibility modes
 
