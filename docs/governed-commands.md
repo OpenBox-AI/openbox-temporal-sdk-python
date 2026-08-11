@@ -61,13 +61,10 @@ Natural mode is valid only when `trust_application_agent=False`, `receipt_verifi
 
 ## Workflow code
 
-Workflow code imports only the deterministic helper and bounded history contracts:
+Workflow code never imports OpenBox. It calls its own business activity:
 
 ```python
 from datetime import timedelta
-
-from openbox.workflow_commands import execute_governed_command
-from openbox_sandbox import SandboxCommandRequest
 from temporalio import workflow
 
 
@@ -75,14 +72,19 @@ from temporalio import workflow
 class ReconciliationWorkflow:
     @workflow.run
     async def run(self, batch_id: str):
-        return await execute_governed_command(
-            SandboxCommandRequest("reconcile", {"batch_id": batch_id}),
+        return await workflow.execute_activity(
+            reconcile,
+            batch_id,
             start_to_close_timeout=timedelta(minutes=6),
             heartbeat_timeout=timedelta(minutes=2),
         )
 ```
 
-The helper sets `RetryPolicy(maximum_attempts=1)` and `WAIT_CANCELLATION_COMPLETED`. Raw argv, credentials, policy documents, authority data, and raw command output do not enter Workflow history. A profile may return bounded typed JSON values; otherwise the durable result contains execution metadata only.
+The plugin intercepts the activity. The governance verdict decides the
+execution path: ALLOW runs it on the host process; CONSTRAIN routes it
+into the sandbox. The workflow stays clean. Raw argv, credentials,
+policy documents, authority data, and raw command output do not enter
+Workflow history.
 
 An authorization receipt records permission to execute; it does not show that execution occurred. The bounded Activity result reports terminal disposition, exit code, timeout and cleanup status, and output byte counts correlated with Temporal lifecycle signals. It is not a portable signed runtime receipt or independent proof of execution.
 
@@ -109,18 +111,6 @@ worker = Worker(
 
 The plugin registers no Workflows of its own. It adds the defensive
 governed-command Activity to the Worker you already own.
-
-## Compatibility modes
-
-These paths are preserved for existing deployments. They bypass natural governed dispatch and cannot be combined with a dispatcher or governed-command factory. Both require a valid `SandboxExecutionEngine` in `engine`.
-
-### Pre-authorized trusted-agent compatibility
-
-Set `trust_application_agent=True` only when the application agent and Worker are one explicitly owned trust domain and the application has already enforced the strict `CONSTRAIN` boundary. This compatibility mode calls the sandbox engine with internally derived trusted authorization. It rejects receipt-bearing inputs and constructs no Worker-side Core client.
-
-### Authorization-receipt compatibility
-
-Set `trust_application_agent=False`, provide `receipt_verifier`, and include the signed authorization receipt in `SandboxCommandRequest`. This compatibility mode verifies the receipt before calling the sandbox engine. A valid receipt proves authorization only; do not present it as evidence that the command ran.
 
 ## Cleanup and cancellation
 
