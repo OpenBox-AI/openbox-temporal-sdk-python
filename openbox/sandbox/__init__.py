@@ -11,6 +11,7 @@ from typing import Any
 
 _EXPORTS = {
     "TemporalSandboxConfig": "openbox.sandbox.adapter",
+    "SandboxConfig": "openbox.sandbox.config",
     "TemporalSandboxConfigurationError": "openbox.sandbox.adapter",
 
     "DecimalArgument": "openbox.sandbox.registry",
