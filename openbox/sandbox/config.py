@@ -288,12 +288,15 @@ def _output_limits(sandbox: SandboxConfig) -> Any:
 def _deadlines(
     sandbox: SandboxConfig,
 ) -> dict[str, int]:
+    # Defaults must stay within the core SDK's validation caps
+    # (SandboxExecutionConfig: create<=60s, readiness<=120s, exec<=45s,
+    # delete<=60s, wait_deleted<=60s) or every construct is rejected.
     return {
-        "create_deadline_ms": sandbox.create_deadline_ms or 1_200_000,
-        "readiness_deadline_ms": sandbox.readiness_deadline_ms or 1_200_000,
+        "create_deadline_ms": sandbox.create_deadline_ms or 60_000,
+        "readiness_deadline_ms": sandbox.readiness_deadline_ms or 120_000,
         "exec_deadline_ms": sandbox.exec_deadline_ms or 45_000,
-        "delete_deadline_ms": sandbox.delete_deadline_ms or 600_000,
-        "wait_deleted_deadline_ms": sandbox.wait_deleted_deadline_ms or 600_000,
+        "delete_deadline_ms": sandbox.delete_deadline_ms or 60_000,
+        "wait_deleted_deadline_ms": sandbox.wait_deleted_deadline_ms or 60_000,
     }
 
 

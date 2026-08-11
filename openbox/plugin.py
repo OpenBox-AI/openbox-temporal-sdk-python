@@ -93,7 +93,10 @@ class OpenBoxPlugin(SimplePlugin):
         enable_trace_propagation: bool = True,
         add_temporal_tracing: bool = True,
     ):
-        from .sandbox.adapter import require_matching_governance_signing
+        from .sandbox.adapter import (
+            TemporalSandboxConfig,
+            require_matching_governance_signing,
+        )
         from .sandbox.config import SandboxConfig, resolve_sandbox_config
 
         if sandbox is not None and not isinstance(
