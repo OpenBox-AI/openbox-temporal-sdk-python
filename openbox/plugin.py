@@ -28,10 +28,10 @@ from temporalio.plugin import SimplePlugin
 from temporalio.worker import Worker, WorkerConfig, WorkflowRunner
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
+from . import __version__
 from .client import GovernanceClient
 from .config import GovernanceConfig
 from .config import initialize as validate_api_key
-from . import __version__
 from .span_processor import WorkflowSpanProcessor
 
 if TYPE_CHECKING:  # pragma: no cover — type-only reference
@@ -104,6 +104,9 @@ class OpenBoxPlugin(SimplePlugin):
             )
 
         if isinstance(sandbox, SandboxConfig):
+            from .config import get_global_config
+
+            _signer: Any = get_global_config().get_signer()
             sandbox = resolve_sandbox_config(
                 sandbox,
                 openbox_url=openbox_url,
