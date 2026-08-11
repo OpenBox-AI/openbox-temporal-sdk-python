@@ -31,6 +31,7 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 from .client import GovernanceClient
 from .config import GovernanceConfig
 from .config import initialize as validate_api_key
+from . import __version__
 from .span_processor import WorkflowSpanProcessor
 
 if TYPE_CHECKING:  # pragma: no cover — type-only reference
