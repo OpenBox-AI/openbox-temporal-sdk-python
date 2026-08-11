@@ -264,10 +264,6 @@ class OpenBoxPlugin(SimplePlugin):
         ]
         self._sandbox = sandbox
         self._otel_bridge = None if sandbox is None else sandbox.otel_bridge
-        if sandbox is not None:
-            from .governed_command_activity import governed_command_activity
-
-            plugin_activities.append(governed_command_activity)
 
         super().__init__(
             "openbox.OpenBoxPlugin",

@@ -11,7 +11,7 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
 - One official integration surface: `Worker(..., plugins=[OpenBoxPlugin(...)])`
-- Optional governed-command wrapper for authorized local sandbox execution
+- Optional sandbox routing — a `CONSTRAIN` verdict runs the user's activity in the sandbox automatically
 
 ---
 

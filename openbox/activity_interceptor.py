@@ -19,8 +19,8 @@ This is different from workflow interceptors which must maintain determinism.
 import asyncio
 import json
 import time
+import uuid
 from dataclasses import asdict, fields, is_dataclass
-from datetime import UTC
 from typing import Any, Literal, NoReturn
 
 from opentelemetry import trace
@@ -47,7 +47,6 @@ from .patch import PatchRequest, patch_request
 from .sandbox.adapter import TemporalSandboxConfig, activity_result
 from .sandbox.profiles import CommandResultValidationError
 from .sandbox.types import (
-    GOVERNED_COMMAND_ACTIVITY_TYPE,
     GovernedCommandInputError,
     GovernedCommandRequest,
     GovernedCommandTypedResult,
@@ -176,6 +175,30 @@ def _serialize_fallback(value: Any) -> Any:
         return str(value)
 
 
+def _verdict_decision(response: GovernanceVerdictResponse) -> dict[str, Any]:
+    """Map a governance verdict response onto the dispatcher decision shape.
+
+    The CONSTRAIN verdict from the ActivityStarted event is the decision the
+    governed dispatcher must execute — it decides sandbox routing, so the
+    dispatcher never re-evaluates through a second client.
+    """
+    decision: dict[str, Any] = {
+        "governance_event_id": str(uuid.uuid4()),
+        "verdict": response.verdict.value,
+        "risk_score": response.risk_score,
+        "action": response.verdict.value,
+        "fallback_used": False,
+        "behavioral_violations": list(response.behavioral_violations or []),
+    }
+    if response.constraints is not None:
+        decision["constraints"] = list(response.constraints)
+    if response.policy_id is not None:
+        decision["policy_id"] = response.policy_id
+    if response.reason is not None:
+        decision["reason"] = response.reason
+    return decision
+
+
 def _extract_trace_context(headers: Any) -> Any:
     """Extract the workflow trace context from the activity task headers.
 
@@ -274,11 +297,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info = activity.info()
         start_time = time.time()
 
-        # Registered commands are intercepted before every skip, HITL, hook,
-        # redaction, and downstream-interceptor path.
-        if info.activity_type == GOVERNED_COMMAND_ACTIVITY_TYPE:
-            return await self._execute_governed_command(input, info, start_time)
-
         # Skip if configured (e.g., send_governance_event to avoid loops)
         if info.activity_type in self._config.skip_activity_types:
             return await self.next.execute_activity(input)
@@ -346,8 +364,20 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             },
         )
 
-        # Enforce ActivityStarted verdict (HITL, BLOCK, HALT, guardrails)
+        # Enforce ActivityStarted verdict (HITL, BLOCK, HALT, guardrails). A
+        # CONSTRAIN verdict with a sandbox configuration routes this activity
+        # into the sandbox transparently: the command is derived from the
+        # activity input through the sandbox profile bundle and executed by
+        # the injected governed dispatcher, and the bounded result is returned
+        # to the caller without ever running the activity on the host.
         if governance_verdict:
+            if (
+                governance_verdict.verdict == Verdict.CONSTRAIN
+                and self._sandbox is not None
+            ):
+                return await self._execute_constrained_activity(
+                    input, info, start_time, governance_verdict
+                )
             await self._enforce_verdict(governance_verdict, info, "activity_start")
 
         # Apply guardrails input redaction
@@ -387,22 +417,28 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         return result
 
-    async def _execute_governed_command(
-        self, input: ExecuteActivityInput, info, start_time: float
+    async def _execute_constrained_activity(
+        self,
+        input: ExecuteActivityInput,
+        info,
+        start_time: float,
+        verdict_response: GovernanceVerdictResponse,
     ) -> Any:
-        """Execute a registered command without entering ``self.next``."""
+        """Route a CONSTRAIN verdict on a user activity into the sandbox.
+
+        The activity's input must be one structured request (a
+        ``GovernedCommandRequest`` or its wire dict). The command argv is
+        derived from that input through the sandbox profile bundle, and the
+        injected governed dispatcher executes it with the CONSTRAIN decision
+        from ``verdict_response`` — the caller receives the bounded sandbox
+        result and the user's activity body never runs on the host.
+        """
         from temporalio.exceptions import ApplicationError
 
         if self._sandbox is None:
             raise ApplicationError(
                 "Governed command support is not configured",
                 type="GovernedCommandConfigurationRequired",
-                non_retryable=True,
-            )
-        if info.attempt != 1:
-            raise ApplicationError(
-                "Governed commands permit exactly one Activity attempt",
-                type="GovernedCommandAttemptRejected",
                 non_retryable=True,
             )
         try:
@@ -488,68 +524,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 )
                 if request.governance is not None:
                     decision = GovernanceDecision.parse(request.governance)
-                    dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
-                        command, decision
-                    )
-                elif self._sandbox.evaluate_at_interceptor and self._client is not None:
-                    # Single-client convergence: the plugin's governance
-                    # client (wrapping the one shared Core runtime) evaluates
-                    # the governed command at activity time; the dispatcher
-                    # executes the resulting verdict without a second client.
-                    from datetime import datetime
-
-                    now = datetime.now(UTC).isoformat()
-                    event = {
-                        "source": "governed-dispatcher",
-                        "event_type": "ActivityStarted",
-                        "workflow_id": info.workflow_id,
-                        "run_id": info.workflow_run_id,
-                        "workflow_type": info.workflow_type,
-                        "task_queue": info.task_queue,
-                        "timestamp": now,
-                        "activity_id": info.activity_id,
-                        "activity_type": GOVERNED_COMMAND_ACTIVITY_TYPE,
-                        "attempt": info.attempt,
-                        "profile_id": request.profile_id,
-                        "activity_input": [{"argv": list(argv)}],
-                        "operation": {
-                            "profile_id": request.profile_id,
-                            "arguments": {
-                                item.name: item.value for item in request.arguments
-                            },
-                        },
-                    }
-                    response = await self._client.evaluate_event(event)
-                    if response is None:
-                        raise ApplicationError(
-                            "Governed command evaluation unavailable",
-                            type="GovernedCommandNotExecuted",
-                            non_retryable=True,
-                        )
-                    import uuid as _uuid
-
-                    decision_value: dict[str, Any] = {
-                        "governance_event_id": str(_uuid.uuid4()),
-                        "verdict": response.verdict.value,
-                        "risk_score": response.risk_score,
-                        "action": response.verdict.value,
-                        "fallback_used": False,
-                        "behavioral_violations": list(
-                            response.behavioral_violations or []
-                        ),
-                    }
-                    if response.constraints is not None:
-                        decision_value["constraints"] = list(response.constraints)
-                    if response.policy_id is not None:
-                        decision_value["policy_id"] = response.policy_id
-                    if response.reason is not None:
-                        decision_value["reason"] = response.reason
-                    decision = GovernanceDecision.parse(decision_value)
-                    dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
-                        command, decision
-                    )
                 else:
-                    dispatch_operation = self._sandbox.dispatcher.dispatch(command)
+                    decision = GovernanceDecision.parse(
+                        _verdict_decision(verdict_response)
+                    )
+                dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
+                    command, decision
+                )
                 dispatch_task = asyncio.create_task(dispatch_operation)
                 cancellation_task = asyncio.create_task(
                     self._wait_for_temporal_cancellation()
@@ -672,6 +653,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     )
                 except Exception:
                     pass
+            # The routed path bypasses _handle_completion, so drop the activity
+            # context this branch registered before the verdict enforcement.
+            self._span_processor.clear_activity_context(
+                info.workflow_id, info.activity_id
+            )
 
         await self._send_registered_completion(
             info,
@@ -1014,13 +1000,22 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         try:
             if verdict_response.verdict == Verdict.CONSTRAIN:
-                from temporalio.exceptions import ApplicationError
+                if self._sandbox is None:
+                    from temporalio.exceptions import ApplicationError
 
-                raise ApplicationError(
-                    "CONSTRAIN is supported only by a registered governed command",
-                    type="GovernanceConstrainUnsupported",
-                    non_retryable=True,
-                )
+                    raise ApplicationError(
+                        "CONSTRAIN is supported only by a registered governed command",
+                        type="GovernanceConstrainUnsupported",
+                        non_retryable=True,
+                    )
+                # With a sandbox configuration, a CONSTRAIN verdict at
+                # ActivityStarted is enforced by _execute_constrained_activity,
+                # which routes the activity into the sandbox and returns the
+                # result before this branch runs. A completed CONSTRAIN verdict
+                # arrives only after the activity has already executed (on the
+                # host or in the sandbox), so routing is no longer possible —
+                # accept it as a no-op.
+                return
             verdict_result = enforce_verdict(verdict_response, context)
             if verdict_result.requires_hitl and not should_skip_hitl(
                 info.activity_type,

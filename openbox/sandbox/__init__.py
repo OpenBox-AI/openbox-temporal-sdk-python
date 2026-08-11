@@ -24,7 +24,6 @@ _EXPORTS = {
     "LiteralArgument": "openbox.sandbox.registry",
     "TypedJsonResultSchema": "openbox.sandbox.registry",
     "governed_command_registry": "openbox.sandbox.registry",
-    "GOVERNED_COMMAND_ACTIVITY_TYPE": "openbox.sandbox.types",
     "GovernedCommandActivityResult": "openbox.sandbox.types",
     "GovernedCommandInputError": "openbox.sandbox.types",
     "GovernedCommandRequest": "openbox.sandbox.types",

@@ -1,97 +1,18 @@
 # Governed sandbox commands
 
-Install the optional Temporal contracts and compatibility engine with:
+The optional sandbox integration makes a `CONSTRAIN` governance verdict route
+the user's own activity into the sandbox transparently. Workflow code never
+imports OpenBox; the plugin intercepts the activity at the worker boundary:
 
-```bash
-pip install "openbox-temporal-sdk-python[sandbox]"
-```
-
-The Temporal package owns bounded history conversion, one-attempt Activity scheduling, Temporal identity binding, heartbeat/cancellation behavior, Worker/plugin registration, and bounded result mapping. In production, the injected governed dispatcher owns governance and execution. `openbox-sandbox-sdk-python` continues to provide profile/history contracts and the pre-authorized compatibility engine.
-
-## Production dispatch flow
-
-The governed-dispatcher package is not a dependency of this package. The application injects both its dispatcher and its real `GovernedCommand` class as a factory:
-
-```python
-from governed_dispatcher import GovernedCommand, GovernedDispatcher
-from openbox.sandbox import TemporalSandboxConfig
-
-sandbox = TemporalSandboxConfig(
-    engine=None,
-    profiles=registry.structured_profile_bundle(),
-    heartbeat_sink=heartbeat,
-    dispatcher=dispatcher,  # a GovernedDispatcher
-    governed_command_factory=GovernedCommand,
-)
-```
-
-For each `openbox_governed_command` Activity, the adapter:
-
-1. accepts only the registered Activity type and rejects any attempt other than the first;
-2. reads Workflow ID, run ID, Activity ID, Workflow type, task queue, and attempt from `temporalio.activity.info()`;
-3. derives bounded `argv` and `profile_id` from the authenticated profile bundle;
-4. calls the injected factory exactly as:
-
-   ```python
-   governed_command_factory(
-       workflow_id=info.workflow_id,
-       run_id=info.workflow_run_id,
-       activity_id=info.activity_id,
-       argv=derived_argv,
-       profile_id=request.profile_id,
-       timeout_seconds=config.timeout_seconds,
-       workflow_type=info.workflow_type,
-       task_queue=info.task_queue,
-       attempt=info.attempt,
-   )
-   ```
-
-5. invokes only `await dispatcher.dispatch(command)` on the dispatcher; and
-6. structurally validates the returned governed-dispatcher `DispatchResult` and `ExecutionMetadata` before mapping it to `SandboxActivityResult`.
-
-The host dispatcher is also the sole Core caller for this Activity. It reuses its preflight signer/agent identity to attach a completed `sandbox_execution` hook span to the existing `ActivityStarted` event, then sends a separate span-free `ActivityCompleted` on the normal path. The Temporal sandbox worker installs no Core transport or OTLP exporter and never duplicates those calls.
-
-The result must report `executed_in_sandbox`, carry no error, include terminal execution metadata, byte-valued `stdout`/`stderr`, an exit code from 0 through 2³¹−1, an accepted terminal timeout status, and `deleted` or `failed` cleanup status. Before typed-result parsing, stdout and stderr are each limited to 1 MiB and their combined size to 2 MiB. Host results, missing/nonterminal execution, malformed metadata, and oversized output fail closed. Raw output never enters Workflow history.
-
-**Host-result rejection happens after dispatch.** A real `GovernedDispatcher` may already have run an `ALLOW` command as a host subprocess before returning `executed_on_host`; Temporal then rejects that result, but it did not prevent the host attempt. Preventing host execution belongs to Core policy and dispatcher deployment. A zero-host deployment must ensure the applicable Core decision is exactly `CONSTRAIN` and deploy the dispatcher so its host path is unavailable or otherwise disabled. Stock Temporal result validation is not host-path enforcement, and this integration does not claim a stock dispatcher disable flag.
-
-Natural mode also has a two-bundle trust assumption. Temporal's `StructuredCommandProfileBundle` derives `argv`, while the dispatcher's `CommandProfileBundle` independently re-admits it. Both bundles must come from equivalent command definitions and bundle versions; disagreement fails closed rather than authorizing profile drift.
-
-Natural mode is valid only when `trust_application_agent=False`, `receipt_verifier=None`, `engine=None`, and both `dispatcher` and `governed_command_factory` are supplied. A missing half of the injection seam fails during configuration.
-
-## Workflow code
-
-Workflow code never imports OpenBox. It calls its own business activity:
-
-```python
-from datetime import timedelta
-from temporalio import workflow
-
-
-@workflow.defn
-class ReconciliationWorkflow:
-    @workflow.run
-    async def run(self, batch_id: str):
-        return await workflow.execute_activity(
-            reconcile,
-            batch_id,
-            start_to_close_timeout=timedelta(minutes=6),
-            heartbeat_timeout=timedelta(minutes=2),
-        )
-```
-
-The plugin intercepts the activity. The governance verdict decides the
-execution path: ALLOW runs it on the host process; CONSTRAIN routes it
-into the sandbox. The workflow stays clean. Raw argv, credentials,
-policy documents, authority data, and raw command output do not enter
-Workflow history.
-
-An authorization receipt records permission to execute; it does not show that execution occurred. The bounded Activity result reports terminal disposition, exit code, timeout and cleanup status, and output byte counts correlated with Temporal lifecycle signals. It is not a portable signed runtime receipt or independent proof of execution.
+- an `ALLOW` verdict runs the activity on the host process as usual; and
+- a `CONSTRAIN` verdict derives the command from the activity input through the
+  sandbox profile bundle and executes it through the injected governed
+  dispatcher, returning the bounded result to the caller.
 
 ## Worker composition
 
-The governed command runs inside the native Worker. The plugin registers the
-command activity and the sandbox composition:
+The governed command runs inside the native Worker. The plugin registers no
+additional Activities of its own:
 
 ```python
 from temporalio.worker import Worker
@@ -109,9 +30,110 @@ worker = Worker(
 )
 ```
 
-The plugin registers no Workflows of its own. It adds the defensive
-governed-command Activity to the Worker you already own.
+The application injects its own `GovernedDispatcher` instance and the profile
+bundle that maps structured activity input onto command argv:
+
+```python
+from openbox.sandbox import TemporalCommandProfileBundle, TemporalSandboxConfig
+
+sandbox = TemporalSandboxConfig(
+    dispatcher=dispatcher,   # a GovernedDispatcher
+    profiles=profile_bundle, # a TemporalCommandProfileBundle
+    heartbeat_sink=heartbeat,
+)
+```
+
+`TemporalSandboxConfig` validates the composition at construction: the
+dispatcher must be a real `GovernedDispatcher`, the profile bundle must be a
+`TemporalCommandProfileBundle`, the heartbeat sink must be the dispatcher's own
+telemetry sink, and the timeout/heartbeat intervals must be in range.
+
+## Workflow code
+
+Workflow code never imports OpenBox. It calls its own business activity and
+passes a structured request (`profile_id` + named arguments) as its input:
+
+```python
+from datetime import timedelta
+from temporalio import workflow
+
+
+@workflow.defn
+class ReconciliationWorkflow:
+    @workflow.run
+    async def run(self, batch_id: str):
+        return await workflow.execute_activity(
+            reconcile,
+            {"profile_id": "reconcile", "arguments": {"batch_id": batch_id}},
+            start_to_close_timeout=timedelta(minutes=6),
+            heartbeat_timeout=timedelta(minutes=2),
+        )
+```
+
+The plugin intercepts the activity. The governance verdict decides the
+execution path: `ALLOW` runs it on the host process; `CONSTRAIN` routes it
+into the sandbox automatically. The workflow stays clean. Raw argv,
+credentials, policy documents, authority data, and raw command output do not
+enter Workflow history.
+
+## Dispatch flow
+
+For each `CONSTRAIN` verdict on a user activity, the interceptor:
+
+1. reads Workflow ID, run ID, Activity ID, Workflow type, task queue, and
+   attempt from `temporalio.activity.info()`;
+2. validates the single structured activity input (`profile_id` + named
+   arguments; a workflow-supplied pre-evaluated `governance` decision is
+   honored when present);
+3. derives bounded `argv` and `profile_id` from the authenticated profile
+   bundle — the input never carries executable text;
+4. builds a `GovernedCommand` from genuine `activity.info()` identity and the
+   derived argv;
+5. maps the `CONSTRAIN` verdict from the ActivityStarted event onto the
+   dispatcher decision shape and calls
+   `await dispatcher.dispatch_with_decision(command, decision)` — the
+   dispatcher executes the verdict without a second governance client;
+6. waits on dispatch, heartbeat, and Temporal cancellation together, so
+   cancellation cancels the in-flight dispatch and waits for its owned
+   cleanup to finish;
+7. structurally validates the returned `DispatchResult` and maps it to a
+   bounded `GovernedCommandActivityResult` (terminal disposition, exit code,
+   timeout and cleanup status, stdout/stderr byte counts, and profile-admitted
+   typed result values when the profile declares a result schema).
+
+The host dispatcher is the sole Core caller for this Activity. When its config
+carries a governance client it owns the completed sandbox hook and span-free
+`ActivityCompleted`; otherwise the interceptor wrapper posts `ActivityCompleted`
+with the mapped bounded output. The bounded result is not a portable signed
+runtime receipt or independent proof of execution.
+
+**Host results are rejected after dispatch.** A real `GovernedDispatcher` may
+already have run an `ALLOW` command as a host subprocess before returning
+`executed_on_host`; Temporal then rejects that result, but it did not prevent
+the host attempt. Preventing host execution belongs to Core policy: a zero-host
+deployment must ensure the applicable Core decision is exactly `CONSTRAIN` and
+deploy the dispatcher so its host path is unavailable or otherwise disabled.
+The dispatcher's `HALT` directive terminates the workflow after the sandbox run.
+
+Natural mode has a two-bundle trust assumption. Temporal's
+`TemporalCommandProfileBundle` derives `argv`, while the dispatcher's
+`CommandProfileBundle` independently re-admits it. Both bundles must come from
+equivalent command definitions and bundle versions; disagreement fails closed
+rather than authorizing profile drift.
+
+## Result limits
+
+Before typed-result parsing, stdout and stderr are each limited to 1 MiB and
+their combined size to 2 MiB. Host results, missing/nonterminal execution,
+malformed metadata, and oversized output fail closed. Raw output never enters
+Workflow history.
 
 ## Cleanup and cancellation
 
-The natural dispatcher must own deletion after any create that may have succeeded and must not finish cancellation before that cleanup boundary. The compatibility engine provides the same guarantee. Temporal cancellation cancels the in-flight dispatch/engine task and waits for it to finish cleanup. Result mapping requires accepted terminal execution metadata, and cleanup status remains explicit in that reported metadata. Compatibility cleanup failures may be persisted in `CleanupBacklog` and retried by the process owner through `reconcile_cleanup()`.
+The natural dispatcher must own deletion after any create that may have
+succeeded and must not finish cancellation before that cleanup boundary.
+Temporal cancellation cancels the in-flight dispatch task and waits for it to
+finish cleanup. Result mapping requires accepted terminal execution metadata,
+and cleanup status remains explicit in that reported metadata. Cleanup failures
+may be persisted in the dispatcher's `CleanupBacklog` and retried by the
+process owner through `reconcile_cleanup()`.

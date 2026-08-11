@@ -7,7 +7,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-GOVERNED_COMMAND_ACTIVITY_TYPE = "openbox_governed_command"
 _MAX_ARGUMENTS = 64
 _MAX_RESULT_FIELDS = 64
 _MAX_VALUE_BYTES = 4096

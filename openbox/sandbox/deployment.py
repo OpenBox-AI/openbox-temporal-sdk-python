@@ -2,7 +2,7 @@
 
 This module performs file and environment I/O and is intentionally loaded lazily
 by :mod:`openbox.sandbox`. Workflow code must continue to import only
-``openbox.workflow_commands`` or ``openbox.sandbox.types``.
+``openbox.sandbox.types``.
 """
 
 from __future__ import annotations
