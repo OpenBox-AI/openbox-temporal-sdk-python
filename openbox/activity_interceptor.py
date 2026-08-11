@@ -222,21 +222,11 @@ class ActivityGovernanceInterceptor(Interceptor):
         self.config = config or GovernanceConfig()
         self._sandbox = sandbox
         self._state = state or TemporalGovernanceState()
-        disconnected_command_worker = sandbox is not None and (
-            sandbox.receipt_verifier is not None or sandbox.trust_application_agent
-        )
-        # Disconnected workers install only the command-dispatch branch. They
-        # deliberately have no Core client or usable decision path.
-        self._client = (
-            None
-            if disconnected_command_worker
-            else client
-            or GovernanceClient(
-                api_url=api_url,
-                api_key=api_key,
-                timeout=self.config.api_timeout,
-                on_api_error=self.config.on_api_error,
-            )
+        self._client = client or GovernanceClient(
+            api_url=api_url,
+            api_key=api_key,
+            timeout=self.config.api_timeout,
+            on_api_error=self.config.on_api_error,
         )
 
     def intercept_activity(
@@ -273,19 +263,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         self._state = state
         self._config = config
         self._sandbox = sandbox
-        disconnected_command_worker = sandbox is not None and (
-            sandbox.receipt_verifier is not None or sandbox.trust_application_agent
-        )
-        self._client = (
-            None
-            if disconnected_command_worker
-            else client
-            or GovernanceClient(
-                api_url=api_url,
-                api_key=api_key,
-                timeout=config.api_timeout,
-                on_api_error=config.on_api_error,
-            )
+        self._client = client or GovernanceClient(
+            api_url=api_url,
+            api_key=api_key,
+            timeout=config.api_timeout,
+            on_api_error=config.on_api_error,
         )
 
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
@@ -296,14 +278,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         # redaction, and downstream-interceptor path.
         if info.activity_type == GOVERNED_COMMAND_ACTIVITY_TYPE:
             return await self._execute_governed_command(input, info, start_time)
-
-        # Disconnected command-only modes bypass Core governance for ordinary
-        # activities as well.
-        if self._sandbox is not None and (
-            self._sandbox.receipt_verifier is not None
-            or self._sandbox.trust_application_agent
-        ):
-            return await self.next.execute_activity(input)
 
         # Skip if configured (e.g., send_governance_event to avoid loops)
         if info.activity_type in self._config.skip_activity_types:
@@ -436,8 +410,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             if len(args) != 1:
                 raise GovernedCommandInputError("governed command input rejected")
             request = GovernedCommandRequest.from_value(args[0])
-            if self._sandbox.trust_application_agent and request.receipt is not None:
-                raise GovernedCommandInputError("governed command input rejected")
             argv = self._sandbox.profiles.derive(request)
             self._sandbox.profiles.profile_fingerprint(request.profile_id)
         except (GovernedCommandInputError, TypeError, ValueError) as error:
@@ -446,28 +418,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 type="GovernedCommandInvalid",
                 non_retryable=True,
             ) from error
-
-        authorization_id: str | None = None
-        if self._sandbox.receipt_verifier is not None:
-            try:
-                dispatcher_config = self._sandbox.dispatcher._config
-                execution_config = dispatcher_config.sandbox
-                asset_bundle = execution_config.asset_bundle
-                authorization_id = self._sandbox.receipt_verifier.verify(
-                    request,
-                    expected_workflow_id=info.workflow_id,
-                    command_argv=argv,
-                    asset_bundle=asset_bundle,
-                    profile_fingerprint=self._sandbox.profiles.profile_fingerprint(
-                        request.profile_id
-                    ),
-                )
-            except Exception as error:
-                raise ApplicationError(
-                    "Governed command receipt rejected",
-                    type="GovernedCommandUnauthorized",
-                    non_retryable=True,
-                ) from error
 
         from openbox_sandbox.dispatcher import (
             Directive,
@@ -541,11 +491,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
                         command, decision
                     )
-                elif (
-                    self._sandbox.evaluate_at_interceptor
-                    and self._client is not None
-                    and request.receipt is None
-                ):
+                elif self._sandbox.evaluate_at_interceptor and self._client is not None:
                     # Single-client convergence: the plugin's governance
                     # client (wrapping the one shared Core runtime) evaluates
                     # the governed command at activity time; the dispatcher
@@ -601,16 +547,6 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     decision = GovernanceDecision.parse(decision_value)
                     dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
                         command, decision
-                    )
-                elif self._sandbox.trust_application_agent:
-                    dispatch_operation = (
-                        self._sandbox.dispatcher.dispatch_trusted_constrain(command)
-                    )
-                elif authorization_id is not None:
-                    dispatch_operation = (
-                        self._sandbox.dispatcher.dispatch_authorized_constrain(
-                            command, authorization_id=authorization_id
-                        )
                     )
                 else:
                     dispatch_operation = self._sandbox.dispatcher.dispatch(command)
@@ -868,9 +804,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             getattr(dispatch_result, "disposition", None), "value", None
         )
         if (
-            not self._sandbox.trust_application_agent
-            and self._sandbox.receipt_verifier is None
-            and getattr(dispatcher_config, "governance", None) is not None
+            getattr(dispatcher_config, "governance", None) is not None
             and dispatch_result is not None
             and disposition_value == "executed_in_sandbox"
             and getattr(dispatch_result, "error", None) is None

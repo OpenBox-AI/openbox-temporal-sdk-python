@@ -94,55 +94,6 @@ class OpenBoxPlugin(SimplePlugin):
         from .sandbox.adapter import require_matching_governance_signing
 
         require_matching_governance_signing(sandbox, agent_did)
-        receipt_authorized = (
-            sandbox is not None and sandbox.receipt_verifier is not None
-        )
-        trusted_application = sandbox is not None and sandbox.trust_application_agent
-        disconnected_command_worker = receipt_authorized or trusted_application
-        if disconnected_command_worker and (
-            agent_did is not None or agent_private_key is not None
-        ):
-            raise ValueError(
-                "disconnected command workers do not hold Core signing keys"
-            )
-
-        if disconnected_command_worker:
-            # Command-only composition: no shared Core config/client/runtime,
-            # no Core governance interceptors, and no instrumentation.
-            from .activity_interceptor import ActivityGovernanceInterceptor
-            from .governed_command_activity import governed_command_activity
-
-            self._runtime = None
-            self._span_processor = None
-            self._sandbox = sandbox
-            self._otel_bridge = None if sandbox is None else sandbox.otel_bridge
-            self._activity_interceptor = ActivityGovernanceInterceptor(
-                api_url=openbox_url,
-                api_key=openbox_api_key,
-                span_processor=None,  # type: ignore[arg-type]
-                config=GovernanceConfig(),
-                client=None,
-                sandbox=sandbox,
-            )
-            self._governance_policy = governance_policy
-            self._governance_timeout = governance_timeout
-            self._instrument_http = instrument_http
-            self._instrument_databases = instrument_databases
-            self._instrument_file_io = instrument_file_io
-            self._hitl_enabled = False
-            command_interceptors: list[Any] = [self._activity_interceptor]
-            if enable_trace_propagation:
-                from temporalio.contrib.opentelemetry import TracingInterceptor
-
-                # The governed-command interceptor executes its registered Activity
-                # directly, so tracing must be outermost to establish current context.
-                command_interceptors.insert(0, TracingInterceptor())
-            super().__init__(
-                "openbox.OpenBoxPlugin",
-                interceptors=command_interceptors,
-                activities=[governed_command_activity],
-            )
-            return
 
         # 1. Validate API key (sync, uses urllib). Also loads the Ed25519 signer
         #    and validates a signing_required=true agent via a signed GET.

@@ -19,8 +19,6 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 
 ```bash
 pip install openbox-temporal-sdk-python
-# Add the framework-neutral sandbox engine and governed-command wrapper:
-pip install "openbox-temporal-sdk-python[sandbox]"
 ```
 
 **Requirements:**
@@ -141,7 +139,7 @@ worker = Worker(
 
 ## Governed sandbox commands
 
-The optional sandbox integration schedules one-attempt, profile-bound commands through a dedicated Temporal Activity Worker. Its production path injects both the real governed dispatcher and its `GovernedCommand` factory, constructs that command from genuine `activity.info()` identity, and calls only `dispatcher.dispatch(command)`. The returned `DispatchResult` is structurally validated and mapped to bounded reported terminal metadata correlated with lifecycle signals; it is not a portable signed runtime receipt or independent proof. Rejection of `executed_on_host` occurs after dispatch and cannot prevent a host attempt: zero-host deployments must enforce exact `CONSTRAIN` in Core and make the dispatcher host path unavailable or disabled. Temporal and dispatcher profile bundles must use equivalent command definitions/version because Temporal derives argv and the dispatcher independently re-admits it. No unpublished dispatcher package is a hard dependency. Pre-authorized same-domain trust and signed authorization receipts remain explicitly labeled compatibility paths; an authorization receipt proves permission, not execution. See [Governed sandbox commands](./docs/governed-commands.md) for the exact seam, compatibility modes, cleanup, and replay requirements.
+The optional sandbox integration makes a CONSTRAIN governance verdict route the user's own activity into the sandbox transparently: the plugin intercepts the activity, derives the command from the activity input through the profile bundle, and executes it through the injected governed dispatcher, returning the bounded result to the caller. An ALLOW verdict runs the activity on the host as usual; the workflow stays clean and never imports OpenBox. The dispatcher is injected by the application; the returned `DispatchResult` is structurally validated and mapped to bounded reported terminal metadata correlated with lifecycle signals; it is not a portable signed runtime receipt or independent proof. Rejection of `executed_on_host` occurs after dispatch and cannot prevent a host attempt: zero-host deployments must enforce exact `CONSTRAIN` in Core and make the dispatcher host path unavailable or disabled. Temporal and dispatcher profile bundles must use equivalent command definitions/version because Temporal derives argv and the dispatcher independently re-admits it. No unpublished dispatcher package is a hard dependency. See [Governed sandbox commands](./docs/governed-commands.md) for the exact seam, cleanup, and replay requirements.
 
 ## Governance Verdicts
 

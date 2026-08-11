@@ -23,8 +23,6 @@ class TemporalSandboxConfig:
     heartbeat_interval_seconds: float = 10.0
     completion_events: bool = True
     otel_bridge: Any = None
-    receipt_verifier: Any = None
-    trust_application_agent: bool = False
     evaluate_at_interceptor: bool = False
 
     def __post_init__(self) -> None:
@@ -46,38 +44,6 @@ class TemporalSandboxConfig:
             or not isinstance(self.heartbeat_interval_seconds, (int, float))
             or not 0.1 <= self.heartbeat_interval_seconds <= 60
             or type(self.completion_events) is not bool
-            or type(self.trust_application_agent) is not bool
-            or (
-                self.receipt_verifier is not None
-                and (
-                    self.trust_application_agent
-                    or not callable(getattr(self.receipt_verifier, "verify", None))
-                    or self.completion_events
-                    or not callable(
-                        getattr(
-                            self.dispatcher,
-                            "dispatch_authorized_constrain",
-                            None,
-                        )
-                    )
-                )
-            )
-            or (
-                self.trust_application_agent
-                and (
-                    self.completion_events
-                    or self.receipt_verifier is not None
-                    or getattr(
-                        getattr(self.dispatcher, "_config", None),
-                        "governance",
-                        None,
-                    )
-                    is not None
-                    or not callable(
-                        getattr(self.dispatcher, "dispatch_trusted_constrain", None)
-                    )
-                )
-            )
             or (
                 self.otel_bridge is not None
                 and getattr(self.heartbeat_sink, "_otel_bridge", None)

@@ -31,54 +31,6 @@ class GovernedCommandInputError(ValueError):
 
 
 @dataclass(frozen=True)
-class GovernedCommandReceipt:
-    """Authorization envelope carried durably through Temporal history."""
-
-    schema_version: int
-    receipt_id: str
-    nonce: str
-    workflow_id: str
-    verdict: str
-    profile_id: str
-    arguments_sha256: str
-    command_sha256: str
-    asset_bundle_sha256: str
-    profile_fingerprint: str
-    issued_at: str
-    expires_at: str
-    key_id: str
-    signature: str
-
-    @classmethod
-    def from_value(cls, value: Any) -> GovernedCommandReceipt:
-        if isinstance(value, cls):
-            return value
-        if not isinstance(value, dict) or set(value) != {
-            "schema_version",
-            "receipt_id",
-            "nonce",
-            "workflow_id",
-            "verdict",
-            "profile_id",
-            "arguments_sha256",
-            "command_sha256",
-            "asset_bundle_sha256",
-            "profile_fingerprint",
-            "issued_at",
-            "expires_at",
-            "key_id",
-            "signature",
-        }:
-            raise GovernedCommandInputError("governed command receipt rejected")
-        try:
-            return cls(**value)
-        except TypeError as error:
-            raise GovernedCommandInputError(
-                "governed command receipt rejected"
-            ) from error
-
-
-@dataclass(frozen=True)
 class StructuredCommandArgument:
     name: str
     value: str | int
@@ -99,7 +51,6 @@ class StructuredCommandArgument:
 class GovernedCommandRequest:
     profile_id: str
     arguments: tuple[StructuredCommandArgument, ...]
-    receipt: GovernedCommandReceipt | None = None
     governance: dict[str, Any] | None = None
 
     def __init__(
@@ -110,7 +61,6 @@ class GovernedCommandRequest:
             | tuple[StructuredCommandArgument, ...]
             | list[StructuredCommandArgument]
         ),
-        receipt: GovernedCommandReceipt | None = None,
         governance: dict[str, Any] | None = None,
     ) -> None:
         if not isinstance(profile_id, str) or _PROFILE_ID.fullmatch(profile_id) is None:
@@ -131,8 +81,6 @@ class GovernedCommandRequest:
         names = [item.name for item in snapshot]
         if len(snapshot) > _MAX_ARGUMENTS or len(set(names)) != len(names):
             raise GovernedCommandInputError("governed command input rejected")
-        if receipt is not None and not isinstance(receipt, GovernedCommandReceipt):
-            raise GovernedCommandInputError("governed command receipt rejected")
         if governance is not None and (
             not isinstance(governance, dict)
             or not isinstance(governance.get("verdict"), str)
@@ -141,19 +89,16 @@ class GovernedCommandRequest:
             raise GovernedCommandInputError("governed command governance rejected")
         object.__setattr__(self, "profile_id", profile_id)
         object.__setattr__(self, "arguments", snapshot)
-        object.__setattr__(self, "receipt", receipt)
         object.__setattr__(self, "governance", governance)
 
     def to_history_value(self) -> dict[str, Any]:
-        """Return a bounded wire value, omitting unused authority metadata."""
+        """Return a bounded wire value."""
         value: dict[str, Any] = {
             "profile_id": self.profile_id,
             "arguments": [
                 {"name": item.name, "value": item.value} for item in self.arguments
             ],
         }
-        if self.receipt is not None:
-            value["receipt"] = self.receipt
         if self.governance is not None:
             value["governance"] = self.governance
         return value
@@ -164,28 +109,20 @@ class GovernedCommandRequest:
             return value
         if not isinstance(value, dict) or set(value) not in (
             {"profile_id", "arguments"},
-            {"profile_id", "arguments", "receipt"},
             {"profile_id", "arguments", "governance"},
-            {"profile_id", "arguments", "receipt", "governance"},
         ):
             raise GovernedCommandInputError("governed command input rejected")
         arguments = value["arguments"]
-        receipt_value = value.get("receipt")
-        receipt = (
-            None
-            if receipt_value is None
-            else GovernedCommandReceipt.from_value(receipt_value)
-        )
         governance = value.get("governance")
         if isinstance(arguments, dict):
-            return cls(value["profile_id"], arguments, receipt, governance)
+            return cls(value["profile_id"], arguments, governance)
         if isinstance(arguments, list):
             converted: list[StructuredCommandArgument] = []
             for item in arguments:
                 if not isinstance(item, dict) or set(item) != {"name", "value"}:
                     raise GovernedCommandInputError("governed command input rejected")
                 converted.append(StructuredCommandArgument(item["name"], item["value"]))
-            return cls(value["profile_id"], converted, receipt, governance)
+            return cls(value["profile_id"], converted, governance)
         raise GovernedCommandInputError("governed command input rejected")
 
 

@@ -12,12 +12,7 @@ from typing import Any
 _EXPORTS = {
     "TemporalSandboxConfig": "openbox.sandbox.adapter",
     "TemporalSandboxConfigurationError": "openbox.sandbox.adapter",
-    "TemporalHeartbeatSink": "openbox.sandbox.heartbeat",
-    "CommandProfileBundleError": "openbox.sandbox.profiles",
-    "TemporalCommandProfileBundle": "openbox.sandbox.profiles",
-    "GovernedCommandReceiptError": "openbox.sandbox.receipts",
-    "GovernedCommandReceiptVerifier": "openbox.sandbox.receipts",
-    "AipEd25519RequestSigner": "openbox.sandbox.signing",
+
     "DecimalArgument": "openbox.sandbox.registry",
     "EnumArgument": "openbox.sandbox.registry",
     "GovernedCommandDefinition": "openbox.sandbox.registry",
@@ -32,7 +27,6 @@ _EXPORTS = {
     "GOVERNED_COMMAND_ACTIVITY_TYPE": "openbox.sandbox.types",
     "GovernedCommandActivityResult": "openbox.sandbox.types",
     "GovernedCommandInputError": "openbox.sandbox.types",
-    "GovernedCommandReceipt": "openbox.sandbox.types",
     "GovernedCommandRequest": "openbox.sandbox.types",
     "GovernedCommandResultValue": "openbox.sandbox.types",
     "GovernedCommandTypedResult": "openbox.sandbox.types",
