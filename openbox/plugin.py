@@ -77,7 +77,7 @@ class OpenBoxPlugin(SimplePlugin):
         skip_signals: set[str] | None = None,
         hitl_enabled: bool = True,
         max_patch_restarts: int = 3,
-        sandbox: TemporalSandboxConfig | None = None,
+        sandbox: TemporalSandboxConfig | SandboxConfig | None = None,
         instrument_http: bool = True,
 
         instrument_databases: bool = True,
@@ -92,7 +92,24 @@ class OpenBoxPlugin(SimplePlugin):
         add_temporal_tracing: bool = True,
     ):
         from .sandbox.adapter import require_matching_governance_signing
+        from .sandbox.config import SandboxConfig, resolve_sandbox_config
 
+        if sandbox is not None and not isinstance(
+            sandbox, (TemporalSandboxConfig, SandboxConfig)
+        ):
+            raise TypeError(
+                "sandbox must be a TemporalSandboxConfig or a SandboxConfig"
+            )
+
+        if isinstance(sandbox, SandboxConfig):
+            sandbox = resolve_sandbox_config(
+                sandbox,
+                openbox_url=openbox_url,
+                openbox_api_key=openbox_api_key,
+                sdk_version=__version__,
+                core_ca_path=core_ca_path,
+                request_signer=_signer,
+            )
         require_matching_governance_signing(sandbox, agent_did)
 
         # 1. Validate API key (sync, uses urllib). Also loads the Ed25519 signer
