@@ -690,8 +690,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if dispatch_result.disposition is Disposition.EXECUTION_INDETERMINATE
                 else "GovernedCommandNotExecuted"
             )
+            message = f"Governed command terminal outcome: {error_code}"
+            if getattr(dispatch_result.error, 'detail', None):
+                message += f" ({dispatch_result.error.detail})"
             raise ApplicationError(
-                f"Governed command terminal outcome: {error_code}",
+                message,
                 type=error_type,
                 non_retryable=True,
             )
