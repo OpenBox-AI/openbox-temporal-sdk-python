@@ -671,6 +671,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 else "failed"
             ),
             dispatch_result=dispatch_result,
+            typed_result=typed_result,
             error_code=(
                 None
                 if dispatch_result.error is None
@@ -775,6 +776,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         status: str,
         dispatch_result: Any,
         error_code: str | None,
+        typed_result: Any | None = None,
     ) -> None:
         """Post ActivityCompleted when the dispatcher did not already own it.
 
@@ -816,6 +818,15 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 ),
                 "stdout_bytes": 0 if execution is None else len(execution.stdout),
                 "stderr_bytes": 0 if execution is None else len(execution.stderr),
+                "typed_result": None
+                if typed_result is None
+                else {
+                    "schema_name": typed_result.schema_name,
+                    "values": [
+                        {"name": item.name, "value": item.value}
+                        for item in typed_result.values
+                    ],
+                },
             }
         end_time = time.time()
         try:
