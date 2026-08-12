@@ -745,30 +745,34 @@ name = "openbox-temporal-sdk-python"
 version = "1.4.0"
 source = { editable = "." }
 dependencies = [
-    { name = "asyncpg" },
     { name = "httpx" },
-    { name = "mysql-connector-python" },
     { name = "openbox-sdk-python" },
     { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation-asyncpg" },
     { name = "opentelemetry-instrumentation-httpx" },
+    { name = "opentelemetry-instrumentation-requests" },
+    { name = "opentelemetry-instrumentation-urllib" },
+    { name = "opentelemetry-instrumentation-urllib3" },
+    { name = "opentelemetry-sdk" },
+    { name = "temporalio" },
+]
+
+[package.optional-dependencies]
+db = [
+    { name = "asyncpg" },
+    { name = "mysql-connector-python" },
+    { name = "opentelemetry-instrumentation-asyncpg" },
     { name = "opentelemetry-instrumentation-mysql" },
     { name = "opentelemetry-instrumentation-psycopg2" },
     { name = "opentelemetry-instrumentation-pymongo" },
     { name = "opentelemetry-instrumentation-pymysql" },
     { name = "opentelemetry-instrumentation-redis" },
-    { name = "opentelemetry-instrumentation-requests" },
     { name = "opentelemetry-instrumentation-sqlalchemy" },
     { name = "opentelemetry-instrumentation-sqlite3" },
-    { name = "opentelemetry-instrumentation-urllib" },
-    { name = "opentelemetry-instrumentation-urllib3" },
-    { name = "opentelemetry-sdk" },
     { name = "psycopg2-binary" },
     { name = "pymongo" },
     { name = "pymysql" },
     { name = "redis" },
     { name = "sqlalchemy" },
-    { name = "temporalio" },
 ]
 
 [package.dev-dependencies]
@@ -785,31 +789,32 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "asyncpg", marker = "extra == 'db'", specifier = ">=0.29.0" },
     { name = "httpx", specifier = ">=0.28.0,<1" },
-    { name = "mysql-connector-python", specifier = ">=8.0.0" },
+    { name = "mysql-connector-python", marker = "extra == 'db'", specifier = ">=8.0.0" },
     { name = "openbox-sdk-python", specifier = ">=1.2.0" },
     { name = "opentelemetry-api", specifier = ">=1.38.0,<1.40.0" },
-    { name = "opentelemetry-instrumentation-asyncpg", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-asyncpg", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-httpx", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-mysql", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-psycopg2", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-pymongo", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-pymysql", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-redis", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-mysql", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-psycopg2", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-pymongo", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-pymysql", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-redis", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-requests", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-sqlalchemy", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-sqlite3", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-sqlalchemy", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
+    { name = "opentelemetry-instrumentation-sqlite3", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-urllib", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-urllib3", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.38.0,<1.40.0" },
-    { name = "psycopg2-binary", specifier = ">=2.9.10" },
-    { name = "pymongo", specifier = ">=4.0.0" },
-    { name = "pymysql", specifier = ">=1.0.0" },
-    { name = "redis", specifier = ">=5.0.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "psycopg2-binary", marker = "extra == 'db'", specifier = ">=2.9.10" },
+    { name = "pymongo", marker = "extra == 'db'", specifier = ">=4.0.0" },
+    { name = "pymysql", marker = "extra == 'db'", specifier = ">=1.0.0" },
+    { name = "redis", marker = "extra == 'db'", specifier = ">=5.0.0" },
+    { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2.0.0" },
     { name = "temporalio", specifier = ">=1.23.0,<2" },
 ]
+provides-extras = ["db"]
 
 [package.metadata.requires-dev]
 dev = [
