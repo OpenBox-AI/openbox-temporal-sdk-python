@@ -806,6 +806,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 "profile_id": request.profile_id,
                 "disposition": dispatch_result.disposition.value,
                 "directive": dispatch_result.directive.value,
+                "sandbox_id": None if execution is None else execution.sandbox_id,
                 "exit_code": None if execution is None else execution.exit_code,
                 "timeout_status": (
                     None if execution is None else execution.timeout_status.value
