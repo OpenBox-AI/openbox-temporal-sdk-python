@@ -52,6 +52,18 @@ from .sandbox.types import (
     GovernedCommandTypedResult,
 )
 from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+
+_CONTENT_MAX_BYTES = 64 * 1024
+
+
+def _bounded_text(raw: bytes) -> str:
+    """Decode stdout/stderr for durable telemetry, bounded for storage."""
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if len(raw) > _CONTENT_MAX_BYTES:
+        text = text[:_CONTENT_MAX_BYTES] + "…(truncated)"
+    return text
 from .types import (
     GovernanceVerdictResponse,
     Verdict,
@@ -818,6 +830,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 ),
                 "stdout_bytes": 0 if execution is None else len(execution.stdout),
                 "stderr_bytes": 0 if execution is None else len(execution.stderr),
+                "stdout": None
+                if execution is None
+                else _bounded_text(execution.stdout),
+                "stderr": None
+                if execution is None
+                else _bounded_text(execution.stderr),
                 "typed_result": None
                 if typed_result is None
                 else {
