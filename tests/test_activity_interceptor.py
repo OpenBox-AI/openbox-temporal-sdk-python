@@ -11,6 +11,7 @@ from datetime import UTC
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from openbox.activity_interceptor import (
@@ -2492,11 +2493,23 @@ class TestConstrainedActivityRouting:
             }
         )
 
+        transport_attempts = []
+
+        async def transport(request):
+            transport_attempts.append(request)
+            return httpx.Response(200)
+
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+
         async def run_host_activity(input):
             await adapter.handle_constrain(
                 started_result,
                 build_core_activity_context(mock_activity_info, list(input.args)),
             )
+            adapter.raise_hook_blocked(started_result)
+            # The intercepted host request is after the hook stop and must never
+            # reach even an in-memory transport.
+            await http_client.get("https://host-action.test/intercepted")
             return {"activity": "host_result"}
 
         interceptor.next.execute_activity.side_effect = run_host_activity
@@ -2507,15 +2520,17 @@ class TestConstrainedActivityRouting:
             mock_activity.wait_for_cancelled.return_value = asyncio.Future()
             result = await interceptor.execute_activity(mock_input)
         finally:
+            await http_client.aclose()
             ctx.stop()
 
         interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
+        assert transport_attempts == []
         sandbox.dispatcher.dispatch_with_decision.assert_awaited_once()
         command, decision = sandbox.dispatcher.dispatch_with_decision.await_args.args
         assert command.kwargs["profile_id"] == "post-batch"
         assert decision["verdict"] == "constrain"
         assert decision["policy_id"] == "policy-started"
-        assert result["activity"] == "host_result"
+        assert result["activity_result"] is None
         assert result["sandbox_execution"]["status"] == "completed"
         assert result["sandbox_execution"]["profile_id"] == "post-batch"
         # ActivityCompleted returned the same profile, but the activity-scoped
@@ -2537,11 +2552,17 @@ class TestConstrainedActivityRouting:
             }
         )
 
+        host_attempts = []
+
         async def run_host_activity(input):
             context = build_core_activity_context(mock_activity_info, list(input.args))
-            await asyncio.to_thread(
-                adapter.handle_constrain_sync, started_result, context
-            )
+
+            def intercept():
+                adapter.handle_constrain_sync(started_result, context)
+                adapter.raise_hook_blocked(started_result)
+                host_attempts.append("host action ran")
+
+            await asyncio.to_thread(intercept)
             return "host_result"
 
         interceptor.next.execute_activity.side_effect = run_host_activity
@@ -2554,7 +2575,8 @@ class TestConstrainedActivityRouting:
             ctx.stop()
 
         sandbox.dispatcher.dispatch_with_decision.assert_awaited_once()
-        assert result["activity_result"] == "host_result"
+        assert host_attempts == []
+        assert result["activity_result"] is None
         assert result["sandbox_execution"]["status"] == "completed"
 
     @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from openbox_core.contracts.results import EvaluationResult
+from openbox_core.errors import GovernanceBlockedError
 
 from openbox import hook_governance
 
@@ -50,26 +51,36 @@ async def test_async_started_hook_forwards_constrain_to_framework_handler(monkey
     result = _constrain_result()
     span, handler = _configured_hook(monkeypatch, result)
 
-    await hook_governance.evaluate_async(
-        span,
-        identifier="https://example.com",
-        span_data={"stage": "started", "hook_type": "http_request"},
-    )
+    with pytest.raises(GovernanceBlockedError) as exc_info:
+        await hook_governance.evaluate_async(
+            span,
+            identifier="https://example.com",
+            span_data={"stage": "started", "hook_type": "http_request"},
+        )
 
+    assert exc_info.value.verdict.value == "constrain"
     handler.handle_constrain.assert_awaited_once_with(result)
+    hook_governance._span_processor.set_activity_abort.assert_called_once_with(
+        "wf-1", "act-1", "behavior rule matched"
+    )
 
 
 def test_sync_started_hook_forwards_constrain_to_framework_handler(monkeypatch):
     result = _constrain_result()
     span, handler = _configured_hook(monkeypatch, result)
 
-    hook_governance.evaluate_sync(
-        span,
-        identifier="https://example.com",
-        span_data={"stage": "started", "hook_type": "http_request"},
-    )
+    with pytest.raises(GovernanceBlockedError) as exc_info:
+        hook_governance.evaluate_sync(
+            span,
+            identifier="https://example.com",
+            span_data={"stage": "started", "hook_type": "http_request"},
+        )
 
+    assert exc_info.value.verdict.value == "constrain"
     handler.handle_constrain_sync.assert_called_once_with(result)
+    hook_governance._span_processor.set_activity_abort.assert_called_once_with(
+        "wf-1", "act-1", "behavior rule matched"
+    )
 
 
 @pytest.mark.asyncio

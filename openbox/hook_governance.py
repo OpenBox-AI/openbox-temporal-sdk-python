@@ -118,26 +118,49 @@ def set_constrain_handler(handler: Any) -> None:
     _constrain_handler = handler
 
 
-def _dispatch_constrain_sync(result: Any, span_data: dict[str, Any] | None) -> None:
+def _dispatch_constrain_sync(
+    result: Any,
+    span_data: dict[str, Any] | None,
+    *,
+    span: Any,
+    identifier: str,
+) -> None:
     if (
-        _constrain_handler is not None
-        and span_data is not None
+        span_data is not None
         and span_data.get("stage") == "started"
         and result.verdict.value == "constrain"
     ):
-        _constrain_handler.handle_constrain_sync(result)
+        from .types import GovernanceBlockedError
+
+        reason = result.reason or "Host action intercepted by CONSTRAIN"
+        # Match BLOCK ordering: reserve the activity abort before executing the
+        # replacement profile, then raise the action-level stop before the
+        # instrumented operation can reach its transport.
+        _set_activity_abort(span, reason)
+        if _constrain_handler is not None:
+            _constrain_handler.handle_constrain_sync(result)
+        raise GovernanceBlockedError("constrain", reason, identifier)
 
 
 async def _dispatch_constrain_async(
-    result: Any, span_data: dict[str, Any] | None
+    result: Any,
+    span_data: dict[str, Any] | None,
+    *,
+    span: Any,
+    identifier: str,
 ) -> None:
     if (
-        _constrain_handler is not None
-        and span_data is not None
+        span_data is not None
         and span_data.get("stage") == "started"
         and result.verdict.value == "constrain"
     ):
-        await _constrain_handler.handle_constrain(result)
+        from .types import GovernanceBlockedError
+
+        reason = result.reason or "Host action intercepted by CONSTRAIN"
+        _set_activity_abort(span, reason)
+        if _constrain_handler is not None:
+            await _constrain_handler.handle_constrain(result)
+        raise GovernanceBlockedError("constrain", reason, identifier)
 
 
 def _get_sync_client() -> httpx.Client:
@@ -448,7 +471,9 @@ def evaluate_sync(
             data.setdefault("verdict", result.verdict.value)
             data.setdefault("reason", result.reason)
             _handle_verdict(data, identifier, span=span)
-            _dispatch_constrain_sync(result, span_data)
+            _dispatch_constrain_sync(
+                result, span_data, span=span, identifier=identifier
+            )
         return
 
     from .request_signing import prepare_signed_request, send_sync
@@ -522,7 +547,9 @@ async def evaluate_async(
             data.setdefault("verdict", result.verdict.value)
             data.setdefault("reason", result.reason)
             _handle_verdict(data, identifier, span=span)
-            await _dispatch_constrain_async(result, span_data)
+            await _dispatch_constrain_async(
+                result, span_data, span=span, identifier=identifier
+            )
         return
 
     from .request_signing import prepare_signed_request, send_async

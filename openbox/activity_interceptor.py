@@ -1384,14 +1384,27 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     result = await self.next.execute_activity(input)
                     activity_output = _serialize_value(result)
             except GovernanceBlockedError as e:
-                status = "failed"
-                error = {
-                    "type": "GovernanceBlockedError",
-                    "message": str(e),
-                    "verdict": e.verdict,
-                    "url": e.url,
-                }
-                self._handle_hook_governance_error(e, info)
+                if (
+                    e.verdict is Verdict.CONSTRAIN
+                    and key in self._behavioral_dispatch_tasks
+                ):
+                    # The started hook dispatched the rule's replacement profile
+                    # and then raised the normal action-level stop. Consume only
+                    # this intercepted operation: the activity remains successful
+                    # and completion attaches the retained sandbox outcome.
+                    activity.logger.info(
+                        "Host action intercepted by behavioral CONSTRAIN; "
+                        "using sandbox execution outcome"
+                    )
+                else:
+                    status = "failed"
+                    error = {
+                        "type": "GovernanceBlockedError",
+                        "message": str(e),
+                        "verdict": e.verdict,
+                        "url": e.url,
+                    }
+                    self._handle_hook_governance_error(e, info)
             except Exception as e:
                 status = "failed"
                 error = {"type": type(e).__name__, "message": str(e)}

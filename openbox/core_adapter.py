@@ -31,6 +31,7 @@ from typing import Any, NoReturn
 from openbox_core.context import ContextStore, activity_scope
 from openbox_core.contracts.context import ActivityContext
 from openbox_core.contracts.results import EvaluationResult, Verdict
+from openbox_core.errors import GovernanceBlockedError
 
 from .errors import (
     GOVERNANCE_BLOCK_ERROR_TYPE,
@@ -169,6 +170,15 @@ class TemporalFrameworkAdapter:
         self._raise_application_error(result)
 
     def raise_hook_blocked(self, result: EvaluationResult) -> NoReturn:
+        # A started CONSTRAIN has already dispatched its replacement profile.
+        # Surface the same action-level stop object used by legacy hook wrappers
+        # so the activity interceptor can consume the intercepted operation and
+        # complete with the sandbox outcome instead of failing the activity.
+        if result.verdict is Verdict.CONSTRAIN:
+            raise GovernanceBlockedError(
+                result.verdict, result.reason or "Host action intercepted by CONSTRAIN"
+            )
+
         # Started hooks are wire-represented as ActivityStarted + hook_trigger=
         # True (the stage rides in hook_stage) — same patch-first ordering.
         req = patch_request(
