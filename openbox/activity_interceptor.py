@@ -1033,6 +1033,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         try:
             if verdict_response.verdict == Verdict.CONSTRAIN:
+                # A completed CONSTRAIN arrives after the activity has already
+                # executed, so it can only affect future work. Never fail or
+                # attempt to reroute the completed activity, even when no
+                # sandbox is configured.
+                if context == "activity_end":
+                    return
                 if self._sandbox is None:
                     from temporalio.exceptions import ApplicationError
 
@@ -1044,10 +1050,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # With a sandbox configuration, a CONSTRAIN verdict at
                 # ActivityStarted is enforced by _execute_constrained_activity,
                 # which routes the activity into the sandbox and returns the
-                # result before this branch runs. A completed CONSTRAIN verdict
-                # arrives only after the activity has already executed (on the
-                # host or in the sandbox), so routing is no longer possible —
-                # accept it as a no-op.
+                # result before this branch runs.
                 return
             verdict_result = enforce_verdict(verdict_response, context)
             if verdict_result.requires_hitl and not should_skip_hitl(

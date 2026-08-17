@@ -2463,6 +2463,36 @@ class TestConstrainedActivityRouting:
         sandbox.dispatcher.dispatch_with_decision.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_completed_constrain_without_sandbox_is_noop(
+        self, state, mock_activity_info
+    ):
+        """A completion-stage CONSTRAIN cannot reroute an activity that already
+        ran and must not fail solely because no sandbox is configured."""
+        client = make_verdict_client(
+            GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        )
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                make_constrain_response(),
+            ]
+        )
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), next_result="host_result", client=client
+        )
+        mock_input = make_input(["arg1"])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert result == "host_result"
+        interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
+        assert client.evaluate_event.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_completed_constrain_with_sandbox_is_noop(
         self, state, mock_activity_info, fake_governed_dispatcher
     ):
