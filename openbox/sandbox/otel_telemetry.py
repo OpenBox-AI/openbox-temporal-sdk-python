@@ -90,8 +90,10 @@ _OUTCOMES = frozenset(
 )
 
 
-def parse_image_digest(template: str) -> str:
-    """Return only a lowercase digest from one full immutable image reference."""
+def parse_image_digest(template: str) -> str | None:
+    """Return an OCI digest, or no image evidence for the native srt template."""
+    if template == "native://srt":
+        return None
     if not isinstance(template, str):
         raise ValueError("immutable image template rejected")
     matched = _IMAGE.fullmatch(template)
@@ -142,7 +144,7 @@ class GovernedCommandTerminalRecord:
     profile_id: str
     workflow_type: str
     task_queue: str
-    image_digest: str
+    image_digest: str | None
     sandbox_provider: str | None
     parent_span_context: Any
     started_ns: int
@@ -666,8 +668,9 @@ class GovernedCommandTelemetryBridge:
                 "openbox.governed.profile_id": record.profile_id,
                 "openbox.governed.workflow_type": record.workflow_type,
                 "openbox.governed.task_queue": record.task_queue,
-                "openbox.governed.image_digest": record.image_digest,
             }
+            if record.image_digest is not None:
+                attributes["openbox.governed.image_digest"] = record.image_digest
             # `openbox.hook.type` identifies the OTel event category, not the
             # dispatcher's disposition; downstream validators require it to be
             # present on every governed_command terminal span, including
