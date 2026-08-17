@@ -235,6 +235,7 @@ class OpenBoxPlugin(SimplePlugin):
             sandbox=sandbox,
             state=self._state,
         )
+        self._runtime.adapter.set_constrain_handler(self._activity_interceptor)
         interceptors: list[Any] = [
             self._activity_interceptor,
             GovernanceInterceptor(

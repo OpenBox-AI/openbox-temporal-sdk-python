@@ -80,6 +80,7 @@ class TemporalFrameworkAdapter:
         hitl_enabled: bool = True,
         skip_hitl_activity_types: set | None = None,
         context_store: ContextStore | None = None,
+        constrain_handler: Any | None = None,
     ):
         self._state = state
         self._hitl_enabled = hitl_enabled
@@ -87,6 +88,16 @@ class TemporalFrameworkAdapter:
         self._store = (
             context_store if context_store is not None else _core_context_store
         )
+        self._constrain_handler = constrain_handler
+
+    def set_constrain_handler(self, handler: Any) -> None:
+        """Wire the activity interceptor's behavioral sandbox bridge.
+
+        Worker composition creates the shared runtime before Temporal asks the
+        interceptor factory for its inbound interceptor, so this binding is set
+        once during plugin construction.
+        """
+        self._constrain_handler = handler
 
     async def handle_approval(self, result: EvaluationResult) -> None:
         """Async hook REQUIRE_APPROVAL -> Temporal's retry-based HITL loop.
@@ -102,6 +113,22 @@ class TemporalFrameworkAdapter:
         """Sync hook seam — same retry-based flow with the span-resolved context
         (ambient lookup can miss in user-spawned threads)."""
         self._pending_approval_or_block(result, context)
+
+    async def handle_constrain(
+        self, result: EvaluationResult, context: ActivityContext | None = None
+    ) -> None:
+        """Dispatch a started-hook behavioral profile through the activity bridge."""
+        if self._constrain_handler is None:
+            return
+        await self._constrain_handler.handle_constrain(result, context)
+
+    def handle_constrain_sync(
+        self, result: EvaluationResult, context: ActivityContext | None = None
+    ) -> None:
+        """Sync counterpart used by requests/DB/file preflight hooks."""
+        if self._constrain_handler is None:
+            return
+        self._constrain_handler.handle_constrain_sync(result, context)
 
     def _pending_approval_or_block(
         self, result: EvaluationResult, context: ActivityContext | None = None
