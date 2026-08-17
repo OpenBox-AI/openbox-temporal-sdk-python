@@ -108,8 +108,17 @@ class OpenBoxPlugin(SimplePlugin):
 
         if isinstance(sandbox, SandboxConfig):
             from .config import get_global_config
+            from .sandbox.signing import AipEd25519RequestSigner
 
-            _signer: Any = get_global_config().get_signer()
+            _global_config = get_global_config()
+            _signer: Any = _global_config.get_signer()
+            # The global config stores the RAW Ed25519 key object; the
+            # dispatcher's governance config requires the GovernanceRequestSigner
+            # protocol (agent_did + sign_headers). Wrap it.
+            if _signer is not None and _global_config.agent_did:
+                _signer = AipEd25519RequestSigner(
+                    _global_config.agent_did, _signer
+                )
             sandbox = resolve_sandbox_config(
                 sandbox,
                 openbox_url=openbox_url,
