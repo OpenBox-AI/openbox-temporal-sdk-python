@@ -210,6 +210,7 @@ class OpenBoxPlugin(SimplePlugin):
         from . import hook_governance as _hook_governance
 
         _hook_governance.set_evaluation_client(self._runtime.client)
+        _hook_governance.set_constrain_handler(self._runtime.adapter)
 
         # 5. Create interceptors
         from .activity_interceptor import ActivityGovernanceInterceptor
