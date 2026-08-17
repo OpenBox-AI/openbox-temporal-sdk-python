@@ -337,7 +337,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if binding is None or verdict.profile_id is None:
             return
         _, info, task_headers = binding
-        task = self._behavioral_dispatch_task(info, verdict, task_headers)
+        task = self._behavioral_dispatch_task(
+            info, verdict, task_headers, self._trigger_span_id(context)
+        )
         await asyncio.shield(task)
 
     def handle_constrain_sync(
@@ -357,7 +359,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             # A synchronous library call can run directly on an async activity's
             # loop. Reserve the once-guard now; completion awaits the task before
             # attaching its outcome.
-            self._behavioral_dispatch_task(info, verdict, task_headers)
+            self._behavioral_dispatch_task(
+                info, verdict, task_headers, self._trigger_span_id(context)
+            )
             return
         future = asyncio.run_coroutine_threadsafe(
             self.handle_constrain(result, context), loop
@@ -375,6 +379,20 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         )
 
     @staticmethod
+    def _trigger_span_id(context: ActivityContext | None) -> str | None:
+        metadata = getattr(context, "metadata", {}) or {}
+        value = getattr(context, "trigger_span_id", None) or metadata.get(
+            "openbox.trigger_span_id"
+        )
+        if (
+            isinstance(value, str)
+            and len(value) == 16
+            and all(character in "0123456789abcdef" for character in value)
+        ):
+            return value
+        return None
+
+    @staticmethod
     def _behavioral_key(info: Any) -> tuple[str, str, str]:
         return (
             info.workflow_id or "",
@@ -387,13 +405,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info: Any,
         verdict: GovernanceVerdictResponse,
         task_headers: Any,
+        trigger_span_id: str | None = None,
     ) -> asyncio.Task[dict[str, Any]]:
         """Return the activity-scoped once-guard shared by both verdict stages."""
         key = self._behavioral_key(info)
         task = self._behavioral_dispatch_tasks.get(key)
         if task is None:
             task = asyncio.create_task(
-                self._dispatch_behavioral_profile(info, verdict, task_headers)
+                self._dispatch_behavioral_profile(
+                    info, verdict, task_headers, trigger_span_id
+                )
             )
             self._behavioral_dispatch_tasks[key] = task
         return task
@@ -548,6 +569,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         *,
         emit_completion: bool = True,
         clear_activity_context: bool = True,
+        parent_span_id: str | None = None,
     ) -> Any:
         """Route a CONSTRAIN verdict on a user activity into the sandbox.
 
@@ -598,6 +620,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             task_queue=info.task_queue,
             attempt=info.attempt,
             arguments={item.name: item.value for item in request.arguments},
+            parent_span_id=parent_span_id,
         )
         telemetry_owner = None
         if self._sandbox.otel_bridge is not None:
@@ -861,6 +884,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info: Any,
         verdict_response: GovernanceVerdictResponse,
         task_headers: Any,
+        trigger_span_id: str | None,
     ) -> dict[str, Any]:
         """Run a behavior rule's zero-input registry command in a sandbox."""
         profile_id = verdict_response.profile_id
@@ -880,6 +904,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 verdict_response,
                 emit_completion=False,
                 clear_activity_context=False,
+                parent_span_id=trigger_span_id,
             )
             serialized_result = _serialize_value(sandbox_result)
             if getattr(sandbox_result, "disposition", None) != "executed_in_sandbox":

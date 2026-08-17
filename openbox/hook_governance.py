@@ -118,6 +118,60 @@ def set_constrain_handler(handler: Any) -> None:
     _constrain_handler = handler
 
 
+def _trigger_activity_context(
+    span: Any, span_data: dict[str, Any] | None
+) -> Any | None:
+    """Carry the triggering hook span id through the framework callback."""
+    from dataclasses import replace
+
+    from openbox_core.contracts.context import ActivityContext
+
+    from .core_adapter import get_core_context_store
+
+    context = get_core_context_store().current_activity_context()
+    if context is None and _span_processor is not None:
+        span_context = (
+            span.get_span_context()
+            if hasattr(span, "get_span_context")
+            else getattr(span, "context", None)
+        )
+        trace_id = getattr(span_context, "trace_id", None)
+        raw = (
+            _span_processor.get_activity_context_by_trace(trace_id)
+            if isinstance(trace_id, int)
+            else None
+        )
+        if raw is not None:
+            context = ActivityContext(
+                workflow_id=raw.get("workflow_id"),
+                run_id=raw.get("run_id"),
+                workflow_type=raw.get("workflow_type"),
+                task_queue=raw.get("task_queue"),
+                activity_id=raw.get("activity_id"),
+                activity_type=raw.get("activity_type"),
+                activity_input=raw.get("activity_input"),
+                multi_agent_session_id=raw.get("multi_agent_session_id"),
+                metadata={
+                    key: raw[key]
+                    for key in ("attempt", "source")
+                    if key in raw
+                },
+            )
+    if context is None:
+        return None
+
+    trigger_span_id = (span_data or {}).get("span_id")
+    if not isinstance(trigger_span_id, str) or len(trigger_span_id) != 16:
+        trigger_span_id = extract_span_context(span)[0]
+    return replace(
+        context,
+        metadata={
+            **context.metadata,
+            "openbox.trigger_span_id": trigger_span_id,
+        },
+    )
+
+
 def _dispatch_constrain_sync(
     result: Any,
     span_data: dict[str, Any] | None,
@@ -138,7 +192,9 @@ def _dispatch_constrain_sync(
         # instrumented operation can reach its transport.
         _set_activity_abort(span, reason)
         if _constrain_handler is not None:
-            _constrain_handler.handle_constrain_sync(result)
+            _constrain_handler.handle_constrain_sync(
+                result, _trigger_activity_context(span, span_data)
+            )
         raise GovernanceBlockedError("constrain", reason, identifier)
 
 
@@ -159,7 +215,9 @@ async def _dispatch_constrain_async(
         reason = result.reason or "Host action intercepted by CONSTRAIN"
         _set_activity_abort(span, reason)
         if _constrain_handler is not None:
-            await _constrain_handler.handle_constrain(result)
+            await _constrain_handler.handle_constrain(
+                result, _trigger_activity_context(span, span_data)
+            )
         raise GovernanceBlockedError("constrain", reason, identifier)
 
 

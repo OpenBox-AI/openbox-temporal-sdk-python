@@ -10,7 +10,9 @@ from openbox import hook_governance
 
 def _configured_hook(monkeypatch, result):
     span = Mock()
-    span.get_span_context.return_value = SimpleNamespace(trace_id=123)
+    span.get_span_context.return_value = SimpleNamespace(
+        trace_id=123, span_id=0x00F067AA0BA902B7
+    )
 
     processor = Mock()
     processor.get_activity_abort.return_value = None
@@ -59,7 +61,10 @@ async def test_async_started_hook_forwards_constrain_to_framework_handler(monkey
         )
 
     assert exc_info.value.verdict.value == "constrain"
-    handler.handle_constrain.assert_awaited_once_with(result)
+    handler.handle_constrain.assert_awaited_once()
+    forwarded_result, context = handler.handle_constrain.await_args.args
+    assert forwarded_result is result
+    assert context.metadata["openbox.trigger_span_id"] == "00f067aa0ba902b7"
     hook_governance._span_processor.set_activity_abort.assert_called_once_with(
         "wf-1", "act-1", "behavior rule matched"
     )
@@ -77,7 +82,10 @@ def test_sync_started_hook_forwards_constrain_to_framework_handler(monkeypatch):
         )
 
     assert exc_info.value.verdict.value == "constrain"
-    handler.handle_constrain_sync.assert_called_once_with(result)
+    handler.handle_constrain_sync.assert_called_once()
+    forwarded_result, context = handler.handle_constrain_sync.call_args.args
+    assert forwarded_result is result
+    assert context.metadata["openbox.trigger_span_id"] == "00f067aa0ba902b7"
     hook_governance._span_processor.set_activity_abort.assert_called_once_with(
         "wf-1", "act-1", "behavior rule matched"
     )

@@ -6,7 +6,7 @@ import enum as _enum
 import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2502,10 +2502,17 @@ class TestConstrainedActivityRouting:
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
 
         async def run_host_activity(input):
-            await adapter.handle_constrain(
-                started_result,
-                build_core_activity_context(mock_activity_info, list(input.args)),
+            activity_context = build_core_activity_context(
+                mock_activity_info, list(input.args)
             )
+            trigger_context = replace(
+                activity_context,
+                metadata={
+                    **activity_context.metadata,
+                    "openbox.trigger_span_id": "00f067aa0ba902b7",
+                },
+            )
+            await adapter.handle_constrain(started_result, trigger_context)
             adapter.raise_hook_blocked(started_result)
             # The intercepted host request is after the hook stop and must never
             # reach even an in-memory transport.
@@ -2528,6 +2535,7 @@ class TestConstrainedActivityRouting:
         sandbox.dispatcher.dispatch_with_decision.assert_awaited_once()
         command, decision = sandbox.dispatcher.dispatch_with_decision.await_args.args
         assert command.kwargs["profile_id"] == "post-batch"
+        assert command.kwargs["parent_span_id"] == "00f067aa0ba902b7"
         assert decision["verdict"] == "constrain"
         assert decision["policy_id"] == "policy-started"
         assert result["activity_result"] is None
