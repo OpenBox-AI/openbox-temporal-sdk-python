@@ -21,7 +21,8 @@ import json
 import time
 import uuid
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any, Literal, NoReturn
+from types import SimpleNamespace
+from typing import Any, Literal, NoReturn, cast
 
 from opentelemetry import trace
 from temporalio import activity
@@ -52,6 +53,13 @@ from .sandbox.types import (
     GovernedCommandTypedResult,
 )
 from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+from .types import (
+    GovernanceVerdictResponse,
+    Verdict,
+    WorkflowEventType,
+)
+from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .verdict_handler import enforce_verdict
 
 _CONTENT_MAX_BYTES = 64 * 1024
 
@@ -64,13 +72,6 @@ def _bounded_text(raw: bytes) -> str:
     if len(raw) > _CONTENT_MAX_BYTES:
         text = text[:_CONTENT_MAX_BYTES] + "…(truncated)"
     return text
-from .types import (
-    GovernanceVerdictResponse,
-    Verdict,
-    WorkflowEventType,
-)
-from .types import rfc3339_now as _rfc3339_now  # shared utility
-from .verdict_handler import enforce_verdict
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -425,6 +426,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             activity_output,
             result,
             session_id=session_id,
+            task_headers=input.headers,
         )
 
         return result
@@ -435,6 +437,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info,
         start_time: float,
         verdict_response: GovernanceVerdictResponse,
+        *,
+        emit_completion: bool = True,
     ) -> Any:
         """Route a CONSTRAIN verdict on a user activity into the sandbox.
 
@@ -618,6 +622,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     status="cancelled",
                     dispatch_result=None,
                     error_code="cancelled",
+                    emit=emit_completion,
                 )
             except BaseException:
                 pass
@@ -631,6 +636,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 status="failed",
                 dispatch_result=dispatch_result,
                 error_code="typed_result_invalid",
+                emit=emit_completion,
             )
             raise ApplicationError(
                 "Governed command typed result rejected",
@@ -646,6 +652,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 status="failed",
                 dispatch_result=None,
                 error_code="dispatcher_failure",
+                emit=emit_completion,
             )
             raise ApplicationError(
                 "Governed dispatcher failed",
@@ -689,6 +696,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if dispatch_result.error is None
                 else dispatch_result.error.code.value
             ),
+            emit=emit_completion,
         )
         if dispatch_result.directive is Directive.HALT:
             await _terminate_workflow_for_halt(
@@ -736,6 +744,66 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             non_retryable=True,
         )
 
+    async def _execute_behavioral_profile(
+        self,
+        info,
+        verdict_response: GovernanceVerdictResponse,
+        activity_result_value: Any,
+        task_headers: Any,
+    ) -> Any:
+        """Run a behavior rule's zero-input registry command once in a sandbox."""
+        profile_id = verdict_response.profile_id
+        assert profile_id is not None
+        try:
+            decision = _verdict_decision(verdict_response)
+            decision["constraints"] = ["run_in_sandbox"]
+            request = GovernedCommandRequest(profile_id, {}, governance=decision)
+            governed_input = cast(
+                ExecuteActivityInput,
+                SimpleNamespace(args=(request,), headers=task_headers or {}),
+            )
+            sandbox_result = await self._execute_constrained_activity(
+                governed_input,
+                info,
+                time.time(),
+                verdict_response,
+                emit_completion=False,
+            )
+            serialized_result = _serialize_value(sandbox_result)
+            if getattr(sandbox_result, "disposition", None) != "executed_in_sandbox":
+                activity.logger.warning(
+                    "Behavioral CONSTRAIN profile dispatch rejected non-sandbox outcome"
+                )
+                outcome = {
+                    "status": "failed",
+                    "profile_id": profile_id,
+                    "error": {
+                        "type": "SandboxHostFallbackRejected",
+                        "message": "behavioral profile command did not execute in a sandbox",
+                    },
+                    "result": serialized_result,
+                }
+            else:
+                outcome = {"status": "completed", **serialized_result}
+        except Exception as error:
+            activity.logger.warning(
+                f"Behavioral CONSTRAIN profile dispatch failed: {error}"
+            )
+            outcome = {
+                "status": "failed",
+                "profile_id": profile_id,
+                "error": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                },
+            }
+
+        if isinstance(activity_result_value, dict):
+            result = dict(activity_result_value)
+        else:
+            result = {"activity_result": activity_result_value}
+        result["sandbox_execution"] = outcome
+        return result
 
     async def _consume_completed_halt(self, info) -> None:
         """Exception-path safety net: a completed-hook stop recorded during user
@@ -789,6 +857,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         dispatch_result: Any,
         error_code: str | None,
         typed_result: Any | None = None,
+        emit: bool = True,
     ) -> None:
         """Post ActivityCompleted when the dispatcher did not already own it.
 
@@ -800,7 +869,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         to post ActivityCompleted, because `_dispatch_host` only emits local
         telemetry.
         """
-        if self._sandbox is None or not self._sandbox.completion_events:
+        if not emit or self._sandbox is None or not self._sandbox.completion_events:
             return
         dispatcher_config = getattr(self._sandbox.dispatcher, "_config", None)
         disposition_value = getattr(
@@ -1254,6 +1323,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_output,
         result,
         session_id=None,
+        task_headers=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
         # Completed-hook stop recorded run-scoped by the adapter (BLOCK/HALT), plus
@@ -1319,8 +1389,22 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if completed_verdict:
             await self._enforce_verdict(completed_verdict, info, "activity_end")
 
-        # Apply output redaction
-        return self._apply_output_redaction(completed_verdict, result)
+        # Apply output redaction before attaching a behavioral sandbox outcome,
+        # so guardrails cannot accidentally replace the execution evidence.
+        result = self._apply_output_redaction(completed_verdict, result)
+
+        if (
+            completed_verdict is not None
+            and completed_verdict.verdict == Verdict.CONSTRAIN
+            and completed_verdict.profile_id is not None
+        ):
+            result = await self._execute_behavioral_profile(
+                info,
+                completed_verdict,
+                result,
+                task_headers,
+            )
+        return result
 
     # ─── Event sending ────────────────────────────────────────────────────
 

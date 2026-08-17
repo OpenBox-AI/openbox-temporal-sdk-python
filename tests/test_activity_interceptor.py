@@ -2336,6 +2336,7 @@ def make_mock_sandbox(dispatch_result=None):
 def make_sandbox_dispatch_result():
     """Build the minimal terminal dispatch result the interceptor maps."""
     execution = SimpleNamespace(
+        sandbox_id="sandbox-1",
         exit_code=0,
         stdout=b'{"rows": 7}',
         stderr=b"",
@@ -2350,12 +2351,13 @@ def make_sandbox_dispatch_result():
     )
 
 
-def make_constrain_response():
+def make_constrain_response(*, profile_id=None):
     return GovernanceVerdictResponse(
         verdict=Verdict.CONSTRAIN,
         reason="run in sandbox",
         policy_id="policy-1",
         risk_score=0.7,
+        profile_id=profile_id,
     )
 
 
@@ -2461,6 +2463,102 @@ class TestConstrainedActivityRouting:
         assert result == "host_result"
         interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
         sandbox.dispatcher.dispatch_with_decision.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_completed_behavioral_constrain_dispatches_profile_once(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        sandbox = make_mock_sandbox(make_sandbox_dispatch_result())
+        client = make_verdict_client(
+            GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        )
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                make_constrain_response(profile_id="post-batch"),
+            ]
+        )
+        interceptor = make_interceptor(
+            state,
+            GovernanceConfig(),
+            next_result={"activity": "host_result"},
+            client=client,
+        )
+        interceptor._sandbox = sandbox
+        mock_input = make_input(["arg1"])
+
+        ctx, mock_activity = patched_activity(mock_activity_info)
+        try:
+            mock_activity.wait_for_cancelled.return_value = asyncio.Future()
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
+        sandbox.dispatcher.dispatch_with_decision.assert_awaited_once()
+        command, decision = (
+            sandbox.dispatcher.dispatch_with_decision.await_args.args
+        )
+        assert command.kwargs["profile_id"] == "post-batch"
+        assert command.kwargs["argv"] == ("/usr/bin/reconcile", "b-1")
+        assert command.kwargs["arguments"] == {}
+        assert decision["verdict"] == "constrain"
+        assert decision["policy_id"] == "policy-1"
+        assert decision["reason"] == "run in sandbox"
+        assert decision["constraints"] == ["run_in_sandbox"]
+        request = sandbox.profiles.derive.call_args.args[0]
+        assert request.profile_id == "post-batch"
+        assert request.arguments == ()
+        assert result["activity"] == "host_result"
+        assert result["sandbox_execution"] == {
+            "status": "completed",
+            "profile_id": "post-batch",
+            "disposition": "executed_in_sandbox",
+            "exit_code": 0,
+            "timeout_status": "completed_within_timeout",
+            "cleanup_status": "deleted",
+            "stdout_bytes": len(b'{"rows": 7}'),
+            "stderr_bytes": 0,
+            "typed_result": None,
+        }
+        # The behavioral dispatch does not post another completion evaluation,
+        # preventing a completion verdict from recursively dispatching again.
+        assert client.evaluate_event.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_completed_behavioral_constrain_attaches_dispatch_failure(
+        self, state, mock_activity_info
+    ):
+        client = make_verdict_client(
+            GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        )
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                make_constrain_response(profile_id="post-batch"),
+            ]
+        )
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), next_result="host_result", client=client
+        )
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(make_input(["arg1"]))
+        finally:
+            ctx.stop()
+
+        assert result["activity_result"] == "host_result"
+        assert result["sandbox_execution"]["status"] == "failed"
+        assert result["sandbox_execution"]["profile_id"] == "post-batch"
+        assert result["sandbox_execution"]["error"] == {
+            "type": "ApplicationError",
+            "message": (
+                "GovernedCommandConfigurationRequired: "
+                "Governed command support is not configured"
+            ),
+        }
+        assert client.evaluate_event.await_count == 2
 
     @pytest.mark.asyncio
     async def test_completed_constrain_without_sandbox_is_noop(
