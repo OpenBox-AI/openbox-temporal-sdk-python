@@ -680,7 +680,7 @@ class GovernedCommandTelemetryBridge:
                 record.disposition == "executed_in_sandbox"
                 and record.sandbox_provider is not None
             ):
-                attributes["sandbox.provider"] = record.sandbox_provider
+                attributes["openbox.sandbox.provider"] = record.sandbox_provider
             span = tracer.start_span(  # type: ignore[attr-defined]
                 "openbox.governed_command",
                 context=parent,
