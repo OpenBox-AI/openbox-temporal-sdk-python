@@ -2409,6 +2409,13 @@ class TestConstrainedActivityRouting:
         assert command.kwargs["run_id"] == "test-run-id"
         assert command.kwargs["activity_id"] == "test-activity-id"
         assert command.kwargs["timeout_seconds"] == 30
+        parent_span_id = command.kwargs["parent_span_id"]
+        assert isinstance(parent_span_id, str)
+        assert len(parent_span_id) == 16
+        started_payload = client.evaluate_event.await_args_list[0].args[0]
+        assert started_payload["metadata"] == {
+            "openbox.activity_root_span_id": parent_span_id,
+        }
         assert decision["verdict"] == "constrain"
         assert decision["policy_id"] == "policy-1"
         # The bounded sandbox result is returned to the caller.

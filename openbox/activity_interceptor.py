@@ -17,6 +17,7 @@ This is different from workflow interceptors which must maintain determinism.
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -64,6 +65,29 @@ from .types import rfc3339_now as _rfc3339_now  # shared utility
 from .verdict_handler import enforce_verdict
 
 _CONTENT_MAX_BYTES = 64 * 1024
+_ACTIVITY_ROOT_SPAN_METADATA_KEY = "openbox.activity_root_span_id"
+
+
+def _activity_root_span_id(info: Any) -> str:
+    """Return the activity anchor used by both Core fallback and SDK evidence."""
+    try:
+        span_context = trace.get_current_span().get_span_context()
+        span_id = getattr(span_context, "span_id", 0)
+        if isinstance(span_id, int) and span_id != 0:
+            return format(span_id, "016x")
+    except Exception:
+        pass
+
+    identity = "|".join(
+        (
+            info.workflow_id or "",
+            info.workflow_run_id or "",
+            info.activity_id or "",
+            str(info.attempt or 1),
+            "activity_root",
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:16]
 
 
 def _bounded_text(raw: bytes) -> str:
@@ -457,6 +481,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         workflow_run_id = info.workflow_run_id or ""
         workflow_type = info.workflow_type or ""
         task_queue = info.task_queue or ""
+        activity_root_span_id = _activity_root_span_id(info)
 
         # Clear stale state and register fresh buffer
         self._span_processor.clear_activity_abort(workflow_id, activity_id)
@@ -479,6 +504,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 WorkflowEventType.ACTIVITY_STARTED.value,
                 activity_input=activity_input,
                 session_id=session_id,
+                metadata={
+                    _ACTIVITY_ROOT_SPAN_METADATA_KEY: activity_root_span_id,
+                },
             )
 
         # Buffer activity context for hook-level governance
@@ -512,7 +540,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 and self._sandbox is not None
             ):
                 return await self._execute_constrained_activity(
-                    input, info, start_time, governance_verdict
+                    input,
+                    info,
+                    start_time,
+                    governance_verdict,
+                    parent_span_id=activity_root_span_id,
                 )
             await self._enforce_verdict(governance_verdict, info, "activity_start")
 
