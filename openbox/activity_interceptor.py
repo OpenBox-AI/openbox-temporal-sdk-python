@@ -80,7 +80,7 @@ def _sandbox_dispatch_id(info: Any, profile_id: str) -> str:
             profile_id,
         )
     ).encode("utf-8")
-    return hashlib.sha256(identity).hexdigest()
+    return str(uuid.UUID(bytes=hashlib.sha256(identity).digest()[:16], version=4))
 
 
 def _activity_root_span_id(info: Any) -> str:

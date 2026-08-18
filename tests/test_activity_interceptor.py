@@ -2376,7 +2376,7 @@ def test_sandbox_dispatch_identity_is_stable_per_attempt_and_profile(
     mock_activity_info.attempt = 2
     retry = _sandbox_dispatch_id(mock_activity_info, "post-batch")
     assert retry != first
-    assert len(first) == len(retry) == 64
+    assert len(first) == len(retry) == 36
 
 
 class TestConstrainedActivityRouting:
@@ -2598,7 +2598,7 @@ class TestConstrainedActivityRouting:
         assert command.kwargs["profile_id"] == "post-batch"
         assert command.kwargs["parent_span_id"] == "00f067aa0ba902b7"
         assert command.kwargs["dispatch_id"] == (
-            "7dd227cc02581e4bad9c42d58cecedb08dc76b1defe4ad1b4074d69dcf99447f"
+            "7dd227cc-0258-4e4b-ad9c-42d58cecedb0"
         )
         assert decision["verdict"] == "constrain"
         assert decision["policy_id"] == "policy-started"
