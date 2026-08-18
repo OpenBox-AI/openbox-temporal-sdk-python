@@ -19,6 +19,7 @@ from openbox.activity_interceptor import (
     _ActivityInterceptor,
     _deep_update_dataclass,
     _rfc3339_now,
+    _sandbox_dispatch_id,
     _serialize_value,
 )
 from openbox.config import GovernanceConfig
@@ -2366,6 +2367,18 @@ def make_constrain_response(*, profile_id=None):
     )
 
 
+def test_sandbox_dispatch_identity_is_stable_per_attempt_and_profile(
+    mock_activity_info,
+):
+    first = _sandbox_dispatch_id(mock_activity_info, "post-batch")
+    assert _sandbox_dispatch_id(mock_activity_info, "post-batch") == first
+
+    mock_activity_info.attempt = 2
+    retry = _sandbox_dispatch_id(mock_activity_info, "post-batch")
+    assert retry != first
+    assert len(first) == len(retry) == 64
+
+
 class TestConstrainedActivityRouting:
     """CONSTRAIN routes the user's activity into the sandbox transparently."""
 
@@ -2426,6 +2439,44 @@ class TestConstrainedActivityRouting:
         assert result.stdout_bytes == len(b'{"rows": 7}')
         # ActivityStarted + the wrapper's ActivityCompleted were both posted.
         assert client.evaluate_event.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_policy_constrain_dispatch_failure_fails_activity_with_evidence(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        failed = make_sandbox_dispatch_result()
+        failed.error = SimpleNamespace(
+            code=SimpleNamespace(value="sandbox_exec_not_dispatched"),
+            detail="egress to blocked.example denied by sandbox policy",
+        )
+        sandbox = make_mock_sandbox(failed)
+        sandbox.otel_bridge = MagicMock()
+        sandbox.otel_bridge.begin.return_value = "span-owner"
+        client = make_verdict_client(make_constrain_response())
+        interceptor = make_interceptor(state, GovernanceConfig(), client=client)
+        interceptor._sandbox = sandbox
+        mock_input = make_input(
+            [{"profile_id": "reconcile", "arguments": {"batch_id": "b-1"}}]
+        )
+
+        from temporalio.exceptions import ApplicationError
+
+        ctx, mock_activity = patched_activity(mock_activity_info)
+        try:
+            mock_activity.wait_for_cancelled.return_value = asyncio.Future()
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernedCommandNotExecuted"
+        assert exc_info.value.non_retryable is True
+        assert "egress to blocked.example denied by sandbox policy" in str(
+            exc_info.value
+        )
+        interceptor.next.execute_activity.assert_not_called()
+        sandbox.otel_bridge.finalize.assert_called_once()
+        assert sandbox.otel_bridge.finalize.call_args.kwargs["dispatch_result"] is failed
 
     @pytest.mark.asyncio
     async def test_constrain_without_sandbox_keeps_unsupported_error(
@@ -2520,6 +2571,9 @@ class TestConstrainedActivityRouting:
                 },
             )
             await adapter.handle_constrain(started_result, trigger_context)
+            # A duplicate hook for the same Temporal attempt/profile reuses the
+            # exact stable dispatch identity and never executes twice.
+            await adapter.handle_constrain(started_result, trigger_context)
             adapter.raise_hook_blocked(started_result)
             # The intercepted host request is after the hook stop and must never
             # reach even an in-memory transport.
@@ -2543,6 +2597,9 @@ class TestConstrainedActivityRouting:
         command, decision = sandbox.dispatcher.dispatch_with_decision.await_args.args
         assert command.kwargs["profile_id"] == "post-batch"
         assert command.kwargs["parent_span_id"] == "00f067aa0ba902b7"
+        assert command.kwargs["dispatch_id"] == (
+            "7dd227cc02581e4bad9c42d58cecedb08dc76b1defe4ad1b4074d69dcf99447f"
+        )
         assert decision["verdict"] == "constrain"
         assert decision["policy_id"] == "policy-started"
         assert result["activity_result"] is None
@@ -2656,7 +2713,7 @@ class TestConstrainedActivityRouting:
         assert client.evaluate_event.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_completed_behavioral_constrain_attaches_dispatch_failure(
+    async def test_completed_behavioral_constrain_fails_with_retained_evidence(
         self, state, mock_activity_info
     ):
         client = make_verdict_client(
@@ -2672,23 +2729,71 @@ class TestConstrainedActivityRouting:
             state, GovernanceConfig(), next_result="host_result", client=client
         )
 
+        from temporalio.exceptions import ApplicationError
+
         ctx, _ = patched_activity(mock_activity_info)
         try:
-            result = await interceptor.execute_activity(make_input(["arg1"]))
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(make_input(["arg1"]))
         finally:
             ctx.stop()
 
-        assert result["activity_result"] == "host_result"
-        assert result["sandbox_execution"]["status"] == "failed"
-        assert result["sandbox_execution"]["profile_id"] == "post-batch"
-        assert result["sandbox_execution"]["error"] == {
-            "type": "ApplicationError",
+        assert exc_info.value.type == "GovernedCommandConfigurationRequired"
+        assert exc_info.value.non_retryable is False
+        assert "Governed command support is not configured" in str(exc_info.value)
+        outcome = exc_info.value.details[0]
+        assert outcome["status"] == "failed"
+        assert outcome["profile_id"] == "post-batch"
+        assert outcome["error"] == {
+            "type": "GovernedCommandConfigurationRequired",
             "message": (
                 "GovernedCommandConfigurationRequired: "
                 "Governed command support is not configured"
             ),
         }
         assert client.evaluate_event.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_behavioral_failure_finalizes_span_before_activity_fails(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        failed = make_sandbox_dispatch_result()
+        failed.error = SimpleNamespace(
+            code=SimpleNamespace(value="egress_denied"),
+            detail="egress to blocked.example denied by sandbox policy",
+        )
+        sandbox = make_mock_sandbox(failed)
+        sandbox.otel_bridge = MagicMock()
+        sandbox.otel_bridge.begin.return_value = "span-owner"
+        client = make_verdict_client(GovernanceVerdictResponse(verdict=Verdict.ALLOW))
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                make_constrain_response(profile_id="post-batch"),
+            ]
+        )
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), next_result="host_result", client=client
+        )
+        interceptor._sandbox = sandbox
+
+        from temporalio.exceptions import ApplicationError
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(make_input(["arg1"]))
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernedCommandNotExecuted"
+        assert exc_info.value.non_retryable is False
+        assert exc_info.value.details[0]["status"] == "failed"
+        sandbox.otel_bridge.finalize.assert_called_once()
+        assert sandbox.otel_bridge.finalize.call_args.kwargs["dispatch_result"] is failed
+        # Dispatch evidence is finalized before the wrapper converts the terminal
+        # error into Temporal's retryable ApplicationError.
+        assert sandbox.otel_bridge.finalize.call_args.kwargs["error"] is None
 
     @pytest.mark.asyncio
     async def test_completed_constrain_without_sandbox_is_noop(

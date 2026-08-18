@@ -68,6 +68,21 @@ _CONTENT_MAX_BYTES = 64 * 1024
 _ACTIVITY_ROOT_SPAN_METADATA_KEY = "openbox.activity_root_span_id"
 
 
+def _sandbox_dispatch_id(info: Any, profile_id: str) -> str:
+    """Derive one stable sandbox dispatch identity per Temporal attempt/profile."""
+    identity = "\0".join(
+        (
+            "openbox.sandbox.dispatch.v1",
+            info.workflow_id or "",
+            info.workflow_run_id or "",
+            info.activity_id or "",
+            str(info.attempt or 1),
+            profile_id,
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
 def _activity_root_span_id(info: Any) -> str:
     """Return the activity anchor used by both Core fallback and SDK evidence."""
     try:
@@ -340,10 +355,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         self._config = config
         self._sandbox = sandbox
         self._active_behavioral_dispatches: dict[
-            tuple[str, str, str], tuple[asyncio.AbstractEventLoop, Any, Any]
+            tuple[str, str, str, int], tuple[asyncio.AbstractEventLoop, Any, Any]
         ] = {}
         self._behavioral_dispatch_tasks: dict[
-            tuple[str, str, str], asyncio.Task[dict[str, Any]]
+            tuple[str, str, str, int], asyncio.Task[dict[str, Any]]
         ] = {}
         self._client = client or GovernanceClient(
             api_url=api_url,
@@ -398,8 +413,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         ctx = context or get_core_context_store().current_activity_context()
         if ctx is None:
             return None
+        metadata = getattr(ctx, "metadata", {}) or {}
+        attempt = metadata.get("attempt", 1)
+        if not isinstance(attempt, int):
+            attempt = 1
         return self._active_behavioral_dispatches.get(
-            (ctx.workflow_id or "", ctx.run_id or "", ctx.activity_id or "")
+            (ctx.workflow_id or "", ctx.run_id or "", ctx.activity_id or "", attempt)
         )
 
     @staticmethod
@@ -417,11 +436,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         return None
 
     @staticmethod
-    def _behavioral_key(info: Any) -> tuple[str, str, str]:
+    def _behavioral_key(info: Any) -> tuple[str, str, str, int]:
         return (
             info.workflow_id or "",
             info.workflow_run_id or "",
             info.activity_id or "",
+            info.attempt or 1,
         )
 
     def _behavioral_dispatch_task(
@@ -653,6 +673,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             attempt=info.attempt,
             arguments={item.name: item.value for item in request.arguments},
             parent_span_id=parent_span_id,
+            dispatch_id=_sandbox_dispatch_id(info, request.profile_id),
         )
         telemetry_owner = None
         if self._sandbox.otel_bridge is not None:
@@ -961,10 +982,33 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 "status": "failed",
                 "profile_id": profile_id,
                 "error": {
-                    "type": type(error).__name__,
+                    "type": getattr(error, "type", type(error).__name__),
                     "message": str(error),
                 },
             }
+
+    @staticmethod
+    def _raise_behavioral_failure(outcome: dict[str, Any]) -> NoReturn:
+        """Surface retained sandbox evidence as a retryable activity failure."""
+        from temporalio.exceptions import ApplicationError
+
+        failure = outcome.get("error")
+        if isinstance(failure, dict):
+            error_type = failure.get("type")
+            message = failure.get("message")
+        else:
+            error_type = None
+            message = None
+        if not isinstance(error_type, str) or not error_type:
+            error_type = "BehavioralSandboxExecutionFailed"
+        if not isinstance(message, str) or not message:
+            message = "Behavioral sandbox execution failed"
+        raise ApplicationError(
+            message,
+            outcome,
+            type=error_type,
+            non_retryable=False,
+        )
 
     @staticmethod
     def _attach_behavioral_outcome(
@@ -1602,6 +1646,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             outcome = await asyncio.shield(dispatch_task)
             result = self._attach_behavioral_outcome(result, outcome)
             self._behavioral_dispatch_tasks.pop(key, None)
+            if outcome.get("status") == "failed":
+                self._raise_behavioral_failure(outcome)
         return result
 
     # ─── Event sending ────────────────────────────────────────────────────
