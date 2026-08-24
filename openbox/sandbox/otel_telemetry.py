@@ -91,8 +91,8 @@ _OUTCOMES = frozenset(
 
 
 def parse_image_digest(template: str) -> str | None:
-    """Return an OCI digest, or no image evidence for the native srt template."""
-    if template == "native://srt":
+    """Return an OCI digest, or no image evidence for the native template."""
+    if template == "native://native":
         return None
     if not isinstance(template, str):
         raise ValueError("immutable image template rejected")

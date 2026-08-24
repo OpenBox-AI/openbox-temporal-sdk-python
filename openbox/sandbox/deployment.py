@@ -859,7 +859,7 @@ def _load_governed_command_deployment(
         otel_bridge = GovernedCommandTelemetryBridge(
             asset_bundle.template,
             sandbox_provider=(
-                "srt" if asset_bundle.template == "native://srt" else "openshell"
+                "native" if asset_bundle.template == "native://native" else "openshell"
             ),
         )
         heartbeat_sink.attach_otel_bridge(otel_bridge)

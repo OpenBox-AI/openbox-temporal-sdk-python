@@ -30,14 +30,14 @@ class _CapturingTracer:
         return _CapturedSpan()
 
 
-def test_native_srt_telemetry_does_not_require_an_oci_image_digest() -> None:
+def test_native_telemetry_does_not_require_an_oci_image_digest() -> None:
     bridge = GovernedCommandTelemetryBridge(
-        "native://srt", sandbox_provider="srt"
+        "native://native", sandbox_provider="native"
     )
 
     assert bridge.image_digest is None
-    assert bridge.sandbox_provider == "srt"
-    assert parse_image_digest("native://srt") is None
+    assert bridge.sandbox_provider == "native"
+    assert parse_image_digest("native://native") is None
 
 
 def test_sandbox_span_uses_namespaced_provider_attribute() -> None:
@@ -51,7 +51,7 @@ def test_sandbox_span_uses_namespaced_provider_attribute() -> None:
         workflow_type="DemoWorkflow",
         task_queue="demo",
         image_digest=None,
-        sandbox_provider="srt",
+        sandbox_provider="native",
         parent_span_context=None,
         started_ns=1,
         ended_ns=2,
@@ -71,7 +71,7 @@ def test_sandbox_span_uses_namespaced_provider_attribute() -> None:
 
     GovernedCommandTelemetryBridge._record_span(tracer, record)
 
-    assert tracer.attributes["openbox.sandbox.provider"] == "srt"
+    assert tracer.attributes["openbox.sandbox.provider"] == "native"
     assert "sandbox.provider" not in tracer.attributes
 
 
