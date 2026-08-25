@@ -192,6 +192,35 @@ def test_bootstrap_okta_identity_delegates_to_base_client(
     assert identity.key_id == "kid-1"
 
 
+def test_bootstrap_okta_identity_fails_closed_when_authority_is_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
+
+    client = MagicMock()
+    client.identity_metadata.side_effect = CoreOpenBoxConfigError(
+        "identity bootstrap authority is missing or invalid"
+    )
+    monkeypatch.setattr(
+        "openbox_core.client.EvaluationClient",
+        MagicMock(return_value=client),
+    )
+
+    with pytest.raises(
+        OpenBoxConfigError,
+        match="identity bootstrap authority is missing or invalid",
+    ):
+        _bootstrap_okta_identity(
+            api_url=API_URL,
+            api_key=API_KEY,
+            timeout=12.0,
+            okta_agent_private_key=_PRIVATE_KEY_PEM,
+        )
+
+    client.validate_api_key.assert_called_once_with()
+    client.close.assert_called_once_with()
+
+
 def test_initialize_rejects_bootstrap_without_server_validation():
     with pytest.raises(OpenBoxConfigError, match="requires server validation"):
         initialize(

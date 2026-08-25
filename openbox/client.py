@@ -116,6 +116,7 @@ class GovernanceClient:
         agent_did: Optional[str] = None,
         signer=None,
         okta_identity=None,
+        workload_private_key: Optional[str] = None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
@@ -132,6 +133,20 @@ class GovernanceClient:
         self._agent_did, self._signer, self._okta_identity = resolve_signing_defaults(
             agent_did, signer, okta_identity
         )
+        self._workload_client = None
+        if workload_private_key:
+            from openbox_core.client import EvaluationClient
+
+            from .request_signing import _sdk_identifier
+
+            self._workload_client = EvaluationClient(
+                self._api_url,
+                self._api_key,
+                timeout_seconds=self._timeout,
+                on_api_error=self._on_api_error,
+                workload_private_key=workload_private_key,
+                sdk_version=_sdk_identifier(),
+            )
 
     async def evaluate_event(
         self, payload: dict
@@ -156,6 +171,18 @@ class GovernanceClient:
         import httpx
 
         from .errors import OpenBoxAuthError
+
+        if self._workload_client is not None:
+            try:
+                result = await self._workload_client.aevaluate(payload)
+            except Exception as exc:
+                return self._handle_workload_error(exc)
+            data = dict(result.raw)
+            data.setdefault("verdict", result.verdict.value)
+            data.setdefault("reason", result.reason)
+            data.setdefault("policy_id", result.policy_id)
+            data.setdefault("risk_score", result.risk_score)
+            return GovernanceVerdictResponse.from_dict(data)
 
         if self._okta_identity is not None:
             from .request_signing import prepare_okta_signed_request
@@ -257,6 +284,16 @@ class GovernanceClient:
             "activity_id": activity_id,
         }
 
+        if self._workload_client is not None:
+            try:
+                result = await self._workload_client.apoll_approval(
+                    workflow_id, run_id, activity_id
+                )
+            except Exception as exc:
+                self._handle_workload_error(exc)
+                return None
+            return dict(result.raw) if result is not None else None
+
         if self._okta_identity is not None:
             from .request_signing import prepare_okta_signed_request
 
@@ -316,8 +353,32 @@ class GovernanceClient:
             return None
 
     async def close(self) -> None:
-        """No-op: per-call clients close automatically via async with."""
-        pass
+        """Close the shared base client used for v3 workload requests."""
+
+        if self._workload_client is not None:
+            await self._workload_client.aclose()
+
+    def _handle_workload_error(
+        self, exc: Exception
+    ) -> Optional[GovernanceVerdictResponse]:
+        """Translate base-SDK v3 errors into this package's public errors."""
+
+        from openbox_core.errors import GovernanceAPIError as CoreGovernanceAPIError
+        from openbox_core.errors import OpenBoxAuthError as CoreOpenBoxAuthError
+        from openbox_core.errors import OpenBoxNetworkError as CoreOpenBoxNetworkError
+        from openbox_core.errors import OpenBoxSigningError as CoreOpenBoxSigningError
+
+        from .errors import OpenBoxAuthError, OpenBoxSigningError
+
+        if isinstance(exc, CoreOpenBoxSigningError):
+            raise OpenBoxSigningError(
+                str(exc), getattr(exc, "reason_code", None)
+            ) from exc
+        if isinstance(exc, CoreOpenBoxAuthError):
+            raise OpenBoxAuthError(str(exc)) from exc
+        if isinstance(exc, (CoreGovernanceAPIError, CoreOpenBoxNetworkError)):
+            return self._handle_api_error(str(exc))
+        raise exc
 
     def _handle_api_error(self, error_msg: str) -> Optional[GovernanceVerdictResponse]:
         """Apply on_api_error policy. Returns None (fail_open) or HALT (fail_closed)."""

@@ -41,6 +41,7 @@ def create_openbox_worker(
     openbox_api_key: str,
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    workload_private_key: Optional[str] = None,
     openbox_agent_id: Optional[str] = None,
     organization_id: Optional[str] = None,
     deployment_id: Optional[str] = None,
@@ -108,6 +109,8 @@ def create_openbox_worker(
         openbox_url: OpenBox Core API URL (required for governance)
         openbox_api_key: OpenBox API key (required for governance)
         agent_did / agent_private_key: OpenBox DID identity (v1). Both-or-neither.
+        workload_private_key: Provider-neutral Keycloak service-account key
+            used with the API key for Core v3 requests.
         okta_agent_private_key alone: Okta AI Agent bootstrap mode (v2); Core
         supplies the non-secret identity metadata. The complete
         openbox_agent_id / organization_id / deployment_id / okta_agent_id /
@@ -176,6 +179,7 @@ def create_openbox_worker(
         governance_timeout=governance_timeout,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        workload_private_key=workload_private_key,
         openbox_agent_id=openbox_agent_id,
         organization_id=organization_id,
         deployment_id=deployment_id,
@@ -205,6 +209,7 @@ def create_openbox_worker(
         on_api_error=governance_policy,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        workload_private_key=workload_private_key,
         openbox_agent_id=openbox_agent_id,
         organization_id=organization_id,
         deployment_id=deployment_id,
@@ -260,6 +265,7 @@ def create_openbox_worker(
         agent_did=agent_did,
         signer=_signer,
         okta_identity=_okta_identity,
+        workload_private_key=workload_private_key,
     )
 
     activity_interceptor = ActivityGovernanceInterceptor(
@@ -278,6 +284,7 @@ def create_openbox_worker(
         agent_did=agent_did,
         signer=_signer,
         okta_identity=_okta_identity,
+        workload_private_key=workload_private_key,
     )
 
     all_interceptors: list = [workflow_interceptor, activity_interceptor, *interceptors]

@@ -267,6 +267,7 @@ def create_core_runtime(
     on_api_error: str = "fail_open",
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    workload_private_key: Optional[str] = None,
     identity_method: Optional[str] = None,
     openbox_agent_id: Optional[str] = None,
     organization_id: Optional[str] = None,
@@ -312,6 +313,7 @@ def create_core_runtime(
         on_api_error=on_api_error,
         agent_did=agent_did,
         agent_private_key=agent_private_key,
+        workload_private_key=workload_private_key,
         # Okta AI Agent (v2) identity (proposal §13.7). `okta_agent_algorithm`
         # defaults to "RS256" here (not None) — this constructs the
         # OpenBoxConfig dataclass DIRECTLY (not via `.resolve()`), so an
@@ -366,6 +368,7 @@ def create_core_runtime(
             timeout_seconds=config.timeout_seconds,
             on_api_error=config.on_api_error,
             identity=resolved_okta_identity,
+            workload_private_key=workload_private_key,
             sdk_version=_sdk_identifier(),
         )
 

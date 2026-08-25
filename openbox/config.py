@@ -329,6 +329,44 @@ def _extract_reason_code(http_error) -> Optional[str]:
     return code if isinstance(code, str) else None
 
 
+def _validate_workload_identity_with_server(
+    api_url: str,
+    api_key: str,
+    timeout: float,
+    *,
+    workload_private_key: str,
+) -> None:
+    """Validate the API key and active service account through Core v3."""
+
+    from openbox_core.client import EvaluationClient
+    from openbox_core.errors import OpenBoxAuthError as CoreOpenBoxAuthError
+    from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
+    from openbox_core.errors import OpenBoxNetworkError as CoreOpenBoxNetworkError
+    from openbox_core.errors import OpenBoxSigningError as CoreOpenBoxSigningError
+
+    from .request_signing import _sdk_identifier
+
+    client = EvaluationClient(
+        api_url,
+        api_key,
+        timeout_seconds=timeout,
+        workload_private_key=workload_private_key,
+        sdk_version=_sdk_identifier(),
+    )
+    try:
+        client.validate_api_key()
+    except CoreOpenBoxSigningError as exc:
+        raise OpenBoxSigningError(str(exc), getattr(exc, "reason_code", None)) from exc
+    except CoreOpenBoxAuthError as exc:
+        raise OpenBoxAuthError(str(exc)) from exc
+    except CoreOpenBoxNetworkError as exc:
+        raise OpenBoxNetworkError(str(exc)) from exc
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
+    finally:
+        client.close()
+
+
 def _validate_api_key_with_server(
     api_url: str,
     api_key: str,
@@ -537,6 +575,7 @@ def initialize(
     *,
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    workload_private_key: Optional[str] = None,
     openbox_agent_id: Optional[str] = None,
     organization_id: Optional[str] = None,
     deployment_id: Optional[str] = None,
@@ -559,6 +598,9 @@ def initialize(
         agent_private_key: Base64 raw 32-byte Ed25519 seed (v1). Signs every Core
             request locally. Non-repudiation material — never logged or stored as
             raw bytes.
+        workload_private_key: PKCS8 PEM RSA private key for the active Keycloak
+            service account (v3). The base SDK exchanges a short-lived token and
+            composes it with the agent API key on every governed request.
         openbox_agent_id: OpenBox agent UUID (v2, Okta AI Agent).
         organization_id: OpenBox organization ID (v2).
         deployment_id: OpenBox deployment ID (v2).
@@ -711,7 +753,14 @@ def initialize(
     )
 
     # Validate API key with server (signed when signing is configured).
-    if validate and not okta_bootstrap:
+    if validate and workload_private_key:
+        _validate_workload_identity_with_server(
+            api_url.rstrip("/"),
+            api_key,
+            governance_timeout,
+            workload_private_key=workload_private_key,
+        )
+    elif validate and not okta_bootstrap:
         _validate_api_key_with_server(
             api_url.rstrip("/"),
             api_key,
@@ -723,5 +772,5 @@ def initialize(
 
     _get_logger().info(
         f"OpenBox SDK initialized with API URL: {api_url} "
-        f"(signing={'enabled' if signer else ('okta' if okta_identity else 'disabled')})"
+        f"(signing={'workload' if workload_private_key else ('enabled' if signer else ('okta' if okta_identity else 'disabled'))})"
     )

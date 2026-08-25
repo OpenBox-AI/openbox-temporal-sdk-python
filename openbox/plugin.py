@@ -54,6 +54,7 @@ class OpenBoxPlugin(SimplePlugin):
         openbox_api_key: str,
         agent_did: Optional[str] = None,
         agent_private_key: Optional[str] = None,
+        workload_private_key: Optional[str] = None,
         openbox_agent_id: Optional[str] = None,
         organization_id: Optional[str] = None,
         deployment_id: Optional[str] = None,
@@ -80,6 +81,8 @@ class OpenBoxPlugin(SimplePlugin):
         """OpenBox governance plugin for a Temporal ``Worker``.
 
         agent_did / agent_private_key: OpenBox DID identity (v1). Both-or-neither.
+        workload_private_key: Provider-neutral Keycloak service-account key
+        used with the API key for Core v3 requests.
         okta_agent_private_key alone: Okta AI Agent bootstrap mode (v2); Core
         supplies the non-secret identity metadata. The complete
         openbox_agent_id / organization_id / deployment_id / okta_agent_id /
@@ -93,6 +96,7 @@ class OpenBoxPlugin(SimplePlugin):
             governance_timeout=governance_timeout,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
+            workload_private_key=workload_private_key,
             openbox_agent_id=openbox_agent_id,
             organization_id=organization_id,
             deployment_id=deployment_id,
@@ -122,6 +126,7 @@ class OpenBoxPlugin(SimplePlugin):
             on_api_error=governance_policy,
             agent_did=agent_did,
             agent_private_key=agent_private_key,
+            workload_private_key=workload_private_key,
             openbox_agent_id=openbox_agent_id,
             organization_id=organization_id,
             deployment_id=deployment_id,
@@ -169,6 +174,7 @@ class OpenBoxPlugin(SimplePlugin):
             agent_did=agent_did,
             signer=_signer,
             okta_identity=_okta_identity,
+            workload_private_key=workload_private_key,
         )
 
         interceptors: list = [
@@ -200,6 +206,7 @@ class OpenBoxPlugin(SimplePlugin):
             agent_did=agent_did,
             signer=_signer,
             okta_identity=_okta_identity,
+            workload_private_key=workload_private_key,
         )
 
         def workflow_runner(runner: WorkflowRunner | None) -> WorkflowRunner | None:

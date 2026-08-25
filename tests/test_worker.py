@@ -113,6 +113,7 @@ class TestCreateOpenboxWorkerWithConfig:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
+            workload_private_key=None,
             openbox_agent_id=None,
             organization_id=None,
             deployment_id=None,
@@ -121,6 +122,32 @@ class TestCreateOpenboxWorkerWithConfig:
             okta_agent_private_key=None,
             okta_agent_algorithm=None,
             agent_proof_audience=None,
+        )
+
+    @with_worker_patches
+    def test_forwards_workload_key_to_runtime_and_workflow_activity(self, **m):
+        from openbox.worker import create_openbox_worker
+
+        create_openbox_worker(
+            client=Mock(),
+            task_queue="test-queue",
+            openbox_url="http://localhost:8086",
+            openbox_api_key="obx_test_key123",
+            workload_private_key="workload-private-key",
+            enable_trace_propagation=False,
+        )
+
+        assert (
+            m["mock_validate_api_key"].call_args.kwargs["workload_private_key"]
+            == "workload-private-key"
+        )
+        assert (
+            m["mock_create_core_runtime"].call_args.kwargs["workload_private_key"]
+            == "workload-private-key"
+        )
+        assert (
+            m["mock_build_activities"].call_args.kwargs["workload_private_key"]
+            == "workload-private-key"
         )
 
     @with_worker_patches
@@ -300,6 +327,7 @@ class TestCreateOpenboxWorkerWithConfig:
             agent_did=None,
             signer=None,
             okta_identity=None,
+            workload_private_key=None,
         )
 
     @with_worker_patches

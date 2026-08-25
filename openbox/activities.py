@@ -153,6 +153,7 @@ class GovernanceActivities:
         agent_did=None,
         signer=None,
         okta_identity=None,
+        workload_private_key=None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
@@ -162,6 +163,7 @@ class GovernanceActivities:
         self._agent_did = agent_did
         self._signer = signer
         self._okta_identity = okta_identity
+        self._workload_private_key = workload_private_key
 
     @activity.defn(name="send_governance_event")
     async def send_governance_event(
@@ -181,93 +183,113 @@ class GovernanceActivities:
         payload = {**event_payload, "timestamp": _rfc3339_now()}
         event_type = event_payload.get("event_type", "unknown")
 
-        # Sign once over the exact bytes we transmit (timestamp included).
-        if self._okta_identity is not None:
-            from .request_signing import prepare_okta_signed_request
-
-            headers, body = prepare_okta_signed_request(
-                "POST",
-                "/api/v2/governance/evaluate",
-                payload,
-                api_key=self._api_key,
-                okta_identity=self._okta_identity,
-            )
-            evaluate_url = f"{self._api_url}/api/v2/governance/evaluate"
-        else:
-            from .request_signing import prepare_signed_request
-
-            headers, body = prepare_signed_request(
-                "POST",
-                "/api/v1/governance/evaluate",
-                payload,
-                api_key=self._api_key,
-                agent_did=self._agent_did,
-                signer=self._signer,
-            )
-            evaluate_url = f"{self._api_url}/api/v1/governance/evaluate"
-
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    evaluate_url,
-                    content=body,
-                    headers=headers,
+            if self._workload_private_key:
+                from .client import GovernanceClient
+
+                client = GovernanceClient(
+                    api_url=self._api_url,
+                    api_key=self._api_key,
+                    timeout=timeout,
+                    on_api_error=on_api_error,
+                    workload_private_key=self._workload_private_key,
                 )
-
-                # Okta (v2) 401/403 fails closed unconditionally (proposal
-                # §13.6) — never routed through the fail_open/fail_closed
-                # _handle_api_error policy branch below, which would let a
-                # revoked/misconfigured Okta identity silently continue.
-                if self._okta_identity is not None and response.status_code in (
-                    401,
-                    403,
-                ):
-                    from .client import _raise_okta_auth_failure
-
-                    _raise_okta_auth_failure(response)
-
-                if response.status_code != 200:
+                try:
+                    parsed = await client.evaluate_event(payload)
+                finally:
+                    await client.close()
+                if parsed is None:
                     return _handle_api_error(
                         event_type,
-                        f"HTTP {response.status_code}: {response.text}",
+                        "OpenBox returned no governance decision",
                         on_api_error,
                     )
+            else:
+                # Sign once over the exact bytes we transmit (timestamp included).
+                if self._okta_identity is not None:
+                    from .request_signing import prepare_okta_signed_request
 
-                data = response.json()
-                parsed = GovernanceVerdictResponse.from_dict(data)
-                verdict = parsed.verdict
-                reason = parsed.reason
-                policy_id = parsed.policy_id
-                risk_score = parsed.risk_score
+                    headers, body = prepare_okta_signed_request(
+                        "POST",
+                        "/api/v2/governance/evaluate",
+                        payload,
+                        api_key=self._api_key,
+                        okta_identity=self._okta_identity,
+                    )
+                    evaluate_url = f"{self._api_url}/api/v2/governance/evaluate"
+                else:
+                    from .request_signing import prepare_signed_request
 
-                # A BLOCK carrying a valid patch restarts the workflow run
-                # instead of merely failing this activity — check for it before
-                # the plain BLOCK/HALT stop handling below ever sees the verdict.
-                from .errors import GOVERNANCE_PATCH_ERROR_TYPE
-                from .patch import patch_request
+                    headers, body = prepare_signed_request(
+                        "POST",
+                        "/api/v1/governance/evaluate",
+                        payload,
+                        api_key=self._api_key,
+                        agent_did=self._agent_did,
+                        signer=self._signer,
+                    )
+                    evaluate_url = f"{self._api_url}/api/v1/governance/evaluate"
 
-                patch_req = patch_request(parsed, event_type=event_type)
-                if patch_req is not None:
-                    raise ApplicationError(
-                        "Governance requested workflow restart",
-                        patch_req.to_dict(),
-                        type=GOVERNANCE_PATCH_ERROR_TYPE,
-                        non_retryable=True,
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        evaluate_url,
+                        content=body,
+                        headers=headers,
                     )
 
-                if verdict.should_stop():
-                    result = await _handle_stop_verdict(
-                        verdict,
-                        reason,
-                        policy_id,
-                        risk_score,
-                        event_type,
-                        event_payload,
-                    )
-                    if result:
-                        return result
+                    # Okta (v2) 401/403 fails closed unconditionally (proposal
+                    # §13.6) — never routed through the fail_open/fail_closed
+                    # _handle_api_error policy branch below, which would let a
+                    # revoked/misconfigured Okta identity silently continue.
+                    if self._okta_identity is not None and response.status_code in (
+                        401,
+                        403,
+                    ):
+                        from .client import _raise_okta_auth_failure
 
-                return _build_verdict_result(verdict, reason, policy_id, risk_score)
+                        _raise_okta_auth_failure(response)
+
+                    if response.status_code != 200:
+                        return _handle_api_error(
+                            event_type,
+                            f"HTTP {response.status_code}: {response.text}",
+                            on_api_error,
+                        )
+
+                    parsed = GovernanceVerdictResponse.from_dict(response.json())
+
+            verdict = parsed.verdict
+            reason = parsed.reason
+            policy_id = parsed.policy_id
+            risk_score = parsed.risk_score
+
+            # A BLOCK carrying a valid patch restarts the workflow run instead
+            # of merely failing this activity.
+            from .errors import GOVERNANCE_PATCH_ERROR_TYPE
+            from .patch import patch_request
+
+            patch_req = patch_request(parsed, event_type=event_type)
+            if patch_req is not None:
+                raise ApplicationError(
+                    "Governance requested workflow restart",
+                    patch_req.to_dict(),
+                    type=GOVERNANCE_PATCH_ERROR_TYPE,
+                    non_retryable=True,
+                )
+
+            if verdict.should_stop():
+                result = await _handle_stop_verdict(
+                    verdict,
+                    reason,
+                    policy_id,
+                    risk_score,
+                    event_type,
+                    event_payload,
+                )
+                if result:
+                    return result
+
+            return _build_verdict_result(verdict, reason, policy_id, risk_score)
 
         except (GovernanceAPIError, ApplicationError, OpenBoxAuthError):
             # OpenBoxAuthError (raised by `_raise_okta_auth_failure` for an
@@ -289,6 +311,7 @@ def build_governance_activities(
     agent_did=None,
     signer=None,
     okta_identity=None,
+    workload_private_key=None,
 ) -> GovernanceActivities:
     """Factory used by plugin.py and worker.py to build the activities instance.
 
@@ -310,6 +333,7 @@ def build_governance_activities(
         agent_did=agent_did,
         signer=signer,
         okta_identity=okta_identity,
+        workload_private_key=workload_private_key,
     )
 
 

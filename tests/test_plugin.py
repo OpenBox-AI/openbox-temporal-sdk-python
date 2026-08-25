@@ -67,6 +67,7 @@ class TestPluginInit:
             governance_timeout=45.0,
             agent_did=None,
             agent_private_key=None,
+            workload_private_key=None,
             openbox_agent_id=None,
             organization_id=None,
             deployment_id=None,
@@ -144,6 +145,7 @@ class TestPluginInit:
             agent_did=None,
             signer=None,
             okta_identity=None,
+            workload_private_key=None,
         )
 
     def test_private_key_bootstrap_identity_reaches_all_runtime_paths(self):
