@@ -11,6 +11,12 @@ from typing import Any
 
 _EXPORTS = {
     "TemporalSandboxConfig": "openbox.sandbox.adapter",
+    # Declared types of TemporalSandboxConfig fields. A caller has to build a
+    # profile bundle and may implement a heartbeat sink, so both belong in the
+    # public surface; docs/governed-commands.md already imports the bundle
+    # from here.
+    "TemporalCommandProfileBundle": "openbox.sandbox.profiles",
+    "TemporalHeartbeatSink": "openbox.sandbox.adapter",
     "SandboxConfig": "openbox.sandbox.config",
     "TemporalSandboxConfigurationError": "openbox.sandbox.adapter",
 

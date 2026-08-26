@@ -128,6 +128,7 @@ worker = Worker(
     # Default True. Set False if you already wire OpenTelemetryPlugin or a
     # custom propagator.
     enable_trace_propagation=True,
+    )],
 
     # Standard Worker options (all supported)
     activity_executor=my_executor,

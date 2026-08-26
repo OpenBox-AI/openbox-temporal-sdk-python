@@ -223,7 +223,7 @@ openbox-temporal-sdk-python/
 
 **Purpose:** Zero-code setup via `OpenBoxPlugin` plugin
 **Function Signature (keyword-only after `task_queue`):**
-```python
+```text
 def OpenBoxPlugin(...)(
     client: Client,
     task_queue: str,
