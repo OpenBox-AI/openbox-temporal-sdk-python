@@ -20,7 +20,6 @@ from openbox.config import (
     GovernanceConfig,
     OpenBoxAuthError,
     OpenBoxConfigError,
-    OpenBoxInsecureURLError,
     OpenBoxNetworkError,
     _GlobalConfig,
     _validate_api_key_format,
@@ -28,6 +27,7 @@ from openbox.config import (
     get_global_config,
     initialize,
 )
+from openbox.errors import OpenBoxInsecureURLError
 
 
 class TestGovernanceConfigDefaults:

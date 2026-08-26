@@ -17,11 +17,11 @@ import asyncio
 import json
 from dataclasses import asdict, is_dataclass
 from datetime import timedelta
-from typing import Any, Optional, Type
+from typing import Any
 
 from openbox_core.contracts import events as _events
 from temporalio import workflow
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import ApplicationError
 from temporalio.worker import (
     ExecuteWorkflowInput,
     HandleSignalInput,
@@ -40,6 +40,7 @@ from .errors import (
     GOVERNANCE_PATCH_ERROR_TYPE,
     GOVERNANCE_RETRYABLE_BLOCK_ERROR_TYPE,
     GOVERNANCE_STOP_ERROR_TYPE,
+    GovernanceHaltError,
 )
 from .multi_agent import inject_session_header, read_session_from_memo
 from .patch import PatchRequest, extract_patch_request
@@ -68,7 +69,7 @@ _RETRYABLE_BLOCK_PATCH = "openbox-retryable-block-v1"
 _WORKFLOW_START_INPUT_PATCH = "openbox-workflow-start-input-v1"
 
 
-def _application_error_type(exc: BaseException) -> Optional[str]:
+def _application_error_type(exc: BaseException) -> str | None:
     """Walk exception chain and return the ApplicationError.type if present.
 
     Temporal wraps activity failures as ActivityError(cause=ApplicationError).
@@ -77,7 +78,7 @@ def _application_error_type(exc: BaseException) -> Optional[str]:
     reformatting, locale changes, and nested wrapping.
     """
     seen: set[int] = set()
-    current: Optional[BaseException] = exc
+    current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, ApplicationError):
@@ -91,7 +92,7 @@ def _application_error_type(exc: BaseException) -> Optional[str]:
     return None
 
 
-def _safe_error_type(exc) -> Optional[str]:
+def _safe_error_type(exc) -> str | None:
     """Extract error type string from an exception, sanitized for JSON."""
     t = getattr(exc, "type", None)
     if isinstance(t, str) and len(t) < 200:
@@ -99,7 +100,7 @@ def _safe_error_type(exc) -> Optional[str]:
     return None
 
 
-def _extract_cause_info(exc) -> Optional[dict]:
+def _extract_cause_info(exc) -> dict | None:
     """Extract cause info dict from an exception's cause chain."""
     cause = (
         getattr(exc, "cause", None)
@@ -118,7 +119,7 @@ def _extract_cause_info(exc) -> Optional[dict]:
     return info
 
 
-def _extract_root_cause_info(exc) -> Optional[dict]:
+def _extract_root_cause_info(exc) -> dict | None:
     """Extract root cause info from an exception's deeper cause chain."""
     cause = (
         getattr(exc, "cause", None)
@@ -186,10 +187,8 @@ def _serialize_value(value: Any) -> Any:
         return str(value)
 
 
-from .errors import GovernanceHaltError  # noqa: F401
 
-
-def _legacy_block_degrade(payload: dict) -> Optional[dict]:
+def _legacy_block_degrade(payload: dict) -> dict | None:
     """Pre-feature BLOCK result shape, keyed by event origin.
 
     A BLOCK with patch degrades HERE — when the caller has the feature disabled
@@ -256,7 +255,7 @@ async def _send_governance_event(
             GOVERNANCE_HALT_ERROR_TYPE,
             GOVERNANCE_STOP_ERROR_TYPE,
         ):
-            raise GovernanceHaltError(str(e))
+            raise GovernanceHaltError(str(e)) from None
 
         if app_error_type in (
             GOVERNANCE_PATCH_ERROR_TYPE,
@@ -276,12 +275,12 @@ async def _send_governance_event(
             return None
 
         if app_error_type == GOVERNANCE_API_ERROR_TYPE:
-            raise GovernanceHaltError(str(e))
+            raise GovernanceHaltError(str(e)) from None
 
         return None
 
 
-def _is_halt(exc: Optional[BaseException]) -> bool:
+def _is_halt(exc: BaseException | None) -> bool:
     """True when the exception chain carries a governance HALT.
 
     Walks cause / __cause__ / __context__ (mirrors ``_application_error_type``)
@@ -292,7 +291,7 @@ def _is_halt(exc: Optional[BaseException]) -> bool:
     if exc is None:
         return False
     seen: set[int] = set()
-    current: Optional[BaseException] = exc
+    current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, GovernanceHaltError):
@@ -345,7 +344,7 @@ async def _continue_as_new(
 
 
 def _workflow_started_payload(
-    info, sid: Optional[str], input: ExecuteWorkflowInput
+    info, sid: str | None, input: ExecuteWorkflowInput
 ) -> dict:
     """Build the WorkflowStarted governance payload, shared by both execute paths.
 
@@ -404,7 +403,7 @@ class GovernanceInterceptor(Interceptor):
 
     def workflow_interceptor_class(
         self, input: WorkflowInterceptorClassInput
-    ) -> Optional[Type[WorkflowInboundInterceptor]]:
+    ) -> type[WorkflowInboundInterceptor] | None:
         state = self.state
         timeout = self.api_timeout
         on_error = self.on_api_error
@@ -436,7 +435,7 @@ class GovernanceInterceptor(Interceptor):
             # Run-local coordinator, set at the top of the patch-restart execute
             # path and read by handle_signal (same instance). None until bound /
             # on the legacy path.
-            _coordinator: Optional[PatchCoordinator] = None
+            _coordinator: PatchCoordinator | None = None
 
             def init(self, outbound: WorkflowOutboundInterceptor) -> None:
                 super().init(_Outbound(outbound))

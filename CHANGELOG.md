@@ -4,6 +4,14 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+### Added
+
+- A CONSTRAIN governance verdict on a user activity routes its execution into the sandbox transparently through the plugin: the activity input is mapped through the profile bundle to a command, executed by the injected governed dispatcher, and the bounded result is returned to the caller (ALLOW keeps running on the host). The interceptor handles the routing, so no separate governed-command Activity registration is needed. The dispatcher is structurally injected; the returned `DispatchResult` is validated and mapped to reported terminal metadata correlated with lifecycle signals, not a portable signed runtime receipt or independent proof. Host-result rejection is post-dispatch and does not prevent a host attempt; zero-host operation requires exact `CONSTRAIN` policy plus a deployment with no available dispatcher host path. Temporal and dispatcher profile bundles must use equivalent definitions/version.
+
+### Changed
+
+- Lifecycle governance Activities and Activity interceptors now adapt the Worker/plugin-owned `openbox_core.EvaluationClient` instead of constructing duplicate HTTP clients.
+
 ## [1.4.0] - 2026-07-23
 
 **BREAKING:** Renames the retryable-BLOCK remediation vocabulary introduced in `1.3.0` to `patch`, matching the cross-repository rename of `retry_plan` → `patch` (see the base SDK `1.2.0` changelog and `docs/proposal-block-patch-workflow-restart.md`). No behavior change — this is a terminology rename plus the required base-SDK wire-key bump.
@@ -13,7 +21,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 - **Wire key:** the governance directive field is now `patch` (was `retry_plan`), matching the base SDK `1.2.0` `EvaluationResult.patch` / `ApprovalResult.patch` contract.
 - **Public API renames:**
   - `RetryableBlockRequest` → `PatchRequest`; `GOVERNANCE_RETRYABLE_BLOCK_SCHEMA_VERSION` → `GOVERNANCE_PATCH_SCHEMA_VERSION` (public `openbox` exports).
-  - `max_retryable_block_restarts` → `max_patch_restarts` (`create_openbox_worker()` / `OpenBoxPlugin` / `GovernanceConfig` kwarg).
+  - `max_retryable_block_restarts` → `max_patch_restarts` (`OpenBoxPlugin` / `GovernanceConfig` kwarg).
   - `GovernanceRetryLimitExceeded` → `GovernancePatchLimitExceeded`; `GovernanceRetryInputInvalid` → `GovernancePatchInputInvalid` (`ApplicationError.type` values).
   - `openbox/retryable_block.py` → `openbox/patch.py`; `openbox/retry_coordinator.py` → `openbox/patch_coordinator.py` (internal modules — import directly only if you bypass the public `openbox` exports).
 - **Base SDK dependency raised to `openbox-sdk-python>=1.2.0`** (was `>=1.1.0`) — the patch rename requires `handle_patch` from base SDK `1.2.0`.
@@ -26,7 +34,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 ### Migration notes
 
 - If you read the raw governance API response yourself (rather than through this SDK), change `retry_plan` to `patch` in your parsing code.
-- Rename `max_retryable_block_restarts=` to `max_patch_restarts=` at any `create_openbox_worker()` / `OpenBoxPlugin(...)` call site.
+- Rename `max_retryable_block_restarts=` to `max_patch_restarts=` at any `OpenBoxPlugin(...)` call site.
 - Rename any direct import of `RetryableBlockRequest` to `PatchRequest` (from `openbox` or `openbox.patch`).
 
 ## [1.3.0] - 2026-07-21
@@ -169,7 +177,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ### Added
 
-- W3C trace propagation through Temporal headers, on by default via `enable_trace_propagation=True` on `OpenBoxPlugin` and `create_openbox_worker()`. Uses `temporalio.contrib.opentelemetry.TracingInterceptor` so spans started by the caller stitch to workflow/activity spans on the worker side.
+- W3C trace propagation through Temporal headers, on by default via `enable_trace_propagation=True` on `OpenBoxPlugin`. Uses `temporalio.contrib.opentelemetry.TracingInterceptor` so spans started by the caller stitch to workflow/activity spans on the worker side.
 - `ApplicationError` type constants in `errors.py` (`GOVERNANCE_HALT_ERROR_TYPE`, `GOVERNANCE_BLOCK_ERROR_TYPE`, `GOVERNANCE_API_ERROR_TYPE`, `GOVERNANCE_STOP_ERROR_TYPE`) — single source of truth for governance error routing.
 - `openbox.activities.GovernanceActivities` class + `build_governance_activities()` factory.
 
@@ -224,7 +232,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 - **Hook-level governance** — real-time, per-operation governance evaluation during activity execution
   - Every HTTP request, database query, file operation, and traced function call is evaluated at `started` (before, can block) and `completed` (after, informational) stages
   - Same `POST /api/v1/governance/evaluate` endpoint with new `hook_trigger` field in payload
-  - Automatically enabled when using `create_openbox_worker()`
+  - Automatically enabled when using `OpenBoxPlugin`
 - **Database query governance** — per-query started/completed evaluations for psycopg2, pymysql, mysql-connector, asyncpg, pymongo, redis, sqlalchemy
 - **File I/O governance** — per-operation evaluations for open, read, write, readline, readlines, writelines, close (opt-in via `instrument_file_io=True`)
 - **`@traced` decorator** (`openbox.tracing`) — function-level governance with OTel spans; zero overhead when governance not configured
@@ -276,7 +284,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 - HTTP instrumentation via OpenTelemetry (httpx, requests, urllib3, urllib)
 - Database instrumentation (psycopg2, pymysql, asyncpg, pymongo, redis, sqlalchemy)
 - File I/O instrumentation (opt-in)
-- Zero-code setup via `create_openbox_worker()` factory
+- Zero-code setup via the `OpenBoxPlugin`
 - Workflow and activity interceptors for governance
 - Span buffering and activity context tracking
 - `fail_open` / `fail_closed` error policies

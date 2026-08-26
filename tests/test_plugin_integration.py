@@ -7,14 +7,11 @@ Also covers replay safety (no duplicate governance events on replay).
 Requires: temporalio test server (downloaded automatically by WorkflowEnvironment).
 """
 
-import asyncio
 from datetime import timedelta
-from typing import Any, Dict, Optional
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from temporalio import activity, workflow
-from temporalio.client import Client, WorkflowHandle
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -80,12 +77,12 @@ def _create_mock_plugin(**overrides):
         openbox_api_key="obx_test_key_123",
     )
     defaults.update(overrides)
+    runtime = MagicMock()
+    runtime.aclose = AsyncMock()
 
     with (
         patch(f"{PATCH_BASE}.validate_api_key"),
-        patch(
-            "openbox.core_adapter.create_core_runtime", return_value=MagicMock()
-        ),
+        patch("openbox.core_adapter.create_core_runtime", return_value=runtime),
         patch("openbox.workflow_interceptor.GovernanceInterceptor"),
         patch("openbox.activity_interceptor.ActivityGovernanceInterceptor"),
         patch(f"{PATCH_BASE}.GovernanceClient"),
@@ -107,9 +104,6 @@ class TestPluginWorkerLifecycle:
         """Worker with OpenBoxPlugin starts, runs workflow, stops cleanly."""
         plugin = _create_mock_plugin()
         task_queue = "test-plugin-lifecycle"
-
-        # send_governance_event mock activity (from plugin.activities)
-        mock_gov_activity = MagicMock()
 
         async with Worker(
             env.client,

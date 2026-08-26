@@ -1,10 +1,14 @@
 """Comprehensive tests for the OpenBox SDK activity_interceptor module."""
 
+import asyncio
 import base64
+import enum as _enum
+import json
 import re
 import sys
 from dataclasses import dataclass, field
-from typing import List, Optional
+from datetime import UTC
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +24,7 @@ from openbox.config import GovernanceConfig
 from openbox.core_adapter import get_core_context_store
 from openbox.governance_state import TemporalGovernanceState
 from openbox.patch import GOVERNANCE_PATCH_SCHEMA_VERSION, PatchRequest
+from openbox.span_processor import WorkflowSpanProcessor
 from openbox.types import GovernanceVerdictResponse, Verdict
 
 from .conftest import posted_payload
@@ -39,14 +44,14 @@ class OuterData:
 
     name: str = ""
     nested: NestedData = field(default_factory=NestedData)
-    items: List[str] = field(default_factory=list)
+    items: list[str] = field(default_factory=list)
 
 
 @dataclass
 class DataWithList:
     """Dataclass with list of nested dataclasses."""
 
-    entries: List[NestedData] = field(default_factory=list)
+    entries: list[NestedData] = field(default_factory=list)
 
 
 @dataclass
@@ -61,7 +66,7 @@ class ActivityInput:
 class MockTemporalPayload:
     """Mock Temporal Payload object for testing serialization."""
 
-    def __init__(self, data: bytes, metadata: Optional[dict] = None):
+    def __init__(self, data: bytes, metadata: dict | None = None):
         self.data = data
         self.metadata = metadata or {}
 
@@ -139,6 +144,7 @@ def make_interceptor(state, config=None, *, next_result="result", client=None):
         next_interceptor=mock_next,
         api_url="http://localhost:8086",
         api_key="obx_test_key123",
+        span_processor=WorkflowSpanProcessor(),
         state=state,
         config=config,
         client=client or make_verdict_client(),
@@ -183,13 +189,19 @@ def create_mock_httpx_client(response_data, status_code=200):
     """
     mock_response = MagicMock()
     mock_response.status_code = status_code
+    mock_response.content = json.dumps(response_data).encode()
     mock_response.json.return_value = response_data
 
     mock_client_instance = AsyncMock()
     mock_client_instance.post = AsyncMock(return_value=mock_response)
 
     mock_client = MagicMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client_instance)
+    mock_client.post = mock_client_instance.post
+    mock_client.aclose = AsyncMock(return_value=None)
+    # The merged client uses the httpx client as an async context manager
+    # (``async with client as actual``), so the mock must yield ITSELF on
+    # enter — otherwise ``actual`` is an auto-created child mock.
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=None)
 
     return mock_client, mock_client_instance
@@ -234,7 +246,7 @@ class TestRfc3339Now:
 
     def test_returns_recent_time(self):
         """Test that returned time is within recent timeframe."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         result = _rfc3339_now()
 
@@ -250,9 +262,9 @@ class TestRfc3339Now:
             result_padded = result_no_z
 
         result_time = datetime.fromisoformat(result_padded)
-        result_time = result_time.replace(tzinfo=timezone.utc)
+        result_time = result_time.replace(tzinfo=UTC)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # The result should be within 1 second of now
         assert abs((now - result_time).total_seconds()) < 1
@@ -605,13 +617,14 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
         )
 
         assert interceptor.api_url == "http://localhost:8086"
         assert interceptor.api_key == "obx_test_key123"
-        assert interceptor.state is state
+        assert interceptor._state is state
         assert isinstance(interceptor.config, GovernanceConfig)
 
     def test_initialization_with_default_config(self, state):
@@ -619,6 +632,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -629,6 +643,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086/",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -639,6 +654,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086///",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
 
@@ -649,6 +665,7 @@ class TestActivityGovernanceInterceptor:
         interceptor = ActivityGovernanceInterceptor(
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
         )
         mock_next = MagicMock()
@@ -1102,6 +1119,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1154,6 +1172,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1191,6 +1210,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1221,6 +1241,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
@@ -1253,13 +1274,18 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
 
         mock_httpx = MagicMock()
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.aclose = AsyncMock(return_value=None)
+        # The merged client enters the transport as an async context manager.
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)
@@ -1284,13 +1310,18 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
         )
 
         mock_httpx = MagicMock()
         mock_client = MagicMock()
-        mock_client.__aenter__ = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.post = AsyncMock(side_effect=Exception("Connection error"))
+        mock_client.aclose = AsyncMock(return_value=None)
+        # The merged client enters the transport as an async context manager.
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
         mock_httpx.AsyncClient.return_value = mock_client
 
         ctx, _ = patched_activity(mock_activity_info)
@@ -1314,6 +1345,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1350,6 +1382,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1381,6 +1414,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1419,6 +1453,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1445,6 +1480,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1472,6 +1508,7 @@ class TestActivityInterceptor:
             next_interceptor=AsyncMock(),
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=governance_config,
         )
@@ -1686,6 +1723,7 @@ class TestEdgeCases:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
             client=make_verdict_client(),
@@ -1788,6 +1826,7 @@ class TestEdgeCases:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=config,
             client=client,
@@ -1926,6 +1965,7 @@ class TestActivityMultiAgentSession:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
             client=client,
@@ -1979,6 +2019,7 @@ class TestCoreContextBindingCarriesPolicyFields:
             next_interceptor=mock_next,
             api_url="http://localhost:8086",
             api_key="obx_test_key123",
+            span_processor=WorkflowSpanProcessor(),
             state=state,
             config=GovernanceConfig(),
             client=make_verdict_client(),
@@ -2216,3 +2257,241 @@ class TestCompletedHookPatchPriority:
 
         terminate.assert_awaited_once_with(self._WF, "kill switch")
         assert state.take_completed_stop(self._WF, self._RUN, self._ACT) is None
+
+
+# ─── CONSTRAIN sandbox routing ───────────────────────────────────────────────
+
+# The private governed-dispatcher package is not a dependency of this repo, so
+# the routing tests inject a minimal stand-in into sys.modules. The interceptor
+# only needs the enums for disposition/directive comparisons, the decision
+# parser, and the command value object.
+
+
+class _FakeDirective(_enum.Enum):
+    NONE = "none"
+    HALT = "halt"
+
+
+class _FakeDisposition(_enum.Enum):
+    EXECUTED_ON_HOST = "executed_on_host"
+    EXECUTED_IN_SANDBOX = "executed_in_sandbox"
+    EXECUTION_INDETERMINATE = "execution_indeterminate"
+    NOT_EXECUTED = "not_executed"
+
+
+class _FakeGovernanceDecision:
+    @staticmethod
+    def parse(value):
+        return value
+
+
+class _FakeGovernedCommand:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+@pytest.fixture
+def fake_governed_dispatcher(monkeypatch):
+    """Install a fake ``openbox_sandbox.dispatcher`` for sandbox-routing tests."""
+    package = ModuleType("openbox_sandbox")
+    package.__path__ = []
+    dispatcher = ModuleType("openbox_sandbox.dispatcher")
+    dispatcher.Directive = _FakeDirective
+    dispatcher.Disposition = _FakeDisposition
+    dispatcher.GovernanceDecision = _FakeGovernanceDecision
+    dispatcher.GovernedCommand = _FakeGovernedCommand
+    monkeypatch.setitem(sys.modules, "openbox_sandbox", package)
+    monkeypatch.setitem(sys.modules, "openbox_sandbox.dispatcher", dispatcher)
+    return dispatcher
+
+
+def make_mock_sandbox(dispatch_result=None):
+    """Build a mock TemporalSandboxConfig-like object for the interceptor."""
+    from unittest.mock import MagicMock
+
+    sandbox = MagicMock()
+    sandbox.timeout_seconds = 30
+    sandbox.heartbeat_interval_seconds = 0.05
+    sandbox.completion_events = True
+    sandbox.otel_bridge = None
+    sandbox.profiles.derive.return_value = ("/usr/bin/reconcile", "b-1")
+    sandbox.profiles.profile_fingerprint.return_value = "f" * 64
+    sandbox.profiles.parse_result.return_value = None
+    sandbox.heartbeat_sink.bind.return_value.__aenter__ = AsyncMock(
+        return_value=None
+    )
+    sandbox.heartbeat_sink.bind.return_value.__aexit__ = AsyncMock(
+        return_value=None
+    )
+    sandbox.dispatcher.dispatch_with_decision = AsyncMock(
+        return_value=dispatch_result
+    )
+    # A real dispatcher with a governance config posts its own completion;
+    # the test mock has no dispatcher config, so the interceptor wrapper owns
+    # the ActivityCompleted event.
+    sandbox.dispatcher._config = None
+    return sandbox
+
+
+def make_sandbox_dispatch_result():
+    """Build the minimal terminal dispatch result the interceptor maps."""
+    execution = SimpleNamespace(
+        sandbox_id="sandbox-1",
+        exit_code=0,
+        stdout=b'{"rows": 7}',
+        stderr=b"",
+        timeout_status=SimpleNamespace(value="completed_within_timeout"),
+        cleanup_status=SimpleNamespace(value="deleted"),
+    )
+    return SimpleNamespace(
+        disposition=_FakeDisposition.EXECUTED_IN_SANDBOX,
+        directive=_FakeDirective.NONE,
+        error=None,
+        execution=execution,
+    )
+
+
+def make_constrain_response():
+    return GovernanceVerdictResponse(
+        verdict=Verdict.CONSTRAIN,
+        reason="run in sandbox",
+        policy_id="policy-1",
+        risk_score=0.7,
+    )
+
+
+class TestConstrainedActivityRouting:
+    """CONSTRAIN routes the user's activity into the sandbox transparently."""
+
+    @pytest.mark.asyncio
+    async def test_constrain_with_sandbox_routes_and_returns_sandbox_result(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        """A CONSTRAIN ActivityStarted verdict executes the derived command
+        through the sandbox dispatcher and returns the bounded result without
+        running the user's activity on the host."""
+        sandbox = make_mock_sandbox(make_sandbox_dispatch_result())
+        client = make_verdict_client(make_constrain_response())
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), client=client
+        )
+        interceptor._sandbox = sandbox
+        mock_input = make_input(
+            [{"profile_id": "reconcile", "arguments": {"batch_id": "b-1"}}]
+        )
+
+        ctx, mock_activity = patched_activity(mock_activity_info)
+        try:
+            mock_activity.wait_for_cancelled.return_value = asyncio.Future()
+            from openbox.sandbox.types import GovernedCommandActivityResult
+
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        # Host execution never ran.
+        interceptor.next.execute_activity.assert_not_called()
+        # The command was derived from the activity input and dispatched with
+        # the CONSTRAIN decision.
+        sandbox.dispatcher.dispatch_with_decision.assert_awaited_once()
+        call_args = sandbox.dispatcher.dispatch_with_decision.await_args
+        command, decision = call_args.args
+        assert command.kwargs["profile_id"] == "reconcile"
+        assert command.kwargs["argv"] == ("/usr/bin/reconcile", "b-1")
+        assert command.kwargs["arguments"] == {"batch_id": "b-1"}
+        assert command.kwargs["workflow_id"] == "test-workflow-id"
+        assert command.kwargs["run_id"] == "test-run-id"
+        assert command.kwargs["activity_id"] == "test-activity-id"
+        assert command.kwargs["timeout_seconds"] == 30
+        assert decision["verdict"] == "constrain"
+        assert decision["policy_id"] == "policy-1"
+        # The bounded sandbox result is returned to the caller.
+        assert isinstance(result, GovernedCommandActivityResult)
+        assert result.profile_id == "reconcile"
+        assert result.disposition == "executed_in_sandbox"
+        assert result.exit_code == 0
+        assert result.stdout_bytes == len(b'{"rows": 7}')
+        # ActivityStarted + the wrapper's ActivityCompleted were both posted.
+        assert client.evaluate_event.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_constrain_without_sandbox_keeps_unsupported_error(
+        self, state, mock_activity_info
+    ):
+        """Without a sandbox configuration the CONSTRAIN error contract is
+        preserved (the interceptor cannot route anywhere)."""
+        from temporalio.exceptions import ApplicationError
+
+        client = make_verdict_client(make_constrain_response())
+        interceptor = make_interceptor(state, GovernanceConfig(), client=client)
+        mock_input = make_input(["anything"])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            with pytest.raises(ApplicationError) as exc_info:
+                await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert exc_info.value.type == "GovernanceConstrainUnsupported"
+        assert exc_info.value.non_retryable is True
+        interceptor.next.execute_activity.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allow_with_sandbox_runs_activity_on_host(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        """An ALLOW verdict keeps the natural path: the user's activity runs
+        on the host and the sandbox dispatcher is never consulted."""
+        sandbox = make_mock_sandbox(make_sandbox_dispatch_result())
+        client = make_verdict_client(
+            GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        )
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), next_result="host_result", client=client
+        )
+        interceptor._sandbox = sandbox
+        mock_input = make_input(["arg1"])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert result == "host_result"
+        interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
+        sandbox.dispatcher.dispatch_with_decision.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_completed_constrain_with_sandbox_is_noop(
+        self, state, mock_activity_info, fake_governed_dispatcher
+    ):
+        """A CONSTRAIN verdict at ActivityCompleted (the activity already
+        executed) is accepted as a no-op when a sandbox is configured."""
+        sandbox = make_mock_sandbox(make_sandbox_dispatch_result())
+        client = make_verdict_client(
+            GovernanceVerdictResponse(verdict=Verdict.ALLOW)
+        )
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                make_constrain_response(),
+            ]
+        )
+        interceptor = make_interceptor(
+            state, GovernanceConfig(), next_result="host_result", client=client
+        )
+        interceptor._sandbox = sandbox
+        mock_input = make_input(["arg1"])
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(mock_input)
+        finally:
+            ctx.stop()
+
+        assert result == "host_result"
+        interceptor.next.execute_activity.assert_awaited_once_with(mock_input)
+        sandbox.dispatcher.dispatch_with_decision.assert_not_awaited()
+        assert client.evaluate_event.await_count == 2

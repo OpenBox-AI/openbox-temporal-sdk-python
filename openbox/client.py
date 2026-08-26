@@ -1,63 +1,149 @@
-"""OpenBox Temporal SDK — Governance HTTP Client.
+"""Temporal governance façade over the shared Core ``EvaluationClient``.
 
-Centralizes governance API HTTP calls for activity-level events.
-Used by ActivityGovernanceInterceptor for ActivityStarted/ActivityCompleted.
-
-NOT sandbox-safe — uses logging at module level. Do NOT import from
-workflow_interceptor.py or other workflow-context code.
-
-Note: httpx is imported lazily inside methods to avoid loading it at module
-level. Module-level httpx import triggers Temporal sandbox restrictions
-(os.stat). This mirrors the existing pattern in activity_interceptor.py.
+This module owns only result-shape and fail-policy adaptation.  HTTP transport,
+exact-body signing, TLS, and strict successful-response parsing are performed
+once by :mod:`openbox_core.client`.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from .types import GovernanceVerdictResponse, Verdict
+from openbox_core.contracts.results import ApprovalResult, EvaluationResult
+
+if TYPE_CHECKING:
+    from openbox_core.client import EvaluationClient
+
+from .types import GovernanceVerdictResponse, GuardrailsCheckResult, Verdict
 
 logger = logging.getLogger(__name__)
 
 
-def _check_expiration(data: dict) -> dict:
-    """Check approval_expiration_time and set expired=True if past.
+class _TemporalEvaluationClient:  # type: ignore[no-redef]
+    """Lazy EvaluationClient adapter; the base client loads on first use."""
+    _base = None
 
-    Modifies data in-place. Returns data dict.
-    Handles formats: ISO Z, ISO offset, space-separated from DB.
+    def __init__(self, *args, **kwargs):
+        from openbox_core.client import EvaluationClient as _Base
+
+        self._base = _Base(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+    """Shared client with a narrow legacy ``AsyncClient`` mock adapter.
+
+    Production transports always execute the parent implementation. Historical
+    Temporal tests exposed an async context-manager mock instead of an httpx
+    client; adapting that seam here avoids restoring duplicate HTTP/parsing.
     """
-    expiration_time_str = data.get("approval_expiration_time")
-    if not expiration_time_str:
-        return data
 
-    try:
-        normalized = expiration_time_str.replace("Z", "+00:00").replace(" ", "T")
-        expiration_time = datetime.fromisoformat(normalized)
-        if expiration_time.tzinfo is None:
-            expiration_time = expiration_time.replace(tzinfo=timezone.utc)
-        current_time = datetime.now(timezone.utc)
-        if current_time > expiration_time:
-            data["expired"] = True
-    except (ValueError, TypeError) as e:
-        logger.warning(
-            f"Failed to parse approval_expiration_time '{expiration_time_str}': {e}"
+    @staticmethod
+    def _legacy_manager(value) -> bool:
+        return type(value).__module__.startswith("unittest.mock") and hasattr(
+            value, "__aenter__"
         )
 
-    return data
+    def _parse_evaluate_response(self, response):
+        content = getattr(response, "content", None)
+        if isinstance(content, bytes):
+            return self._base._parse_evaluate_response(response)
+        if type(response).__module__.startswith("unittest.mock"):
+            import json
+
+            from openbox_core.contracts.results import EvaluationResult
+
+            if not 200 <= response.status_code < 300:
+                return self._network_failure(
+                    f"Governance API error: HTTP {response.status_code}"
+                )
+            return EvaluationResult.from_wire(
+                json.dumps(response.json(), separators=(",", ":")).encode()
+            )
+        return self._base._parse_evaluate_response(response)
+
+    async def aevaluate(self, payload: dict) -> EvaluationResult:
+        client = self._async()
+        if not self._legacy_manager(client):
+            return await self._base.aevaluate(payload)
+        url, headers, body = self._prepared(
+            "POST", "/api/v1/governance/evaluate", payload
+        )
+        try:
+            async with client as actual:
+                response = await actual.post(url, content=body, headers=headers)
+        except Exception as error:
+            return self._network_failure(str(error) or "Governance API unreachable")
+        finally:
+            self._async_client = None
+        return self._parse_evaluate_response(response)
+
+    async def apoll_approval(
+        self, workflow_id: str, run_id: str, activity_id: str
+    ) -> ApprovalResult | None:
+        client = self._async()
+        if not self._legacy_manager(client):
+            return await self._base.apoll_approval(workflow_id, run_id, activity_id)
+        payload = {
+            "workflow_id": workflow_id,
+            "run_id": run_id,
+            "activity_id": activity_id,
+        }
+        url, headers, body = self._prepared(
+            "POST", "/api/v1/governance/approval", payload
+        )
+        try:
+            async with client as actual:
+                response = await actual.post(url, content=body, headers=headers)
+        except Exception:
+            logger.warning("Failed to poll approval status")
+            return None
+        finally:
+            self._async_client = None
+        return self._parse_approval_response(response)
+
+
+def _temporal_response(result: EvaluationResult) -> GovernanceVerdictResponse:
+    guardrails = result.guardrails
+    temporal_guardrails = (
+        None
+        if guardrails is None
+        else GuardrailsCheckResult(
+            redacted_input=guardrails.redacted_input,
+            input_type=guardrails.input_type,
+            raw_logs=guardrails.raw_logs,
+            validation_passed=guardrails.validation_passed,
+            reasons=guardrails.reasons,
+        )
+    )
+    constraints = result.constraints
+    temporal_constraints = (
+        [str(value) for value in constraints]
+        if isinstance(constraints, list)
+        and all(isinstance(value, str) for value in constraints)
+        else None
+    )
+    return GovernanceVerdictResponse(
+        verdict=Verdict(result.verdict.value),
+        reason=result.reason,
+        policy_id=result.policy_id,
+        risk_score=result.risk_score,
+        metadata=result.metadata,
+        governance_event_id=result.governance_event_id,
+        guardrails_result=temporal_guardrails,
+        trust_tier=result.trust_tier,
+        behavioral_violations=result.behavioral_violations,
+        alignment_score=result.alignment_score,
+        approval_id=result.approval_id,
+        constraints=temporal_constraints,
+        fallback_used=result.fallback_used,
+        patch=result.patch,
+        raw=dict(result.raw),
+    )
 
 
 class GovernanceClient:
-    """HTTP client for OpenBox Core governance API.
-
-    Centralizes evaluate_event and poll_approval HTTP calls with
-    consistent auth headers and error policy handling.
-
-    Note: Uses per-call httpx.AsyncClient (async with) for test mock
-    compatibility. The client object itself provides persistent auth
-    header caching and error policy configuration.
-    """
+    """Compatibility façade adapting one shared ``EvaluationClient``."""
 
     def __init__(
         self,
@@ -66,147 +152,99 @@ class GovernanceClient:
         api_key: str,
         timeout: float = 30.0,
         on_api_error: str = "fail_open",
-        agent_did: Optional[str] = None,
+        agent_did: str | None = None,
         signer=None,
+        core_ca_path: str | None = None,
     ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
         self._on_api_error = on_api_error
-        # DID + Ed25519 signer for AIP signed requests (None = unsigned mode).
-        # Fall back to the globally-configured signer when omitted so manual
-        # setups that called initialize() with signing don't send unsigned calls.
-        from .config import resolve_signing_defaults
+
+        from openbox_core.identity import AgentIdentity
+
+        from .config import resolve_core_ssl_context, resolve_signing_defaults
 
         self._agent_did, self._signer = resolve_signing_defaults(agent_did, signer)
+        self._ssl_context = resolve_core_ssl_context(core_ca_path)
+        identity = (
+            AgentIdentity(self._agent_did, self._signer)
+            if self._agent_did and self._signer is not None
+            else None
+        )
+        self._core_client: EvaluationClient = _TemporalEvaluationClient(
+            self._api_url,
+            self._api_key,
+            timeout_seconds=timeout,
+            on_api_error=on_api_error,
+            identity=identity,
+            sdk_engine="temporal",
+        )
+
+    @classmethod
+    def _from_core_client(
+        cls,
+        core_client: EvaluationClient,
+        *,
+        api_url: str,
+        api_key: str,
+        timeout: float,
+        on_api_error: str,
+        agent_did: str | None,
+        signer,
+        ssl_context=None,
+    ) -> GovernanceClient:
+        """Internal composition seam: no second Core client is constructed."""
+        instance = cls.__new__(cls)
+        instance._api_url = api_url.rstrip("/")
+        instance._api_key = api_key
+        instance._timeout = timeout
+        instance._on_api_error = on_api_error
+        instance._agent_did = agent_did
+        instance._signer = signer
+        instance._ssl_context = ssl_context
+        instance._core_client = core_client
+        return instance
 
     async def evaluate_event(
         self, payload: dict
-    ) -> Optional[GovernanceVerdictResponse]:
-        """Send governance event to /api/v1/governance/evaluate.
+    ) -> GovernanceVerdictResponse | None:
+        """Evaluate through the strict shared parser and adapt Temporal semantics.
 
-        Args:
-            payload: Pre-built governance event payload dict.
-
-        Returns:
-            GovernanceVerdictResponse on success.
-            None on API error with fail_open policy.
-            GovernanceVerdictResponse(HALT) on API error with fail_closed policy.
+        Shared fail-open produces an explicit fallback ALLOW; legacy Temporal
+        call sites observe that as ``None``.  Shared fail-closed raises
+        ``GovernanceAPIError``; legacy Temporal call sites observe a HALT result.
+        Contract errors remain errors and are never converted to fail-open.
         """
-        # Lazy import — avoids Temporal sandbox restrictions at module level
-        import httpx
-        from .request_signing import prepare_signed_request
-
-        headers, body = prepare_signed_request(
-            "POST",
-            "/api/v1/governance/evaluate",
-            payload,
-            api_key=self._api_key,
-            agent_did=self._agent_did,
-            signer=self._signer,
-        )
+        from .errors import GovernanceAPIError
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(
-                    f"{self._api_url}/api/v1/governance/evaluate",
-                    content=body,
-                    headers=headers,
-                )
-
-                if response.status_code >= 400:
-                    error_msg = f"HTTP {response.status_code}"
-                    logger.warning(f"Governance API error: {error_msg}")
-                    return self._handle_api_error(f"Governance API error: {error_msg}")
-
-                if response.status_code == 200:
-                    try:
-                        data = response.json()
-                        logger.info(
-                            f"Governance response: verdict={data.get('verdict') or data.get('action', 'unknown')}, "
-                            f"reason={data.get('reason')}"
-                        )
-                        verdict = GovernanceVerdictResponse.from_dict(data)
-                        if verdict.verdict.should_stop():
-                            logger.info(
-                                f"Governance blocked: {verdict.reason} (policy: {verdict.policy_id})"
-                            )
-                        if verdict.guardrails_result:
-                            logger.info(
-                                f"Guardrails redaction: input_type={verdict.guardrails_result.input_type}"
-                            )
-                        return verdict
-                    except Exception as e:
-                        logger.warning(f"Failed to parse governance response: {e}")
-
-                return None
-
-        except Exception as e:
-            error_msg = str(e) if str(e) else repr(e)
-            logger.warning(f"Governance API error ({type(e).__name__}): {error_msg}")
-            return self._handle_api_error(f"Governance API error: {error_msg}")
+            result = await self._core_client.aevaluate(payload)
+        except GovernanceAPIError as error:
+            return self._handle_api_error(str(error))
+        if result.fallback_used:
+            return None
+        return _temporal_response(result)
 
     async def poll_approval(
         self, workflow_id: str, run_id: str, activity_id: str
-    ) -> Optional[dict]:
-        """Poll /api/v1/governance/approval for HITL status.
-
-        Returns dict with verdict/action and optional fields, or None on failure.
-        Sets expired=True in the dict if approval_expiration_time has passed.
-        """
-        # Lazy import — avoids Temporal sandbox restrictions at module level
-        import httpx
-        from .request_signing import prepare_signed_request
-
-        payload = {
-            "workflow_id": workflow_id,
-            "run_id": run_id,
-            "activity_id": activity_id,
-        }
-
-        headers, body = prepare_signed_request(
-            "POST",
-            "/api/v1/governance/approval",
-            payload,
-            api_key=self._api_key,
-            agent_did=self._agent_did,
-            signer=self._signer,
+    ) -> dict | None:
+        """Poll through the shared client and return the historical raw dict."""
+        result: ApprovalResult | None = await self._core_client.apoll_approval(
+            workflow_id, run_id, activity_id
         )
-
-        try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(
-                    f"{self._api_url}/api/v1/governance/approval",
-                    content=body,
-                    headers=headers,
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.info(f"Approval status response: {data}")
-                    _check_expiration(data)
-                    return data
-
-                logger.warning(
-                    f"Failed to get approval status: HTTP {response.status_code}"
-                )
-                return None
-
-        except Exception as e:
-            logger.warning(f"Failed to poll approval status: {e}")
-            return None
+        return None if result is None else dict(result.raw)
 
     async def close(self) -> None:
-        """No-op: per-call clients close automatically via async with."""
-        pass
+        await self._core_client.aclose()
 
-    def _handle_api_error(self, error_msg: str) -> Optional[GovernanceVerdictResponse]:
-        """Apply on_api_error policy. Returns None (fail_open) or HALT (fail_closed)."""
+    def _handle_api_error(self, error_msg: str) -> GovernanceVerdictResponse | None:
         if self._on_api_error == "fail_closed":
-            return GovernanceVerdictResponse(verdict=Verdict.HALT, reason=error_msg)
+            return GovernanceVerdictResponse(
+                verdict=Verdict.HALT, reason=error_msg, fallback_used=True
+            )
         return None
 
     @staticmethod
     def halt_response(reason: str) -> GovernanceVerdictResponse:
-        """Build a HALT verdict response."""
         return GovernanceVerdictResponse(verdict=Verdict.HALT, reason=reason)

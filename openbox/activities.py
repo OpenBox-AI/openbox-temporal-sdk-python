@@ -1,8 +1,10 @@
+# openbox/activities.py
+#
+# IMPORTANT: This module imports httpx which uses os.stat internally.
+# Do NOT import this module from workflow code (workflow_interceptor.py)!
+# The workflow interceptor references this activity by string name "send_governance_event".
 """
 Governance event activity for workflow-level HTTP calls.
-
-NOT sandbox-safe: this module imports httpx. Workflow code references the
-activity by string name instead of importing it.
 
 CRITICAL: Temporal workflows must be deterministic. HTTP calls are NOT allowed directly
 in workflow code (including interceptors). WorkflowInboundInterceptor sends events via
@@ -22,15 +24,15 @@ code allowed) rather than workflow context (must be deterministic).
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, NoReturn
 
 import httpx
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from .errors import GovernanceAPIError  # noqa: F401
 from .types import GovernanceVerdictResponse, Verdict
-from .types import rfc3339_now as _rfc3339_now
+from .types import rfc3339_now as _rfc3339_now  # shared utility
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +45,6 @@ def set_temporal_client(client) -> None:
     """Store Temporal client reference for HALT terminate calls."""
     global _temporal_client
     _temporal_client = client
-
-
-from .errors import GovernanceAPIError  # noqa: F401
 
 
 async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
@@ -79,8 +78,10 @@ async def _terminate_workflow_for_halt(workflow_id: str, reason: str) -> None:
 
 
 def raise_governance_block(
-    reason: str, policy_id: str = None, risk_score: float = None
-):
+    reason: str,
+    policy_id: str | None = None,
+    risk_score: float | None = None,
+) -> NoReturn:
     """Raise non-retryable ApplicationError for BLOCK verdict — blocks activity only."""
     details = {"policy_id": policy_id, "risk_score": risk_score}
     raise ApplicationError(
@@ -105,7 +106,7 @@ def _build_verdict_result(verdict: Verdict, reason, policy_id, risk_score) -> di
 
 async def _handle_stop_verdict(
     verdict: Verdict, reason, policy_id, risk_score, event_type, event_payload
-) -> Optional[dict]:
+) -> dict | None:
     """Handle BLOCK/HALT verdicts. Returns result for signals, raises for others."""
     logger.info(
         f"Governance {verdict.value} {event_type}: {reason} (policy: {policy_id})"
@@ -142,21 +143,35 @@ class GovernanceActivities:
     Credentials live on the instance (never in activity inputs → never in
     workflow history → not visible to anyone with namespace read access).
     The worker registers bound methods of a single instance, created at
-    worker-init time by the plugin / create_openbox_worker factory.
+    worker-init time by the OpenBoxPlugin.
     """
 
-    def __init__(self, api_url: str, api_key: str, *, agent_did=None, signer=None):
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        *,
+        agent_did=None,
+        signer=None,
+        core_ca_path: str | None = None,
+    ):
         self._api_url = api_url.rstrip("/")
         self._api_key = api_key
         # AIP signing material — held on the instance so it never flows through
         # activity inputs / workflow history.
         self._agent_did = agent_did
         self._signer = signer
+        from .config import resolve_core_ssl_context
+
+        self._ssl_context = resolve_core_ssl_context(core_ca_path)
+        # Worker/plugin composition injects its façade over the one shared Core
+        # client. Direct constructors retain the historical transport seam.
+        self._governance_client: Any = None
 
     @activity.defn(name="send_governance_event")
     async def send_governance_event(
-        self, input: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
+        self, input: dict[str, Any]
+    ) -> dict[str, Any] | None:
         """Send a governance event to OpenBox Core.
 
         Called from WorkflowInboundInterceptor via workflow.execute_activity()
@@ -171,6 +186,41 @@ class GovernanceActivities:
         payload = {**event_payload, "timestamp": _rfc3339_now()}
         event_type = event_payload.get("event_type", "unknown")
 
+        if self._governance_client is not None:
+            response = await self._governance_client.evaluate_event(payload)
+            if response is None:
+                return {"success": False, "error": "Governance API unavailable"}
+            # A BLOCK carrying a valid patch restarts the workflow run instead
+            # of merely failing this activity.
+            from .errors import GOVERNANCE_PATCH_ERROR_TYPE
+            from .patch import patch_request
+
+            patch_req = patch_request(response, event_type=event_type)
+            if patch_req is not None:
+                raise ApplicationError(
+                    "Governance requested workflow restart",
+                    patch_req.to_dict(),
+                    type=GOVERNANCE_PATCH_ERROR_TYPE,
+                    non_retryable=True,
+                )
+            if response.verdict.should_stop():
+                result = await _handle_stop_verdict(
+                    response.verdict,
+                    response.reason,
+                    response.policy_id,
+                    response.risk_score,
+                    event_type,
+                    event_payload,
+                )
+                if result is not None:
+                    return result
+            return _build_verdict_result(
+                response.verdict,
+                response.reason,
+                response.policy_id,
+                response.risk_score,
+            )
+
         # Sign once over the exact bytes we transmit (timestamp included).
         from .request_signing import prepare_signed_request
 
@@ -184,7 +234,10 @@ class GovernanceActivities:
         )
 
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            client_options = (
+                {"verify": self._ssl_context} if self._ssl_context is not None else {}
+            )
+            async with httpx.AsyncClient(timeout=timeout, **client_options) as client:
                 response = await client.post(
                     f"{self._api_url}/api/v1/governance/evaluate",
                     content=body,
@@ -239,7 +292,7 @@ class GovernanceActivities:
         except Exception as e:
             logger.warning(f"Failed to send {event_type} event: {e}")
             if on_api_error == "fail_closed":
-                raise GovernanceAPIError(str(e))
+                raise GovernanceAPIError(str(e)) from None
             return {"success": False, "error": str(e)}
 
 
@@ -249,6 +302,7 @@ def build_governance_activities(
     *,
     agent_did=None,
     signer=None,
+    core_ca_path: str | None = None,
 ) -> GovernanceActivities:
     """Factory used by plugin.py and worker.py to build the activities instance.
 
@@ -265,16 +319,19 @@ def build_governance_activities(
         api_key=api_key,
         agent_did=agent_did,
         signer=signer,
+        core_ca_path=core_ca_path,
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Backward-compat module-level helper.
 #
 # Not decorated with @activity.defn — worker/plugin register the class-based
 # version above so credentials never flow through activity inputs. This shim
 # exists for direct callers (tests, scripts) who already hold credentials and
 # want to invoke the HTTP logic without constructing the class themselves.
-async def send_governance_event(input: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# ─────────────────────────────────────────────────────────────────────────────
+async def send_governance_event(input: dict[str, Any]) -> dict[str, Any] | None:
     """Backward-compat wrapper — delegates to GovernanceActivities.
 
     Tests and direct callers can keep passing api_url/api_key in the input

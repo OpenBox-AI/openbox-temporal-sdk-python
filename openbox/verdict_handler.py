@@ -1,3 +1,4 @@
+# openbox/verdict_handler.py
 """OpenBox Temporal SDK — Centralized verdict enforcement.
 
 NOT sandbox-safe — uses logging at module level. Do NOT import from
