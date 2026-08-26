@@ -313,7 +313,7 @@ def OpenBoxPlugin(...)(
 
 **OpenBox Unified Exception Hierarchy** (`openbox/errors.py`):
 
-```python
+```text
 OpenBoxError (base)
 ├── OpenBoxConfigError
 │   ├── OpenBoxAuthError (invalid API key)
@@ -592,7 +592,7 @@ async def test_workflow_with_governance(env):
 
 **Standard:** Google-style docstrings
 
-```python
+```text
 def OpenBoxPlugin(...)(
     client: Client,
     task_queue: str,
