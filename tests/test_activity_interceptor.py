@@ -2336,6 +2336,7 @@ def make_mock_sandbox(dispatch_result=None):
 def make_sandbox_dispatch_result():
     """Build the minimal terminal dispatch result the interceptor maps."""
     execution = SimpleNamespace(
+        sandbox_id="sandbox-1",
         exit_code=0,
         stdout=b'{"rows": 7}',
         stderr=b"",
