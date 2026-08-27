@@ -15,7 +15,12 @@ from openbox_core.contracts.results import ApprovalResult, EvaluationResult
 if TYPE_CHECKING:
     from openbox_core.client import EvaluationClient
 
-from .types import GovernanceVerdictResponse, GuardrailsCheckResult, Verdict
+from .types import (
+    GovernanceVerdictResponse,
+    GuardrailsCheckResult,
+    Verdict,
+    _profile_id_from_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +141,7 @@ def _temporal_response(result: EvaluationResult) -> GovernanceVerdictResponse:
         alignment_score=result.alignment_score,
         approval_id=result.approval_id,
         constraints=temporal_constraints,
+        profile_id=_profile_id_from_response(result.raw),
         fallback_used=result.fallback_used,
         patch=result.patch,
         raw=dict(result.raw),

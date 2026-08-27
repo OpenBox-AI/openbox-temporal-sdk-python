@@ -17,12 +17,16 @@ This is different from workflow interceptors which must maintain determinism.
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any, Literal, NoReturn
+from types import SimpleNamespace
+from typing import Any, Literal, NoReturn, cast
 
+from openbox_core.contracts.context import ActivityContext
+from openbox_core.contracts.results import EvaluationResult
 from opentelemetry import trace
 from temporalio import activity
 from temporalio.worker import (
@@ -32,7 +36,7 @@ from temporalio.worker import (
 )
 
 from .activities import _terminate_workflow_for_halt
-from .client import GovernanceClient
+from .client import GovernanceClient, _temporal_response
 from .config import GovernanceConfig
 from .core_adapter import core_activity_scope, get_core_context_store
 from .errors import (
@@ -52,8 +56,53 @@ from .sandbox.types import (
     GovernedCommandTypedResult,
 )
 from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+from .types import (
+    GovernanceVerdictResponse,
+    Verdict,
+    WorkflowEventType,
+)
+from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .verdict_handler import enforce_verdict
 
 _CONTENT_MAX_BYTES = 64 * 1024
+_ACTIVITY_ROOT_SPAN_METADATA_KEY = "openbox.activity_root_span_id"
+
+
+def _sandbox_dispatch_id(info: Any, profile_id: str) -> str:
+    """Derive one stable sandbox dispatch identity per Temporal attempt/profile."""
+    identity = "\0".join(
+        (
+            "openbox.sandbox.dispatch.v1",
+            info.workflow_id or "",
+            info.workflow_run_id or "",
+            info.activity_id or "",
+            str(info.attempt or 1),
+            profile_id,
+        )
+    ).encode("utf-8")
+    return str(uuid.UUID(bytes=hashlib.sha256(identity).digest()[:16], version=4))
+
+
+def _activity_root_span_id(info: Any) -> str:
+    """Return the activity anchor used by both Core fallback and SDK evidence."""
+    try:
+        span_context = trace.get_current_span().get_span_context()
+        span_id = getattr(span_context, "span_id", 0)
+        if isinstance(span_id, int) and span_id != 0:
+            return format(span_id, "016x")
+    except Exception:
+        pass
+
+    identity = "|".join(
+        (
+            info.workflow_id or "",
+            info.workflow_run_id or "",
+            info.activity_id or "",
+            str(info.attempt or 1),
+            "activity_root",
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()[:16]
 
 
 def _bounded_text(raw: bytes) -> str:
@@ -64,13 +113,6 @@ def _bounded_text(raw: bytes) -> str:
     if len(raw) > _CONTENT_MAX_BYTES:
         text = text[:_CONTENT_MAX_BYTES] + "…(truncated)"
     return text
-from .types import (
-    GovernanceVerdictResponse,
-    Verdict,
-    WorkflowEventType,
-)
-from .types import rfc3339_now as _rfc3339_now  # shared utility
-from .verdict_handler import enforce_verdict
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -257,6 +299,7 @@ class ActivityGovernanceInterceptor(Interceptor):
         self.config = config or GovernanceConfig()
         self._sandbox = sandbox
         self._state = state or TemporalGovernanceState()
+        self._inbound: _ActivityInterceptor | None = None
         self._client = client or GovernanceClient(
             api_url=api_url,
             api_key=api_key,
@@ -267,7 +310,7 @@ class ActivityGovernanceInterceptor(Interceptor):
     def intercept_activity(
         self, next_interceptor: ActivityInboundInterceptor
     ) -> ActivityInboundInterceptor:
-        return _ActivityInterceptor(
+        self._inbound = _ActivityInterceptor(
             next_interceptor,
             self.api_url,
             self.api_key,
@@ -277,6 +320,19 @@ class ActivityGovernanceInterceptor(Interceptor):
             self._client,
             self._sandbox,
         )
+        return self._inbound
+
+    async def handle_constrain(
+        self, result: EvaluationResult, context: ActivityContext | None
+    ) -> None:
+        if self._inbound is not None:
+            await self._inbound.handle_constrain(result, context)
+
+    def handle_constrain_sync(
+        self, result: EvaluationResult, context: ActivityContext | None
+    ) -> None:
+        if self._inbound is not None:
+            self._inbound.handle_constrain_sync(result, context)
 
 
 class _ActivityInterceptor(ActivityInboundInterceptor):
@@ -298,12 +354,124 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         self._state = state
         self._config = config
         self._sandbox = sandbox
+        self._active_behavioral_dispatches: dict[
+            tuple[str, str, str, int], tuple[asyncio.AbstractEventLoop, Any, Any]
+        ] = {}
+        self._behavioral_dispatch_tasks: dict[
+            tuple[str, str, str, int], asyncio.Task[dict[str, Any]]
+        ] = {}
         self._client = client or GovernanceClient(
             api_url=api_url,
             api_key=api_key,
             timeout=config.api_timeout,
             on_api_error=config.on_api_error,
         )
+
+    async def handle_constrain(
+        self, result: EvaluationResult, context: ActivityContext | None
+    ) -> None:
+        """Dispatch a started-hook behavioral profile and retain its outcome."""
+        binding = self._behavioral_binding(context)
+        verdict = _temporal_response(result)
+        if binding is None or verdict.profile_id is None:
+            return
+        _, info, task_headers = binding
+        task = self._behavioral_dispatch_task(
+            info, verdict, task_headers, self._trigger_span_id(context)
+        )
+        await asyncio.shield(task)
+
+    def handle_constrain_sync(
+        self, result: EvaluationResult, context: ActivityContext | None
+    ) -> None:
+        """Bridge a sync preflight callback onto the activity event loop."""
+        binding = self._behavioral_binding(context)
+        verdict = _temporal_response(result)
+        if binding is None or verdict.profile_id is None:
+            return
+        loop, info, task_headers = binding
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            # A synchronous library call can run directly on an async activity's
+            # loop. Reserve the once-guard now; completion awaits the task before
+            # attaching its outcome.
+            self._behavioral_dispatch_task(
+                info, verdict, task_headers, self._trigger_span_id(context)
+            )
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            self.handle_constrain(result, context), loop
+        )
+        future.result()
+
+    def _behavioral_binding(
+        self, context: ActivityContext | None
+    ) -> tuple[asyncio.AbstractEventLoop, Any, Any] | None:
+        ctx = context or get_core_context_store().current_activity_context()
+        if ctx is None:
+            return None
+        metadata = getattr(ctx, "metadata", {}) or {}
+        attempt = metadata.get("attempt", 1)
+        if not isinstance(attempt, int):
+            attempt = 1
+        return self._active_behavioral_dispatches.get(
+            (ctx.workflow_id or "", ctx.run_id or "", ctx.activity_id or "", attempt)
+        )
+
+    @staticmethod
+    def _trigger_span_id(context: ActivityContext | None) -> str | None:
+        metadata = getattr(context, "metadata", {}) or {}
+        value = getattr(context, "trigger_span_id", None) or metadata.get(
+            "openbox.trigger_span_id"
+        )
+        if (
+            isinstance(value, str)
+            and len(value) == 16
+            and all(character in "0123456789abcdef" for character in value)
+        ):
+            return value
+        return None
+
+    @staticmethod
+    def _behavioral_key(info: Any) -> tuple[str, str, str, int]:
+        return (
+            info.workflow_id or "",
+            info.workflow_run_id or "",
+            info.activity_id or "",
+            info.attempt or 1,
+        )
+
+    def _behavioral_dispatch_task(
+        self,
+        info: Any,
+        verdict: GovernanceVerdictResponse,
+        task_headers: Any,
+        trigger_span_id: str | None = None,
+    ) -> asyncio.Task[dict[str, Any]]:
+        """Return the activity-scoped once-guard shared by both verdict stages."""
+        key = self._behavioral_key(info)
+        task = self._behavioral_dispatch_tasks.get(key)
+        if task is None:
+            task = asyncio.create_task(
+                self._dispatch_behavioral_profile(
+                    info, verdict, task_headers, trigger_span_id
+                )
+            )
+            self._behavioral_dispatch_tasks[key] = task
+        return task
+
+    async def _discard_behavioral_dispatch(self, info: Any) -> None:
+        task = self._behavioral_dispatch_tasks.pop(self._behavioral_key(info), None)
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     async def execute_activity(self, input: ExecuteActivityInput) -> Any:
         info = activity.info()
@@ -333,6 +501,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         workflow_run_id = info.workflow_run_id or ""
         workflow_type = info.workflow_type or ""
         task_queue = info.task_queue or ""
+        activity_root_span_id = _activity_root_span_id(info)
 
         # Clear stale state and register fresh buffer
         self._span_processor.clear_activity_abort(workflow_id, activity_id)
@@ -355,6 +524,9 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 WorkflowEventType.ACTIVITY_STARTED.value,
                 activity_input=activity_input,
                 session_id=session_id,
+                metadata={
+                    _ACTIVITY_ROOT_SPAN_METADATA_KEY: activity_root_span_id,
+                },
             )
 
         # Buffer activity context for hook-level governance
@@ -388,7 +560,11 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 and self._sandbox is not None
             ):
                 return await self._execute_constrained_activity(
-                    input, info, start_time, governance_verdict
+                    input,
+                    info,
+                    start_time,
+                    governance_verdict,
+                    parent_span_id=activity_root_span_id,
                 )
             await self._enforce_verdict(governance_verdict, info, "activity_start")
 
@@ -411,23 +587,30 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             # `raise` below re-propagates the original exception unchanged. Consume
             # the completed-stop either way (also clears it, so it can never
             # strand/leak on the exception path).
-            await self._consume_completed_halt(info)
+            try:
+                await self._consume_completed_halt(info)
+            finally:
+                await self._discard_behavioral_dispatch(info)
             raise
 
-        # Send ActivityCompleted + enforce verdict + apply output redaction
-        result = await self._handle_completion(
-            info,
-            status,
-            error,
-            start_time,
-            end_time,
-            activity_input,
-            activity_output,
-            result,
-            session_id=session_id,
-        )
-
-        return result
+        # Send ActivityCompleted + enforce verdict + apply output redaction.
+        # Always release a started-hook dispatch task if completion itself exits
+        # through a higher-priority HALT/patch/error path.
+        try:
+            return await self._handle_completion(
+                info,
+                status,
+                error,
+                start_time,
+                end_time,
+                activity_input,
+                activity_output,
+                result,
+                session_id=session_id,
+                task_headers=input.headers,
+            )
+        finally:
+            await self._discard_behavioral_dispatch(info)
 
     async def _execute_constrained_activity(
         self,
@@ -435,6 +618,10 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info,
         start_time: float,
         verdict_response: GovernanceVerdictResponse,
+        *,
+        emit_completion: bool = True,
+        clear_activity_context: bool = True,
+        parent_span_id: str | None = None,
     ) -> Any:
         """Route a CONSTRAIN verdict on a user activity into the sandbox.
 
@@ -485,6 +672,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             task_queue=info.task_queue,
             attempt=info.attempt,
             arguments={item.name: item.value for item in request.arguments},
+            parent_span_id=parent_span_id,
+            dispatch_id=_sandbox_dispatch_id(info, request.profile_id),
         )
         telemetry_owner = None
         if self._sandbox.otel_bridge is not None:
@@ -618,6 +807,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     status="cancelled",
                     dispatch_result=None,
                     error_code="cancelled",
+                    emit=emit_completion,
                 )
             except BaseException:
                 pass
@@ -631,6 +821,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 status="failed",
                 dispatch_result=dispatch_result,
                 error_code="typed_result_invalid",
+                emit=emit_completion,
             )
             raise ApplicationError(
                 "Governed command typed result rejected",
@@ -646,6 +837,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 status="failed",
                 dispatch_result=None,
                 error_code="dispatcher_failure",
+                emit=emit_completion,
             )
             raise ApplicationError(
                 "Governed dispatcher failed",
@@ -665,11 +857,14 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     )
                 except Exception:
                     pass
-            # The routed path bypasses _handle_completion, so drop the activity
-            # context this branch registered before the verdict enforcement.
-            self._span_processor.clear_activity_context(
-                info.workflow_id, info.activity_id
-            )
+            # A routed user activity bypasses _handle_completion, so drop the
+            # context registered before verdict enforcement. Behavioral profile
+            # dispatches run alongside/after the host activity and must leave its
+            # hook correlation intact until normal completion cleanup.
+            if clear_activity_context:
+                self._span_processor.clear_activity_context(
+                    info.workflow_id, info.activity_id
+                )
 
         await self._send_registered_completion(
             info,
@@ -689,6 +884,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 if dispatch_result.error is None
                 else dispatch_result.error.code.value
             ),
+            emit=emit_completion,
         )
         if dispatch_result.directive is Directive.HALT:
             await _terminate_workflow_for_halt(
@@ -736,6 +932,94 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             non_retryable=True,
         )
 
+    async def _dispatch_behavioral_profile(
+        self,
+        info: Any,
+        verdict_response: GovernanceVerdictResponse,
+        task_headers: Any,
+        trigger_span_id: str | None,
+    ) -> dict[str, Any]:
+        """Run a behavior rule's zero-input registry command in a sandbox."""
+        profile_id = verdict_response.profile_id
+        assert profile_id is not None
+        try:
+            decision = _verdict_decision(verdict_response)
+            decision["constraints"] = ["run_in_sandbox"]
+            request = GovernedCommandRequest(profile_id, {}, governance=decision)
+            governed_input = cast(
+                ExecuteActivityInput,
+                SimpleNamespace(args=(request,), headers=task_headers or {}),
+            )
+            sandbox_result = await self._execute_constrained_activity(
+                governed_input,
+                info,
+                time.time(),
+                verdict_response,
+                emit_completion=False,
+                clear_activity_context=False,
+                parent_span_id=trigger_span_id,
+            )
+            serialized_result = _serialize_value(sandbox_result)
+            if getattr(sandbox_result, "disposition", None) != "executed_in_sandbox":
+                activity.logger.warning(
+                    "Behavioral CONSTRAIN profile dispatch rejected non-sandbox outcome"
+                )
+                return {
+                    "status": "failed",
+                    "profile_id": profile_id,
+                    "error": {
+                        "type": "SandboxHostFallbackRejected",
+                        "message": "behavioral profile command did not execute in a sandbox",
+                    },
+                    "result": serialized_result,
+                }
+            return {"status": "completed", **serialized_result}
+        except Exception as error:
+            activity.logger.warning(
+                f"Behavioral CONSTRAIN profile dispatch failed: {error}"
+            )
+            return {
+                "status": "failed",
+                "profile_id": profile_id,
+                "error": {
+                    "type": getattr(error, "type", type(error).__name__),
+                    "message": str(error),
+                },
+            }
+
+    @staticmethod
+    def _raise_behavioral_failure(outcome: dict[str, Any]) -> NoReturn:
+        """Surface retained sandbox evidence as a retryable activity failure."""
+        from temporalio.exceptions import ApplicationError
+
+        failure = outcome.get("error")
+        if isinstance(failure, dict):
+            error_type = failure.get("type")
+            message = failure.get("message")
+        else:
+            error_type = None
+            message = None
+        if not isinstance(error_type, str) or not error_type:
+            error_type = "BehavioralSandboxExecutionFailed"
+        if not isinstance(message, str) or not message:
+            message = "Behavioral sandbox execution failed"
+        raise ApplicationError(
+            message,
+            outcome,
+            type=error_type,
+            non_retryable=False,
+        )
+
+    @staticmethod
+    def _attach_behavioral_outcome(
+        activity_result_value: Any, outcome: dict[str, Any]
+    ) -> dict[str, Any]:
+        if isinstance(activity_result_value, dict):
+            result = dict(activity_result_value)
+        else:
+            result = {"activity_result": activity_result_value}
+        result["sandbox_execution"] = outcome
+        return result
 
     async def _consume_completed_halt(self, info) -> None:
         """Exception-path safety net: a completed-hook stop recorded during user
@@ -789,6 +1073,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         dispatch_result: Any,
         error_code: str | None,
         typed_result: Any | None = None,
+        emit: bool = True,
     ) -> None:
         """Post ActivityCompleted when the dispatcher did not already own it.
 
@@ -800,7 +1085,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         to post ActivityCompleted, because `_dispatch_host` only emits local
         telemetry.
         """
-        if self._sandbox is None or not self._sandbox.completion_events:
+        if not emit or self._sandbox is None or not self._sandbox.completion_events:
             return
         dispatcher_config = getattr(self._sandbox.dispatcher, "_config", None)
         disposition_value = getattr(
@@ -1033,6 +1318,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         try:
             if verdict_response.verdict == Verdict.CONSTRAIN:
+                # A completed CONSTRAIN arrives after the activity has already
+                # executed, so it can only affect future work. Never fail or
+                # attempt to reroute the completed activity, even when no
+                # sandbox is configured.
+                if context == "activity_end":
+                    return
                 if self._sandbox is None:
                     from temporalio.exceptions import ApplicationError
 
@@ -1044,10 +1335,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 # With a sandbox configuration, a CONSTRAIN verdict at
                 # ActivityStarted is enforced by _execute_constrained_activity,
                 # which routes the activity into the sandbox and returns the
-                # result before this branch runs. A completed CONSTRAIN verdict
-                # arrives only after the activity has already executed (on the
-                # host or in the sandbox), so routing is no longer possible —
-                # accept it as a no-op.
+                # result before this branch runs.
                 return
             verdict_result = enforce_verdict(verdict_response, context)
             if verdict_result.requires_hitl and not should_skip_hitl(
@@ -1182,6 +1470,12 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 info.activity_id,
             )
 
+            key = self._behavioral_key(info)
+            self._active_behavioral_dispatches[key] = (
+                asyncio.get_running_loop(),
+                info,
+                input.headers,
+            )
             try:
                 with core_activity_scope(
                     info,
@@ -1191,18 +1485,33 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                     result = await self.next.execute_activity(input)
                     activity_output = _serialize_value(result)
             except GovernanceBlockedError as e:
-                status = "failed"
-                error = {
-                    "type": "GovernanceBlockedError",
-                    "message": str(e),
-                    "verdict": e.verdict,
-                    "url": e.url,
-                }
-                self._handle_hook_governance_error(e, info)
+                if (
+                    e.verdict is Verdict.CONSTRAIN
+                    and key in self._behavioral_dispatch_tasks
+                ):
+                    # The started hook dispatched the rule's replacement profile
+                    # and then raised the normal action-level stop. Consume only
+                    # this intercepted operation: the activity remains successful
+                    # and completion attaches the retained sandbox outcome.
+                    activity.logger.info(
+                        "Host action intercepted by behavioral CONSTRAIN; "
+                        "using sandbox execution outcome"
+                    )
+                else:
+                    status = "failed"
+                    error = {
+                        "type": "GovernanceBlockedError",
+                        "message": str(e),
+                        "verdict": e.verdict,
+                        "url": e.url,
+                    }
+                    self._handle_hook_governance_error(e, info)
             except Exception as e:
                 status = "failed"
                 error = {"type": type(e).__name__, "message": str(e)}
                 raise
+            finally:
+                self._active_behavioral_dispatches.pop(key, None)
 
         end_time = time.time()
         return result, status, error, activity_output, end_time
@@ -1251,6 +1560,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_output,
         result,
         session_id=None,
+        task_headers=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
         # Completed-hook stop recorded run-scoped by the adapter (BLOCK/HALT), plus
@@ -1316,8 +1626,29 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if completed_verdict:
             await self._enforce_verdict(completed_verdict, info, "activity_end")
 
-        # Apply output redaction
-        return self._apply_output_redaction(completed_verdict, result)
+        # Apply output redaction before attaching a behavioral sandbox outcome,
+        # so guardrails cannot accidentally replace the execution evidence.
+        result = self._apply_output_redaction(completed_verdict, result)
+
+        key = self._behavioral_key(info)
+        dispatch_task = self._behavioral_dispatch_tasks.get(key)
+        if (
+            completed_verdict is not None
+            and completed_verdict.verdict == Verdict.CONSTRAIN
+            and completed_verdict.profile_id is not None
+        ):
+            # A started-hook callback may already have dispatched this activity's
+            # behavioral profile. Reuse its task instead of dispatching again.
+            dispatch_task = self._behavioral_dispatch_task(
+                info, completed_verdict, task_headers
+            )
+        if dispatch_task is not None:
+            outcome = await asyncio.shield(dispatch_task)
+            result = self._attach_behavioral_outcome(result, outcome)
+            self._behavioral_dispatch_tasks.pop(key, None)
+            if outcome.get("status") == "failed":
+                self._raise_behavioral_failure(outcome)
+        return result
 
     # ─── Event sending ────────────────────────────────────────────────────
 

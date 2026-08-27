@@ -856,7 +856,12 @@ def _load_governed_command_deployment(
     if schema_version == 3:
         from .otel_telemetry import GovernedCommandTelemetryBridge
 
-        otel_bridge = GovernedCommandTelemetryBridge(asset_bundle.template)
+        otel_bridge = GovernedCommandTelemetryBridge(
+            asset_bundle.template,
+            sandbox_provider=(
+                "native" if asset_bundle.template == "native://native" else "openshell"
+            ),
+        )
         heartbeat_sink.attach_otel_bridge(otel_bridge)
     sandbox_execution = SandboxExecutionConfig(
         host=host,
