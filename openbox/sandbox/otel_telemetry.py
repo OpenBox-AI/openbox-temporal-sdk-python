@@ -161,6 +161,9 @@ class GovernedCommandTerminalRecord:
     stderr_bytes: int
     unsafe_stdout: str | None
     unsafe_stderr: str | None
+    # Per-destination proxy decisions, surfaced as openbox.sandbox.egress.*
+    # Entries expose decision, host, and port attributes (duck-typed).
+    egress: tuple[object, ...] = ()
 
 
 class GovernedCommandTelemetryOwner:
@@ -415,14 +418,18 @@ class GovernedCommandTelemetryBridge:
         ) = self._terminal_metadata(dispatch_result, error)
         unsafe_stdout: str | None = None
         unsafe_stderr: str | None = None
-        if self.include_unsafe_attributes and dispatch_result is not None:
+        egress: tuple[object, ...] = ()
+        if dispatch_result is not None:
             execution = getattr(dispatch_result, "execution", None)
-            stdout = None if execution is None else getattr(execution, "stdout", None)
-            stderr = None if execution is None else getattr(execution, "stderr", None)
-            if isinstance(stdout, bytes):
-                unsafe_stdout = stdout.decode("utf-8", errors="replace")
-            if isinstance(stderr, bytes):
-                unsafe_stderr = stderr.decode("utf-8", errors="replace")
+            if execution is not None:
+                egress = getattr(execution, "egress_decisions", ()) or ()
+            if self.include_unsafe_attributes:
+                stdout = getattr(execution, "stdout", None)
+                stderr = getattr(execution, "stderr", None)
+                if isinstance(stdout, bytes):
+                    unsafe_stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    unsafe_stderr = stderr.decode("utf-8", errors="replace")
         with owner._lock:
             if owner._finalized:
                 return None
@@ -452,6 +459,7 @@ class GovernedCommandTelemetryBridge:
                 stderr_bytes=stderr_bytes,
                 unsafe_stdout=unsafe_stdout,
                 unsafe_stderr=unsafe_stderr,
+                egress=egress,
             )
         with self._state_lock:
             self._owners.discard(owner._key)
@@ -681,6 +689,19 @@ class GovernedCommandTelemetryBridge:
                 and record.sandbox_provider is not None
             ):
                 attributes["openbox.sandbox.provider"] = record.sandbox_provider
+            if record.disposition == "executed_in_sandbox" and record.egress:
+                attributes["openbox.sandbox.egress.count"] = len(record.egress)
+                for index, entry in enumerate(record.egress):
+                    prefix = f"openbox.sandbox.egress.{index}"
+                    decision = getattr(entry, "decision", None)
+                    host = getattr(entry, "host", None)
+                    port = getattr(entry, "port", None)
+                    if decision is None or host is None:
+                        continue
+                    attributes[f"{prefix}.decision"] = decision
+                    attributes[f"{prefix}.host"] = host
+                    if port is not None:
+                        attributes[f"{prefix}.port"] = port
             span = tracer.start_span(  # type: ignore[attr-defined]
                 "openbox.governed_command",
                 context=parent,
