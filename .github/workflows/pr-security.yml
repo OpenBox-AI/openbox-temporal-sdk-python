@@ -1,0 +1,148 @@
+name: PR Security
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+  security-events: write
+
+concurrency:
+  group: pr-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: "8.30.0"
+
+jobs:
+  trivy-fs:
+    name: Trivy Filesystem Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Trivy
+        uses: aquasecurity/setup-trivy@e07451d2e059ed86c2870430ea286b3a9e0bf241
+        with:
+          cache: true
+          version: v0.69.2
+
+
+      - name: Run Trivy filesystem scan for console output
+        id: trivy_console
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy fs . \
+            --scanners vuln,misconfig \
+            --vuln-type os,library \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --include-dev-deps \
+            --format table \
+            --exit-code 1
+
+      - name: Run Trivy filesystem scan for SARIF
+        id: trivy_sarif
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy fs . \
+            --scanners vuln,misconfig \
+            --vuln-type os,library \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --include-dev-deps \
+            --format sarif \
+            --output trivy-fs-results.sarif \
+            --exit-code 1
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-fs
+
+      - name: Upload Trivy SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-results
+          path: trivy-fs-results.sarif
+          if-no-files-found: error
+
+      - name: Fail job when Trivy detects issues
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.trivy_console.outcome }}" == "failure" || "${{ steps.trivy_sarif.outcome }}" == "failure" ]]; then
+            echo "Trivy detected HIGH/CRITICAL findings."
+            exit 1
+          fi
+
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks SARIF scan
+        id: gitleaks_scan
+        continue-on-error: true
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_VERSION: ${{ env.GITLEAKS_VERSION }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+
+      - name: Upload Gitleaks SARIF to GitHub Security
+        if: always() && hashFiles('results.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+          category: gitleaks
+
+      - name: Upload Gitleaks SARIF artifact
+        if: always() && hashFiles('results.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-results
+          path: results.sarif
+          if-no-files-found: error
+
+      - name: Fail job when Gitleaks detects issues
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${{ steps.gitleaks_scan.outcome }}" == "failure" ]]; then
+            echo "Gitleaks detected potential secrets."
+            exit 1
+          fi
