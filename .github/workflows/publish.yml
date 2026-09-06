@@ -1,16 +1,26 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*.*.*"
+
+# Workflow-level default — no ambient permissions. The publish job opts into
+# id-token: write below (needed for PyPI trusted publishing).
+permissions:
+  contents: read
 
 jobs:
   publish:
     name: Build and Publish
     runs-on: ubuntu-latest
+    # Bound to the `release` environment so its deployment tag policy
+    # admits only `v[0-9]+.[0-9]+.[0-9]+` refs, its env-scoped secrets
+    # scope, and its OIDC token carries `environment:release` — which the
+    # PyPI trusted-publisher registration matches on.
     environment: release
     permissions:
-      id-token: write  # Required for trusted publishing
+      id-token: write  # PyPI trusted publishing (OIDC)
 
     steps:
       - name: Checkout code
@@ -24,7 +34,7 @@ jobs:
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install hatch twine
+          pip install hatch
 
       - name: Verify version matches tag
         run: |
@@ -39,8 +49,8 @@ jobs:
       - name: Build package
         run: hatch build
 
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+      # Trusted publishing consumes the OIDC id-token grant above; no
+      # long-lived PYPI_API_TOKEN needed. Requires trusted-publisher
+      # registration on PyPI first — see report §"Pre-requisites".
+      - name: Publish to PyPI (trusted publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
