@@ -14,7 +14,7 @@ handle_approval_response() takes the raw dict from GovernanceClient.poll_approva
 from __future__ import annotations
 
 import logging
-from typing import NoReturn, Optional
+from typing import NoReturn
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ def should_skip_hitl(
 
 
 def handle_approval_response(
-    response: Optional[dict],
+    response: dict | None,
     activity_type: str,
     workflow_id: str,
     run_id: str,

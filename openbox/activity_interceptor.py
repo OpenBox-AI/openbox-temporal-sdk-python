@@ -1,3 +1,5 @@
+# openbox/activity_interceptor.py
+# Handles: ActivityStarted, ActivityCompleted (direct HTTP, WITH spans)
 """
 Temporal activity interceptor for activity-boundary governance.
 
@@ -7,17 +9,68 @@ Captures 2 activity-level events:
 4. ActivityStarted (execute_activity entry)
 5. ActivityCompleted (execute_activity exit)
 
+NOTE: Workflow events (WorkflowStarted, WorkflowCompleted, SignalReceived) are
+handled by GovernanceInterceptor in workflow_interceptor.py
+
 IMPORTANT: Activities CAN use datetime/time and make HTTP calls directly.
 This is different from workflow interceptors which must maintain determinism.
 """
 
-import dataclasses
+import asyncio
 import json
 import time
+import uuid
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any, List, NoReturn, Optional
+from typing import Any, Literal, NoReturn
 
-from .types import rfc3339_now as _rfc3339_now
+from opentelemetry import trace
+from temporalio import activity
+from temporalio.worker import (
+    ActivityInboundInterceptor,
+    ExecuteActivityInput,
+    Interceptor,
+)
+
+from .activities import _terminate_workflow_for_halt
+from .client import GovernanceClient
+from .config import GovernanceConfig
+from .core_adapter import core_activity_scope, get_core_context_store
+from .errors import (
+    GOVERNANCE_PATCH_ERROR_TYPE,
+    GovernanceBlockedError,
+    GovernanceHaltError,
+    GuardrailsValidationError,
+)
+from .governance_state import TemporalGovernanceState
+from .multi_agent import read_session_from_header
+from .patch import PatchRequest, patch_request
+from .sandbox.adapter import TemporalSandboxConfig, activity_result
+from .sandbox.profiles import CommandResultValidationError
+from .sandbox.types import (
+    GovernedCommandInputError,
+    GovernedCommandRequest,
+    GovernedCommandTypedResult,
+)
+from .span_processor import WorkflowSpanBuffer, WorkflowSpanProcessor
+
+_CONTENT_MAX_BYTES = 64 * 1024
+
+
+def _bounded_text(raw: bytes) -> str:
+    """Decode stdout/stderr for durable telemetry, bounded for storage."""
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if len(raw) > _CONTENT_MAX_BYTES:
+        text = text[:_CONTENT_MAX_BYTES] + "…(truncated)"
+    return text
+from .types import (
+    GovernanceVerdictResponse,
+    Verdict,
+    WorkflowEventType,
+)
+from .types import rfc3339_now as _rfc3339_now  # shared utility
+from .verdict_handler import enforce_verdict
 
 
 def _deep_update_dataclass(obj: Any, data: dict, _logger=None) -> None:
@@ -55,36 +108,15 @@ def _should_recurse_dataclass(current: Any, new_value: Any) -> bool:
 
 def _update_list_items(current_list: list, new_list: list, _logger=None) -> None:
     """Update list items, recursing into dataclass items."""
-    for i, (curr_item, new_item) in enumerate(zip(current_list, new_list)):
+    for i, (curr_item, new_item) in enumerate(
+        zip(current_list, new_list, strict=False)
+    ):
         if _should_recurse_dataclass(curr_item, new_item):
             _deep_update_dataclass(curr_item, new_item, _logger)
         elif i < len(current_list):
             current_list[i] = new_item
 
 
-from opentelemetry import trace
-from temporalio import activity
-from temporalio.worker import (
-    ActivityInboundInterceptor,
-    ExecuteActivityInput,
-    Interceptor,
-)
-
-from .activities import _terminate_workflow_for_halt
-from .client import GovernanceClient
-from .config import GovernanceConfig
-from .core_adapter import core_activity_scope, get_core_context_store
-from .errors import (
-    GOVERNANCE_PATCH_ERROR_TYPE,
-    GovernanceBlockedError,
-    GovernanceHaltError,
-    GuardrailsValidationError,
-)
-from .governance_state import TemporalGovernanceState
-from .multi_agent import read_session_from_header
-from .patch import PatchRequest, patch_request
-from .types import GovernanceVerdictResponse, Verdict, WorkflowEventType
-from .verdict_handler import enforce_verdict
 
 
 def _raise_patch(req: PatchRequest) -> NoReturn:
@@ -155,6 +187,57 @@ def _serialize_fallback(value: Any) -> Any:
         return str(value)
 
 
+def _verdict_decision(response: GovernanceVerdictResponse) -> dict[str, Any]:
+    """Map a governance verdict response onto the dispatcher decision shape.
+
+    The CONSTRAIN verdict from the ActivityStarted event is the decision the
+    governed dispatcher must execute — it decides sandbox routing, so the
+    dispatcher never re-evaluates through a second client.
+    """
+    decision: dict[str, Any] = {
+        "governance_event_id": str(uuid.uuid4()),
+        "verdict": response.verdict.value,
+        "risk_score": response.risk_score,
+        "action": response.verdict.value,
+        "fallback_used": False,
+        "behavioral_violations": list(response.behavioral_violations or []),
+    }
+    if response.constraints is not None:
+        decision["constraints"] = list(response.constraints)
+    if response.policy_id is not None:
+        decision["policy_id"] = response.policy_id
+    if response.reason is not None:
+        decision["reason"] = response.reason
+    return decision
+
+
+def _extract_trace_context(headers: Any) -> Any:
+    """Extract the workflow trace context from the activity task headers.
+
+    The Temporal TracingInterceptor carries the W3C context in its
+    ``_tracer-data`` header as a payload-encoded carrier dict; decode it with
+    the default payload converter and extract with the tracecontext propagator.
+    """
+    from opentelemetry.trace.propagation.tracecontext import (
+        TraceContextTextMapPropagator,
+    )
+
+    if headers is None:
+        return None
+    try:
+        payload = headers.get("_tracer-data")
+        if payload is None:
+            return None
+        from temporalio.converter import DataConverter
+
+        carrier = DataConverter.default.payload_converter.from_payloads([payload])[0]
+        if not isinstance(carrier, dict) or not carrier:
+            return None
+        return TraceContextTextMapPropagator().extract(carrier)
+    except Exception:
+        return None
+
+
 class ActivityGovernanceInterceptor(Interceptor):
     """Factory for activity interceptor. Events sent directly (activities can do HTTP)."""
 
@@ -162,14 +245,18 @@ class ActivityGovernanceInterceptor(Interceptor):
         self,
         api_url: str,
         api_key: str,
-        state: TemporalGovernanceState,
-        config: Optional[GovernanceConfig] = None,
-        client: Optional[GovernanceClient] = None,
+        span_processor: WorkflowSpanProcessor,
+        config: GovernanceConfig | None = None,
+        client: GovernanceClient | None = None,
+        sandbox: TemporalSandboxConfig | None = None,
+        state: TemporalGovernanceState | None = None,
     ):
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
-        self.state = state
+        self.span_processor = span_processor
         self.config = config or GovernanceConfig()
+        self._sandbox = sandbox
+        self._state = state or TemporalGovernanceState()
         self._client = client or GovernanceClient(
             api_url=api_url,
             api_key=api_key,
@@ -184,9 +271,11 @@ class ActivityGovernanceInterceptor(Interceptor):
             next_interceptor,
             self.api_url,
             self.api_key,
-            self.state,
+            self.span_processor,
+            self._state,
             self.config,
             self._client,
+            self._sandbox,
         )
 
 
@@ -196,15 +285,19 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         next_interceptor: ActivityInboundInterceptor,
         api_url: str,
         api_key: str,
+        span_processor: WorkflowSpanProcessor,
         state: TemporalGovernanceState,
         config: GovernanceConfig,
-        client: Optional[GovernanceClient] = None,
+        client: GovernanceClient | None = None,
+        sandbox: TemporalSandboxConfig | None = None,
     ):
         super().__init__(next_interceptor)
         self._api_url = api_url
         self._api_key = api_key
+        self._span_processor = span_processor
         self._state = state
         self._config = config
+        self._sandbox = sandbox
         self._client = client or GovernanceClient(
             api_url=api_url,
             api_key=api_key,
@@ -216,8 +309,15 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         info = activity.info()
         start_time = time.time()
 
+        # Skip if configured (e.g., send_governance_event to avoid loops)
         if info.activity_type in self._config.skip_activity_types:
             return await self.next.execute_activity(input)
+
+        # Check for blocking verdicts from prior governance (signal or buffer)
+        await self._check_pending_verdicts(info)
+
+        # Check for pending approval on retry (HITL polling)
+        await self._check_pending_approval(info)
 
         # Multi-agent session id from the header stamped by the workflow outbound
         # interceptor. Request-local — never stored on self / a module global, since
@@ -226,30 +326,73 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             input.headers, activity.payload_converter()
         )
 
-        await self._check_pending_verdicts(info)
+        # Temporal's type hints permit absent metadata, but an executing
+        # Activity always has these identifiers. Normalize defensively.
+        workflow_id = info.workflow_id or ""
+        activity_id = info.activity_id or ""
+        workflow_run_id = info.workflow_run_id or ""
+        workflow_type = info.workflow_type or ""
+        task_queue = info.task_queue or ""
 
-        await self._check_pending_approval(info)
-
-        # Clear any stale within-activity abort flag from a prior run reusing the
-        # same activity key (base ContextStore abort is not run-scoped).
-        get_core_context_store().clear_activity_aborted(
-            info.workflow_id, info.activity_id
+        # Clear stale state and register fresh buffer
+        self._span_processor.clear_activity_abort(workflow_id, activity_id)
+        buffer = WorkflowSpanBuffer(
+            workflow_id=workflow_id,
+            run_id=workflow_run_id,
+            workflow_type=workflow_type,
+            task_queue=task_queue,
         )
+        self._span_processor.register_workflow(workflow_id, buffer)
 
+        # Serialize activity input
         activity_input = self._serialize_input(input, info)
 
-        governance_verdict: Optional[GovernanceVerdictResponse] = None
+        # Send ActivityStarted event (optional)
+        governance_verdict: GovernanceVerdictResponse | None = None
         if self._config.send_activity_start_event:
             governance_verdict = await self._send_activity_event(
                 info,
                 WorkflowEventType.ACTIVITY_STARTED.value,
-                multi_agent_session_id=session_id,
                 activity_input=activity_input,
+                session_id=session_id,
             )
 
+        # Buffer activity context for hook-level governance
+        self._span_processor.set_activity_context(
+            workflow_id,
+            activity_id,
+            {
+                "source": "workflow-telemetry",
+                "event_type": WorkflowEventType.ACTIVITY_STARTED.value,
+                "workflow_id": info.workflow_id,
+                "run_id": info.workflow_run_id,
+                "workflow_type": info.workflow_type,
+                "activity_id": info.activity_id,
+                "activity_type": info.activity_type,
+                "task_queue": info.task_queue,
+                "attempt": info.attempt,
+                "activity_input": activity_input,
+                "activity_output": None,
+            },
+        )
+
+        # Enforce ActivityStarted verdict (HITL, BLOCK, HALT, guardrails). A
+        # CONSTRAIN verdict with a sandbox configuration routes this activity
+        # into the sandbox transparently: the command is derived from the
+        # activity input through the sandbox profile bundle and executed by
+        # the injected governed dispatcher, and the bounded result is returned
+        # to the caller without ever running the activity on the host.
         if governance_verdict:
+            if (
+                governance_verdict.verdict == Verdict.CONSTRAIN
+                and self._sandbox is not None
+            ):
+                return await self._execute_constrained_activity(
+                    input, info, start_time, governance_verdict
+                )
             await self._enforce_verdict(governance_verdict, info, "activity_start")
 
+        # Apply guardrails input redaction
         activity_input = self._apply_input_redaction(
             governance_verdict, input, activity_input
         )
@@ -271,6 +414,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             await self._consume_completed_halt(info)
             raise
 
+        # Send ActivityCompleted + enforce verdict + apply output redaction
         result = await self._handle_completion(
             info,
             status,
@@ -280,10 +424,318 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             activity_input,
             activity_output,
             result,
-            session_id,
+            session_id=session_id,
         )
 
         return result
+
+    async def _execute_constrained_activity(
+        self,
+        input: ExecuteActivityInput,
+        info,
+        start_time: float,
+        verdict_response: GovernanceVerdictResponse,
+    ) -> Any:
+        """Route a CONSTRAIN verdict on a user activity into the sandbox.
+
+        The activity's input must be one structured request (a
+        ``GovernedCommandRequest`` or its wire dict). The command argv is
+        derived from that input through the sandbox profile bundle, and the
+        injected governed dispatcher executes it with the CONSTRAIN decision
+        from ``verdict_response`` — the caller receives the bounded sandbox
+        result and the user's activity body never runs on the host.
+        """
+        from temporalio.exceptions import ApplicationError
+
+        if self._sandbox is None:
+            raise ApplicationError(
+                "Governed command support is not configured",
+                type="GovernedCommandConfigurationRequired",
+                non_retryable=True,
+            )
+        try:
+            args = list(input.args) if input.args is not None else []
+            if len(args) != 1:
+                raise GovernedCommandInputError("governed command input rejected")
+            request = GovernedCommandRequest.from_value(args[0])
+            argv = self._sandbox.profiles.derive(request)
+            self._sandbox.profiles.profile_fingerprint(request.profile_id)
+        except (GovernedCommandInputError, TypeError, ValueError) as error:
+            raise ApplicationError(
+                "Governed command input rejected",
+                type="GovernedCommandInvalid",
+                non_retryable=True,
+            ) from error
+
+        from openbox_sandbox.dispatcher import (
+            Directive,
+            Disposition,
+            GovernanceDecision,
+            GovernedCommand,
+        )
+
+        command = GovernedCommand(
+            workflow_id=info.workflow_id,
+            run_id=info.workflow_run_id,
+            activity_id=info.activity_id,
+            argv=argv,
+            profile_id=request.profile_id,
+            timeout_seconds=self._sandbox.timeout_seconds,
+            workflow_type=info.workflow_type,
+            task_queue=info.task_queue,
+            attempt=info.attempt,
+            arguments={item.name: item.value for item in request.arguments},
+        )
+        telemetry_owner = None
+        if self._sandbox.otel_bridge is not None:
+            try:
+                # Join the workflow's W3C trace from the activity task headers
+                # (the Temporal TracingInterceptor's "_tracer-data" payload),
+                # so the governed span shares the workflow trace even when the
+                # tracing interceptor is not outermost in the activity chain.
+                from opentelemetry import context as otel_context
+
+                propagated = _extract_trace_context(input.headers)
+                token = (
+                    otel_context.attach(propagated)
+                    if propagated is not None
+                    else None
+                )
+                try:
+                    telemetry_owner = self._sandbox.otel_bridge.begin(
+                    workflow_id=info.workflow_id,
+                    run_id=info.workflow_run_id,
+                    activity_id=info.activity_id,
+                    attempt=info.attempt,
+                    profile_id=request.profile_id,
+                        workflow_type=info.workflow_type,
+                        task_queue=info.task_queue,
+                    )
+                finally:
+                    if token is not None:
+                        otel_context.detach(token)
+            except Exception:
+                telemetry_owner = None
+        dispatch_result = None
+        typed_result: GovernedCommandTypedResult | None = None
+        terminal_error: BaseException | None = None
+        try:
+            with self._sandbox.heartbeat_sink.bind(
+                activity.heartbeat,
+                workflow_id=info.workflow_id,
+                run_id=info.workflow_run_id,
+                activity_id=info.activity_id,
+                attempt=info.attempt,
+                profile_id=request.profile_id,
+                telemetry_owner=telemetry_owner,
+            ):
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_periodically(
+                        self._sandbox.heartbeat_interval_seconds
+                    )
+                )
+                if request.governance is not None:
+                    decision = GovernanceDecision.parse(request.governance)
+                else:
+                    decision = GovernanceDecision.parse(
+                        _verdict_decision(verdict_response)
+                    )
+                dispatch_operation = self._sandbox.dispatcher.dispatch_with_decision(
+                    command, decision
+                )
+                dispatch_task = asyncio.create_task(dispatch_operation)
+                cancellation_task = asyncio.create_task(
+                    self._wait_for_temporal_cancellation()
+                )
+                try:
+                    done, _ = await asyncio.wait(
+                        {dispatch_task, cancellation_task, heartbeat_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if heartbeat_task in done:
+                        # Re-raise the exact heartbeat failure. The surrounding
+                        # finally still cancels dispatch and waits for cleanup.
+                        await heartbeat_task
+                    if cancellation_task in done:
+                        dispatch_task.cancel()
+                        try:
+                            await dispatch_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            # The runtime client maps cancellation to a typed
+                            # transport result and the dispatcher performs owned
+                            # cleanup before returning or raising.
+                            pass
+                        raise asyncio.CancelledError()
+                    dispatch_result = await dispatch_task
+                finally:
+                    if not dispatch_task.done():
+                        dispatch_task.cancel()
+                        try:
+                            await dispatch_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            # A typed cancellation/transport result may surface
+                            # after the dispatcher has completed owned cleanup.
+                            pass
+                    heartbeat_task.cancel()
+                    cancellation_task.cancel()
+                    for task in (heartbeat_task, cancellation_task):
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+            activity.heartbeat(
+                {
+                    "phase": "governed_dispatch_terminal",
+                    "workflow_id": info.workflow_id,
+                    "run_id": info.workflow_run_id,
+                    "activity_id": info.activity_id,
+                    "attempt": info.attempt,
+                    "profile_id": request.profile_id,
+                    "disposition": dispatch_result.disposition.value,
+                }
+            )
+            if dispatch_result.disposition in (
+                Disposition.EXECUTED_ON_HOST,
+                Disposition.EXECUTED_IN_SANDBOX,
+            ):
+                execution = dispatch_result.execution
+                if execution is None:
+                    raise CommandResultValidationError()
+                typed_result = self._sandbox.profiles.parse_result(
+                    request.profile_id, execution.stdout
+                )
+        except asyncio.CancelledError as error:
+            terminal_error = error
+            try:
+                await self._send_registered_completion(
+                    info,
+                    request,
+                    start_time,
+                    status="cancelled",
+                    dispatch_result=None,
+                    error_code="cancelled",
+                )
+            except BaseException:
+                pass
+            raise
+        except CommandResultValidationError as error:
+            terminal_error = error
+            await self._send_registered_completion(
+                info,
+                request,
+                start_time,
+                status="failed",
+                dispatch_result=dispatch_result,
+                error_code="typed_result_invalid",
+            )
+            raise ApplicationError(
+                "Governed command typed result rejected",
+                type="GovernedCommandResultInvalid",
+                non_retryable=True,
+            ) from error
+        except Exception as error:
+            terminal_error = error
+            await self._send_registered_completion(
+                info,
+                request,
+                start_time,
+                status="failed",
+                dispatch_result=None,
+                error_code="dispatcher_failure",
+            )
+            raise ApplicationError(
+                "Governed dispatcher failed",
+                type="GovernedDispatcherFailure",
+                non_retryable=True,
+            ) from error
+        except BaseException as error:
+            terminal_error = error
+            raise
+        finally:
+            if self._sandbox.otel_bridge is not None:
+                try:
+                    self._sandbox.otel_bridge.finalize(
+                        telemetry_owner,
+                        dispatch_result=dispatch_result,
+                        error=terminal_error,
+                    )
+                except Exception:
+                    pass
+            # The routed path bypasses _handle_completion, so drop the activity
+            # context this branch registered before the verdict enforcement.
+            self._span_processor.clear_activity_context(
+                info.workflow_id, info.activity_id
+            )
+
+        await self._send_registered_completion(
+            info,
+            request,
+            start_time,
+            status=(
+                "completed"
+                if dispatch_result.error is None
+                and dispatch_result.disposition
+                in (Disposition.EXECUTED_ON_HOST, Disposition.EXECUTED_IN_SANDBOX)
+                else "failed"
+            ),
+            dispatch_result=dispatch_result,
+            typed_result=typed_result,
+            error_code=(
+                None
+                if dispatch_result.error is None
+                else dispatch_result.error.code.value
+            ),
+        )
+        if dispatch_result.directive is Directive.HALT:
+            await _terminate_workflow_for_halt(
+                info.workflow_id, "governance halt directive"
+            )
+        # Fail-closed: a post-execution governance error (e.g. ActivityCompleted
+        # transport failure) must not be reported as a successful sandbox run.
+        if dispatch_result.error is not None:
+            error_code = dispatch_result.error.code.value
+            error_type = (
+                "GovernedCommandExecutionIndeterminate"
+                if dispatch_result.disposition is Disposition.EXECUTION_INDETERMINATE
+                else "GovernedCommandNotExecuted"
+            )
+            message = f"Governed command terminal outcome: {error_code}"
+            if getattr(dispatch_result.error, 'detail', None):
+                message += f" ({dispatch_result.error.detail})"
+            raise ApplicationError(
+                message,
+                type=error_type,
+                non_retryable=True,
+            )
+        if dispatch_result.disposition in (
+            Disposition.EXECUTED_ON_HOST,
+            Disposition.EXECUTED_IN_SANDBOX,
+        ):
+            return activity_result(
+                request.profile_id,
+                dispatch_result,
+                typed_result=typed_result,
+            )
+        error_code = (
+            "governed_command_not_executed"
+            if dispatch_result.error is None
+            else dispatch_result.error.code.value
+        )
+        error_type = (
+            "GovernedCommandExecutionIndeterminate"
+            if dispatch_result.disposition is Disposition.EXECUTION_INDETERMINATE
+            else "GovernedCommandNotExecuted"
+        )
+        raise ApplicationError(
+            f"Governed command terminal outcome: {error_code}",
+            type=error_type,
+            non_retryable=True,
+        )
+
 
     async def _consume_completed_halt(self, info) -> None:
         """Exception-path safety net: a completed-hook stop recorded during user
@@ -311,18 +763,167 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if stop.request is not None:
             _raise_patch(stop.request)
 
+    @staticmethod
+    async def _wait_for_temporal_cancellation() -> None:
+        waiting = activity.wait_for_cancelled()
+        if hasattr(waiting, "__await__"):
+            await waiting
+        else:
+            # Unit tests replace the activity module with a plain mock. A real
+            # Temporal Activity always returns an awaitable here.
+            await asyncio.Future()
+
+    async def _heartbeat_periodically(self, interval_seconds: float) -> None:
+        assert self._sandbox is not None
+        while True:
+            await asyncio.sleep(interval_seconds)
+            self._sandbox.heartbeat_sink.heartbeat_latest()
+
+    async def _send_registered_completion(
+        self,
+        info,
+        request: GovernedCommandRequest,
+        start_time: float,
+        *,
+        status: str,
+        dispatch_result: Any,
+        error_code: str | None,
+        typed_result: Any | None = None,
+    ) -> None:
+        """Post ActivityCompleted when the dispatcher did not already own it.
+
+        Connected natural sandbox success path: GovernedDispatcher posts the
+        completed sandbox hook and span-free ActivityCompleted with the original
+        signer — the Temporal wrapper must not duplicate those calls.
+
+        Host allow path and other non-sandbox terminals still need this wrapper
+        to post ActivityCompleted, because `_dispatch_host` only emits local
+        telemetry.
+        """
+        if self._sandbox is None or not self._sandbox.completion_events:
+            return
+        dispatcher_config = getattr(self._sandbox.dispatcher, "_config", None)
+        disposition_value = getattr(
+            getattr(dispatch_result, "disposition", None), "value", None
+        )
+        if (
+            getattr(dispatcher_config, "governance", None) is not None
+            and dispatch_result is not None
+            and disposition_value == "executed_in_sandbox"
+            and getattr(dispatch_result, "error", None) is None
+        ):
+            return
+        output = None
+        if dispatch_result is not None:
+            execution = dispatch_result.execution
+            output = {
+                "profile_id": request.profile_id,
+                "disposition": dispatch_result.disposition.value,
+                "directive": dispatch_result.directive.value,
+                "sandbox_id": None if execution is None else execution.sandbox_id,
+                "exit_code": None if execution is None else execution.exit_code,
+                "timeout_status": (
+                    None if execution is None else execution.timeout_status.value
+                ),
+                "cleanup_status": (
+                    None if execution is None else execution.cleanup_status.value
+                ),
+                "stdout_bytes": 0 if execution is None else len(execution.stdout),
+                "stderr_bytes": 0 if execution is None else len(execution.stderr),
+                "stdout": None
+                if execution is None
+                else _bounded_text(execution.stdout),
+                "stderr": None
+                if execution is None
+                else _bounded_text(execution.stderr),
+                "typed_result": None
+                if typed_result is None
+                else {
+                    "schema_name": typed_result.schema_name,
+                    "values": [
+                        {"name": item.name, "value": item.value}
+                        for item in typed_result.values
+                    ],
+                },
+            }
+        end_time = time.time()
+        try:
+            await self._send_activity_event(
+                info,
+                WorkflowEventType.ACTIVITY_COMPLETED.value,
+                status=status,
+                start_time=start_time,
+                end_time=end_time,
+                duration_ms=(end_time - start_time) * 1000,
+                span_count=0,
+                spans=[],
+                activity_input=[{"profile_id": request.profile_id}],
+                activity_output=output,
+                error=(
+                    None
+                    if error_code is None
+                    else {"type": error_code, "non_retryable": True}
+                ),
+            )
+        except Exception:
+            activity.logger.warning("Governed command completion telemetry failed")
+
+    # ─── Verdict checks ───────────────────────────────────────────────────
+
     async def _check_pending_verdicts(self, info) -> None:
         """Enforce a SignalReceived BLOCK/HALT recorded for this run by the
         workflow interceptor. Run-scoped: a stale verdict from a prior run with
         the same workflow_id is ignored and cleared inside the state lookup."""
-        entry = self._state.get_signal_verdict(info.workflow_id, info.workflow_run_id)
-        if entry is None:
+        entry = self._state.get_signal_verdict(
+            info.workflow_id, info.workflow_run_id
+        )
+        if entry is not None:
+            verdict, reason = entry
+            if verdict.should_stop():
+                await self._enforce_stop_verdict(
+                    verdict,
+                    reason or "Workflow blocked by governance",
+                    info.workflow_id,
+                )
             return
-        verdict, reason = entry
-        if verdict.should_stop():
+        buffer = self._span_processor.get_buffer(info.workflow_id)
+
+        # Clear stale buffer from previous workflow run
+        if buffer and buffer.run_id != info.workflow_run_id:
+            activity.logger.info(
+                f"Clearing stale buffer for workflow {info.workflow_id}"
+            )
+            self._span_processor.unregister_workflow(info.workflow_id)
+            buffer = None
+
+        # Check pending verdict (stored by workflow interceptor for SignalReceived stop)
+        pending_verdict = self._span_processor.get_verdict(info.workflow_id)
+        if pending_verdict and pending_verdict.get("run_id") != info.workflow_run_id:
+            self._span_processor.clear_verdict(info.workflow_id)
+            pending_verdict = None
+
+        activity.logger.info(
+            f"Checking verdict for workflow {info.workflow_id}: "
+            f"buffer={buffer is not None}, "
+            f"buffer.verdict={buffer.verdict if buffer else None}, "
+            f"pending_verdict={pending_verdict}"
+        )
+
+        # Enforce pending verdict from signal governance
+        if pending_verdict:
+            verdict_str = pending_verdict.get("verdict")
+            if verdict_str and Verdict.from_string(verdict_str).should_stop():
+                await self._enforce_stop_verdict(
+                    Verdict.from_string(verdict_str),
+                    pending_verdict.get("reason") or "Workflow blocked by governance",
+                    info.workflow_id,
+                )
+
+        # Enforce buffer verdict
+        if buffer and buffer.verdict and buffer.verdict.should_stop():
             await self._enforce_stop_verdict(
-                verdict,
-                reason or "Workflow blocked by governance",
+                buffer.verdict,
+                buffer.verdict_reason or "Workflow blocked by governance",
                 info.workflow_id,
             )
 
@@ -341,6 +942,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 type="GovernanceBlock",
                 non_retryable=True,
             )
+
+    # ─── HITL approval ────────────────────────────────────────────────────
 
     async def _check_pending_approval(self, info) -> bool:
         """Poll for pending HITL approval on retry. Returns True if approved."""
@@ -362,6 +965,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             f"Polling approval status for workflow_id={info.workflow_id}, "
             f"activity_id={info.activity_id}"
         )
+        assert self._client is not None
         approval_response = await self._client.poll_approval(
             info.workflow_id, info.workflow_run_id, info.activity_id
         )
@@ -379,6 +983,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             )
             return True
         return False
+
+    # ─── Input serialization ──────────────────────────────────────────────
 
     def _serialize_input(self, input: ExecuteActivityInput, info) -> list:
         """Serialize activity input arguments."""
@@ -400,8 +1006,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             except Exception:
                 return []
 
+    # ─── Verdict enforcement ──────────────────────────────────────────────
+
     async def _enforce_verdict(
-        self, verdict_response: GovernanceVerdictResponse, info, context: str
+        self,
+        verdict_response: GovernanceVerdictResponse,
+        info,
+        context: Literal["activity_start", "activity_end", "workflow_event"],
     ) -> None:
         """Enforce a governance verdict (HITL, BLOCK, HALT, guardrails)."""
         from .hitl import raise_approval_pending, should_skip_hitl
@@ -421,6 +1032,23 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             _raise_patch(req)
 
         try:
+            if verdict_response.verdict == Verdict.CONSTRAIN:
+                if self._sandbox is None:
+                    from temporalio.exceptions import ApplicationError
+
+                    raise ApplicationError(
+                        "CONSTRAIN is supported only by a registered governed command",
+                        type="GovernanceConstrainUnsupported",
+                        non_retryable=True,
+                    )
+                # With a sandbox configuration, a CONSTRAIN verdict at
+                # ActivityStarted is enforced by _execute_constrained_activity,
+                # which routes the activity into the sandbox and returns the
+                # result before this branch runs. A completed CONSTRAIN verdict
+                # arrives only after the activity has already executed (on the
+                # host or in the sandbox), so routing is no longer possible —
+                # accept it as a no-op.
+                return
             verdict_result = enforce_verdict(verdict_response, context)
             if verdict_result.requires_hitl and not should_skip_hitl(
                 info.activity_type,
@@ -445,7 +1073,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 f"Governance blocked: {e.reason}",
                 type="GovernanceBlock",
                 non_retryable=True,
-            )
+            ) from None
         except GuardrailsValidationError as e:
             from temporalio.exceptions import ApplicationError
 
@@ -454,11 +1082,13 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 f"Guardrails validation failed: {e}",
                 type="GuardrailsValidationFailed",
                 non_retryable=True,
-            )
+            ) from None
+
+    # ─── Guardrails redaction ─────────────────────────────────────────────
 
     def _apply_input_redaction(
         self,
-        verdict: Optional[GovernanceVerdictResponse],
+        verdict: GovernanceVerdictResponse | None,
         input: ExecuteActivityInput,
         activity_input: list,
     ) -> list:
@@ -473,6 +1103,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         redacted = verdict.guardrails_result.redacted_input
         activity.logger.info("Applying guardrails redaction to activity input")
 
+        # Normalize to list to match args structure
         if isinstance(redacted, dict):
             redacted = [redacted]
 
@@ -495,7 +1126,7 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         return _serialize_value(original_args)
 
     def _apply_output_redaction(
-        self, verdict: Optional[GovernanceVerdictResponse], result: Any
+        self, verdict: GovernanceVerdictResponse | None, result: Any
     ) -> Any:
         """Apply guardrails output redaction if present."""
         if not (
@@ -521,6 +1152,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         return redacted_output
 
+    # ─── Activity execution ───────────────────────────────────────────────
+
     async def _run_activity(
         self,
         input: ExecuteActivityInput,
@@ -528,13 +1161,8 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input=None,
         session_id=None,
     ):
-        """Execute the activity inside the base-SDK hook context.
+        """Execute the activity inside the base-SDK hook context."""
 
-        Base instrumentation fires hooks during user code; a BLOCK/HALT/approval
-        verdict is raised as a Temporal-native ApplicationError/ApprovalPending
-        BY THE ADAPTER, so it propagates here and fails/retries the activity —
-        this interceptor never interprets hook verdicts itself.
-        """
         tracer = trace.get_tracer(__name__)
         status = "completed"
         error = None
@@ -548,24 +1176,69 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 "temporal.activity_id": info.activity_id,
             },
         ) as span:
-            trace_id = span.get_span_context().trace_id
+            self._span_processor.register_trace(
+                span.get_span_context().trace_id,
+                info.workflow_id,
+                info.activity_id,
+            )
 
-            with core_activity_scope(
-                info,
-                activity_input,
-                trace_id=trace_id,
-                multi_agent_session_id=session_id,
-            ):
-                try:
+            try:
+                with core_activity_scope(
+                    info,
+                    activity_input,
+                    multi_agent_session_id=session_id,
+                ):
                     result = await self.next.execute_activity(input)
                     activity_output = _serialize_value(result)
-                except Exception as e:
-                    status = "failed"
-                    error = {"type": type(e).__name__, "message": str(e)}
-                    raise
+            except GovernanceBlockedError as e:
+                status = "failed"
+                error = {
+                    "type": "GovernanceBlockedError",
+                    "message": str(e),
+                    "verdict": e.verdict,
+                    "url": e.url,
+                }
+                self._handle_hook_governance_error(e, info)
+            except Exception as e:
+                status = "failed"
+                error = {"type": type(e).__name__, "message": str(e)}
+                raise
 
         end_time = time.time()
         return result, status, error, activity_output, end_time
+
+    def _handle_hook_governance_error(self, e: GovernanceBlockedError, info) -> None:
+        """Handle GovernanceBlockedError from hook-level governance."""
+        from temporalio.exceptions import ApplicationError
+
+        from .hitl import raise_approval_pending, should_skip_hitl
+
+        # REQUIRE_APPROVAL → retryable
+        if e.verdict.requires_approval() and not should_skip_hitl(
+            info.activity_type,
+            hitl_enabled=self._config.hitl_enabled,
+            skip_types=self._config.skip_hitl_activity_types,
+        ):
+            buffer = self._span_processor.get_buffer(info.workflow_id)
+            if buffer:
+                buffer.pending_approval = True
+                activity.logger.info(
+                    f"Hook REQUIRE_APPROVAL: pending approval for {info.activity_type} "
+                    f"(resource: {e.url})"
+                )
+            raise_approval_pending(f"Approval required: {e.reason}")
+
+        # BLOCK/HALT → non-retryable
+        error_type = (
+            "GovernanceHalt" if e.verdict == Verdict.HALT else "GovernanceBlock"
+        )
+        raise ApplicationError(
+            f"Hook governance {e.verdict.value}: {e.reason}",
+            type=error_type,
+            non_retryable=True,
+        )
+
+    # ─── Post-execution handling ──────────────────────────────────────────
 
     async def _handle_completion(
         self,
@@ -577,20 +1250,33 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         activity_input,
         activity_output,
         result,
-        multi_agent_session_id=None,
+        session_id=None,
     ) -> Any:
         """Send ActivityCompleted, enforce verdict, apply output redaction."""
-        store = get_core_context_store()
-
         # Completed-hook stop recorded run-scoped by the adapter (BLOCK/HALT), plus
         # the base within-activity abort flag (a started-hook BLOCK the user code
         # swallowed). Either means the operation was governed-stopped.
         completed_stop = self._state.take_completed_stop(
             info.workflow_id, info.workflow_run_id, info.activity_id
         )
-        base_aborted = store.is_activity_aborted(info.workflow_id, info.activity_id)
+        store = get_core_context_store()
+        base_aborted = store.is_activity_aborted(
+            info.workflow_id, info.activity_id
+        )
         store.clear_activity_aborted(info.workflow_id, info.activity_id)
 
+        halt_reason = self._span_processor.get_halt_requested(
+            info.workflow_id, info.activity_id
+        )
+        if halt_reason:
+            self._span_processor.clear_halt_requested(
+                info.workflow_id, info.activity_id
+            )
+            await _terminate_workflow_for_halt(info.workflow_id, halt_reason)
+
+        # Cleanup
+        self._span_processor.clear_activity_abort(info.workflow_id, info.activity_id)
+        self._span_processor.clear_activity_context(info.workflow_id, info.activity_id)
         if completed_stop is not None:
             if completed_stop.verdict is Verdict.HALT:
                 await _terminate_workflow_for_halt(
@@ -604,16 +1290,16 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
 
         was_aborted = base_aborted or completed_stop is not None
 
+        # Send ActivityCompleted event (unless aborted by hook governance)
         completed_verdict = None
         if was_aborted:
             activity.logger.info(
-                "Skipping ActivityCompleted event — operation aborted by hook governance"
+                "Skipping ActivityCompleted event — activity aborted by hook governance"
             )
         else:
             completed_verdict = await self._send_activity_event(
                 info,
                 WorkflowEventType.ACTIVITY_COMPLETED.value,
-                multi_agent_session_id=multi_agent_session_id,
                 status=status,
                 start_time=start_time,
                 end_time=end_time,
@@ -623,17 +1309,23 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 activity_input=activity_input,
                 activity_output=activity_output,
                 error=error,
+                session_id=session_id,
             )
 
+        # Enforce completed verdict
         if completed_verdict:
             await self._enforce_verdict(completed_verdict, info, "activity_end")
 
+        # Apply output redaction
         return self._apply_output_redaction(completed_verdict, result)
 
+    # ─── Event sending ────────────────────────────────────────────────────
+
     async def _send_activity_event(
-        self, info, event_type: str, multi_agent_session_id=None, **extra
-    ) -> Optional[GovernanceVerdictResponse]:
+        self, info, event_type: str, **extra
+    ) -> GovernanceVerdictResponse | None:
         """Send activity event via GovernanceClient."""
+        session_id = extra.pop("session_id", None)
         serialized_extra = {}
         for key, value in extra.items():
             try:
@@ -653,20 +1345,18 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
             "task_queue": info.task_queue,
             "attempt": info.attempt,
             "timestamp": _rfc3339_now(),
-            # App-supplied multi-agent session id, propagated from the workflow
-            # header. Omitted entirely when absent (never a null key).
-            **(
-                {"multi_agent_session_id": multi_agent_session_id}
-                if multi_agent_session_id
-                else {}
-            ),
             **serialized_extra,
         }
+        if session_id is not None:
+            payload["multi_agent_session_id"] = session_id
 
+        # Final safety check - ensure payload is JSON serializable
         try:
             json.dumps(payload)
         except TypeError as e:
             activity.logger.warning(f"Payload not JSON serializable, cleaning: {e}")
             payload = json.loads(json.dumps(payload, default=str))
 
+        if self._client is None:
+            return None
         return await self._client.evaluate_event(payload)

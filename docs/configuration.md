@@ -138,7 +138,7 @@ internally. Emit an explicit handoff from workflow code with
 ## Example
 
 ```python
-worker = create_openbox_worker(
+worker = OpenBoxPlugin(...)(
     client=client,
     task_queue="my-queue",
     workflows=[MyWorkflow],

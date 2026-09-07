@@ -12,7 +12,6 @@ import pytest
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
 
-import openbox.patch_coordinator as pc
 from openbox.errors import GOVERNANCE_PATCH_LIMIT_EXCEEDED_ERROR_TYPE
 from openbox.patch import PatchRequest
 from openbox.patch_coordinator import (

@@ -9,9 +9,8 @@ SANDBOX SAFETY: ``openbox_core.contracts`` modules are pure (no network,
 crypto, OTel, or wall-clock at import).
 """
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from openbox_core.contracts.events import EventType as WorkflowEventType  # noqa: F401
 from openbox_core.contracts.results import (  # noqa: F401
@@ -27,7 +26,7 @@ from .errors import GovernanceBlockedError  # noqa: F401
 
 def rfc3339_now() -> str:
     """Return current UTC time in RFC3339 format (e.g. '2026-03-08T12:00:00.000Z')."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 class GovernanceVerdictResponse(EvaluationResult):
@@ -40,17 +39,17 @@ class GovernanceVerdictResponse(EvaluationResult):
     def __init__(
         self,
         verdict: Verdict,
-        reason: Optional[str] = None,
-        policy_id: Optional[str] = None,
+        reason: str | None = None,
+        policy_id: str | None = None,
         risk_score: float = 0.0,
-        metadata: Optional[Dict[str, Any]] = None,
-        governance_event_id: Optional[str] = None,
-        guardrails_result: Optional[GuardrailsCheckResult] = None,
-        trust_tier: Optional[str] = None,
-        behavioral_violations: Optional[List[str]] = None,
-        alignment_score: Optional[float] = None,
-        approval_id: Optional[str] = None,
-        constraints: Optional[List[Dict[str, Any]]] = None,
+        metadata: dict[str, Any] | None = None,
+        governance_event_id: str | None = None,
+        guardrails_result: GuardrailsCheckResult | None = None,
+        trust_tier: str | None = None,
+        behavioral_violations: list[str] | None = None,
+        alignment_score: float | None = None,
+        approval_id: str | None = None,
+        constraints: list[dict[str, Any]] | None = None,
         **shared_fields: Any,
     ):
         super().__init__(
@@ -70,7 +69,7 @@ class GovernanceVerdictResponse(EvaluationResult):
         )
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "GovernanceVerdictResponse":
+    def from_dict(cls, data: dict[str, Any]) -> "GovernanceVerdictResponse":
         """Parse a governance response (v1.0 and v1.1 compatible) via the
         shared parser."""
         base = EvaluationResult.from_dict(data)

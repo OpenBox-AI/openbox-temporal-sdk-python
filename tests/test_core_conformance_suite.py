@@ -18,16 +18,16 @@ from __future__ import annotations
 
 import pytest
 import requests
-from temporalio.exceptions import ApplicationError
-
-from openbox.core_adapter import TemporalFrameworkAdapter, build_core_activity_context
-from openbox.governance_state import TemporalGovernanceState
 from openbox_core.conformance.fake_core import FakeCore, assert_hook_wire_shape
 from openbox_core.conformance.instrumentation import (
     LocalCountingServer,
     installed_conformance_runtime,
 )
 from openbox_core.context import ContextStore, activity_scope
+from temporalio.exceptions import ApplicationError
+
+from openbox.core_adapter import TemporalFrameworkAdapter, build_core_activity_context
+from openbox.governance_state import TemporalGovernanceState
 
 
 class _FakeActivityInfo:
@@ -223,7 +223,6 @@ class TestFailClosedMapsToTemporalHalt:
 
     def test_unreachable_core_fail_closed_halts_before_operation(self, server):
         import httpx
-
         from openbox_core.client import EvaluationClient
         from openbox_core.config import OpenBoxConfig
         from openbox_core.instrumentation.manager import InstrumentationManager

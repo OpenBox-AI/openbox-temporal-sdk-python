@@ -126,10 +126,10 @@ None. Fully backward compatible with v1.0.x. The existing `POST /api/v1/governan
 
 ## Configuration
 
-No new configuration required. Hook-level governance is automatically enabled when using `create_openbox_worker()`. The existing `governance_timeout` and `governance_policy` settings apply to hook evaluations.
+No new configuration required. Hook-level governance is automatically enabled when using `OpenBoxPlugin(...)`. The existing `governance_timeout` and `governance_policy` settings apply to hook evaluations.
 
 ```python
-worker = create_openbox_worker(
+worker = OpenBoxPlugin(...)(
     client=client,
     task_queue="my-task-queue",
     workflows=[MyWorkflow],

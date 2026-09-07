@@ -31,7 +31,14 @@ dependencies = [
     "opentelemetry-instrumentation-requests>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-urllib3>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-urllib>=0.59b0,<0.61b0",
-    # Database drivers
+    # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
+    # client, context runtime, generic instrumentation, conformance kit.
+    # BLOCK-with-patch restart needs handle_patch (base SDK >= 1.2.0).
+    "openbox-sdk-python>=1.2.0",
+]
+
+[project.optional-dependencies]
+db = [
     "psycopg2-binary>=2.9.10",
     "asyncpg>=0.29.0",
     "mysql-connector-python>=8.0.0",
@@ -39,7 +46,6 @@ dependencies = [
     "pymongo>=4.0.0",
     "redis>=5.0.0",
     "sqlalchemy>=2.0.0",
-    # Database instrumentation
     "opentelemetry-instrumentation-psycopg2>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-asyncpg>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-mysql>=0.59b0,<0.61b0",
@@ -48,10 +54,6 @@ dependencies = [
     "opentelemetry-instrumentation-pymongo>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-redis>=0.59b0,<0.61b0",
     "opentelemetry-instrumentation-sqlalchemy>=0.59b0,<0.61b0",
-    # OpenBox base SDK: contracts, strict gate, identity/signing, evaluate
-    # client, context runtime, generic instrumentation, conformance kit.
-    # BLOCK-with-patch restart needs handle_patch (base SDK >= 1.2.0).
-    "openbox-sdk-python>=1.2.0",
 ]
 
 [project.urls]
@@ -71,6 +73,7 @@ dev = [
     "isort~=5.12",
     "mypy>=1.16.0,<2",
     "pytest-cov>=7.0.0",
+    "ruff>=0.6.0",
 ]
 
 [build-system]
@@ -92,3 +95,13 @@ check_untyped_defs = true
 
 [tool.isort]
 profile = "black"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+# E501: line length is advisory. UP042: (str, Enum) is deliberate — StrEnum
+# changes str(member) semantics, and wire enums rely on plain string behavior.
+ignore = ["E501", "UP042"]

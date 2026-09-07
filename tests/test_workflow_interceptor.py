@@ -10,9 +10,8 @@ Tests cover:
 """
 
 import base64
-import json
-from dataclasses import asdict, dataclass
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from dataclasses import dataclass
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -825,7 +824,7 @@ class TestInboundInterceptor:
 
         execute_input = MagicMock()
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — mock-injected exception propagates
             await inbound.execute_workflow(execute_input)
 
         # Find the WorkflowFailed call
@@ -879,7 +878,7 @@ class TestInboundInterceptor:
 
         execute_input = MagicMock()
 
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017 — mock-injected exception propagates
             await inbound.execute_workflow(execute_input)
 
         # Find the WorkflowFailed call

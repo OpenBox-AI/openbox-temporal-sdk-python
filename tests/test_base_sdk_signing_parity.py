@@ -82,8 +82,9 @@ class TestSignedBytesParity:
         assert headers["X-OpenBox-Agent-Timestamp"].endswith("+00:00")
 
     def test_module_constants_match_base_sdk(self):
-        from openbox import request_signing
         from openbox_core import identity as core_identity
+
+        from openbox import request_signing
 
         assert request_signing.EMPTY_BODY_SHA256 == core_identity.EMPTY_BODY_SHA256
         assert request_signing.HEADER_DID == core_identity.HEADER_DID
@@ -93,8 +94,9 @@ class TestSignedBytesParity:
         assert request_signing.HEADER_BODY_SHA256 == core_identity.HEADER_BODY_SHA256
 
     def test_serialize_body_matches_base_sdk(self, fixture):
-        from openbox import request_signing
         from openbox_core.serialization import serialize_body
+
+        from openbox import request_signing
 
         assert request_signing.serialize_body(fixture["payload"]) == serialize_body(
             fixture["payload"]

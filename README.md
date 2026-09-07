@@ -10,7 +10,8 @@ OpenBox SDK provides **governance and observability** for Temporal workflows by 
 - HTTP/Database/File I/O instrumentation via OpenTelemetry
 - Guardrails: Input/output validation and redaction
 - Human-in-the-loop approval with expiration handling
-- Zero-code setup via `create_openbox_worker()` factory
+- One official integration surface: `Worker(..., plugins=[OpenBoxPlugin(...)])`
+- Optional sandbox routing — a `CONSTRAIN` verdict runs the user's activity in the sandbox automatically
 
 ---
 
@@ -80,40 +81,7 @@ worker = Worker(
 )
 ```
 
-> **Requires** `temporalio >= 1.23.0`. For older versions, use `create_openbox_worker()` below.
-
----
-
-## Quick Start (Factory)
-
-Use the `create_openbox_worker()` factory for simple integration:
-
-```python
-import os
-from openbox import create_openbox_worker
-
-worker = create_openbox_worker(
-    client=client,
-    task_queue="my-task-queue",
-    workflows=[MyWorkflow],
-    activities=[my_activity],
-    # OpenBox config
-    openbox_url=os.getenv("OPENBOX_URL"),
-    openbox_api_key=os.getenv("OPENBOX_API_KEY"),
-)
-
-await worker.run()
-```
-
-The factory automatically:
-1. Validates the API key
-2. Creates span processor
-3. Sets up OpenTelemetry instrumentation
-4. Creates governance interceptors (incl. W3C trace propagation)
-5. Builds the `GovernanceActivities` instance with credentials captured on
-   `self` and registers its `send_governance_event` method — the API key is
-   never passed through activity inputs / workflow history
-6. Returns fully configured Worker
+> **Requires** `temporalio >= 1.23.0`.
 
 ---
 
@@ -128,26 +96,26 @@ OPENBOX_GOVERNANCE_TIMEOUT=30.0
 OPENBOX_GOVERNANCE_POLICY=fail_open  # or fail_closed
 ```
 
-### Factory Function Parameters
+### Plugin Parameters
 
 ```python
-worker = create_openbox_worker(
-    client=client,
+worker = Worker(
+    client,
     task_queue="my-task-queue",
     workflows=[MyWorkflow],
     activities=[my_activity],
+    plugins=[OpenBoxPlugin(
+        # OpenBox config
+        openbox_url="http://localhost:8086",
+        openbox_api_key="obx_test_key_1",
+        governance_timeout=30.0,
+        governance_policy="fail_open",
 
-    # OpenBox config
-    openbox_url="http://localhost:8086",
-    openbox_api_key="obx_test_key_1",
-    governance_timeout=30.0,
-    governance_policy="fail_open",
-
-    # Event filtering
-    send_start_event=True,
-    send_activity_start_event=True,
-    skip_workflow_types={"InternalWorkflow"},
-    skip_activity_types={"send_governance_event"},
+        # Event filtering
+        send_start_event=True,
+        send_activity_start_event=True,
+        skip_workflow_types={"InternalWorkflow"},
+        skip_activity_types={"send_governance_event"},
     skip_signals={"heartbeat"},
 
     # Database instrumentation
@@ -160,6 +128,7 @@ worker = create_openbox_worker(
     # Default True. Set False if you already wire OpenTelemetryPlugin or a
     # custom propagator.
     enable_trace_propagation=True,
+    )],
 
     # Standard Worker options (all supported)
     activity_executor=my_executor,
@@ -168,6 +137,10 @@ worker = create_openbox_worker(
 ```
 
 ---
+
+## Governed sandbox commands
+
+The optional sandbox integration makes a CONSTRAIN governance verdict route the user's own activity into the sandbox transparently: the plugin intercepts the activity, derives the command from the activity input through the profile bundle, and executes it through the injected governed dispatcher, returning the bounded result to the caller. An ALLOW verdict runs the activity on the host as usual; the workflow stays clean and never imports OpenBox. The dispatcher is injected by the application; the returned `DispatchResult` is structurally validated and mapped to bounded reported terminal metadata correlated with lifecycle signals; it is not a portable signed runtime receipt or independent proof. Rejection of `executed_on_host` occurs after dispatch and cannot prevent a host attempt: zero-host deployments must enforce exact `CONSTRAIN` in Core and make the dispatcher host path unavailable or disabled. Temporal and dispatcher profile bundles must use equivalent command definitions/version because Temporal derives argv and the dispatcher independently re-admits it. No unpublished dispatcher package is a hard dependency. See [Governed sandbox commands](./docs/governed-commands.md) for the exact seam, cleanup, and replay requirements.
 
 ## Governance Verdicts
 
@@ -302,13 +275,10 @@ Configure error policy via the `governance_policy` parameter (`"fail_open"` / `"
 - `redis` — native OTel `request_hook`/`response_hook`
 - `sqlalchemy` — `before/after_cursor_execute` event listeners
 
-**SQLAlchemy Note:** Query-level governance works on pre-existing engines automatically — even engines created before `create_openbox_worker()` runs (e.g., at module import time) — because the base runtime governs SQLAlchemy via a global `Engine` event listener. No engine handle needs to be passed in. The `db_libraries` and `sqlalchemy_engine` parameters are still accepted for backward compatibility but are no longer required and have no effect: the base runtime installs every available database instrumentor best-effort.
+**SQLAlchemy Note:** Query-level governance works on pre-existing engines automatically — even engines created before the plugin runs (e.g., at module import time) — because the base runtime governs SQLAlchemy via a global `Engine` event listener. No engine handle needs to be passed in. The `db_libraries` and `sqlalchemy_engine` parameters are still accepted for backward compatibility but are no longer required and have no effect: the base runtime installs every available database instrumentor best-effort.
 
 ```python
-worker = create_openbox_worker(
-    ...,
-    instrument_databases=True,  # default; installs all available DB instrumentors
-)
+worker = Worker(..., plugins=[OpenBoxPlugin(..., instrument_databases=True)])
 ```
 
 ### File I/O
@@ -460,33 +430,10 @@ Temporal SDK (this package):
 
 ## Advanced Usage
 
-The supported integration is a single call. Both `create_openbox_worker(...)` and
-`OpenBoxPlugin(...)` build and own the base `openbox_core` runtime, install all
-hook instrumentation, register the governance interceptors, and wire the
-`send_governance_event` activity for you — there is no manual OpenTelemetry or
-span-processor setup to perform.
-
-Worker factory:
-
-```python
-import os
-from openbox import create_openbox_worker
-
-worker = create_openbox_worker(
-    client=client,
-    task_queue="my-task-queue",
-    workflows=[MyWorkflow],
-    activities=[my_activity],
-    openbox_url=os.getenv("OPENBOX_URL"),
-    openbox_api_key=os.getenv("OPENBOX_API_KEY"),
-    governance_policy="fail_closed",
-    governance_timeout=30.0,
-    instrument_databases=True,
-    instrument_file_io=True,
-)
-
-await worker.run()
-```
+The supported integration is a single call. `OpenBoxPlugin(...)` builds and owns
+the base `openbox_core` runtime, installs all hook instrumentation, registers the
+governance interceptors, and wires the `send_governance_event` activity — there
+is no manual OpenTelemetry or span-processor setup to perform.
 
 Plugin (Temporal >= 1.23.0) — attach to a plain `Worker`:
 

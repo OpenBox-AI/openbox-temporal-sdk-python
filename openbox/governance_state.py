@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 from .patch import PatchRequest
 from .types import Verdict
@@ -31,7 +30,7 @@ from .types import Verdict
 __all__ = ["TemporalGovernanceState", "CompletedStop"]
 
 # (workflow_id, run_id, activity_id)
-_RunActivityKey = Tuple[str, str, str]
+_RunActivityKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -46,8 +45,8 @@ class CompletedStop:
     """
 
     verdict: Verdict
-    reason: Optional[str]
-    request: Optional[PatchRequest] = None
+    reason: str | None
+    request: PatchRequest | None = None
 
 
 class TemporalGovernanceState:
@@ -56,7 +55,7 @@ class TemporalGovernanceState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # workflow_id -> (verdict, reason, run_id)
-        self._signal_verdicts: dict[str, Tuple[Verdict, Optional[str], str]] = {}
+        self._signal_verdicts: dict[str, tuple[Verdict, str | None, str]] = {}
         # (workflow_id, run_id, activity_id) awaiting a HITL decision
         self._pending_approval: set[_RunActivityKey] = set()
         # (workflow_id, run_id, activity_id) -> CompletedStop from a completed hook
@@ -67,7 +66,7 @@ class TemporalGovernanceState:
         workflow_id: str,
         run_id: str,
         verdict: Verdict,
-        reason: Optional[str] = None,
+        reason: str | None = None,
     ) -> None:
         """Record a SignalReceived BLOCK/HALT that must fail the next activity."""
         with self._lock:
@@ -75,7 +74,7 @@ class TemporalGovernanceState:
 
     def get_signal_verdict(
         self, workflow_id: str, run_id: str
-    ) -> Optional[Tuple[Verdict, Optional[str]]]:
+    ) -> tuple[Verdict, str | None] | None:
         """Peek the pending signal verdict for this run. Clears (and ignores) a
         verdict left by a prior run with the same workflow_id."""
         with self._lock:
@@ -112,8 +111,8 @@ class TemporalGovernanceState:
         run_id: str,
         activity_id: str,
         verdict: Verdict,
-        reason: Optional[str] = None,
-        request: Optional[PatchRequest] = None,
+        reason: str | None = None,
+        request: PatchRequest | None = None,
     ) -> None:
         """A completed-hook BLOCK/HALT resolved by the base runtime. Affects only
         FUTURE execution — the operation already ran. ``request`` carries the
@@ -126,7 +125,7 @@ class TemporalGovernanceState:
 
     def take_completed_stop(
         self, workflow_id: str, run_id: str, activity_id: str
-    ) -> Optional[CompletedStop]:
+    ) -> CompletedStop | None:
         """Return AND clear the completed-hook stop for this exact run/activity.
 
         Consumed on EVERY activity exit path (success in _handle_completion,

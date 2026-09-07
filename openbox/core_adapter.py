@@ -24,8 +24,9 @@ code (guarded by tests/test_workflow_sandbox_import_safety.py).
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, Iterator, NoReturn, Optional
+from typing import Any, NoReturn
 
 from openbox_core.context import ContextStore, activity_scope
 from openbox_core.contracts.context import ActivityContext
@@ -77,8 +78,8 @@ class TemporalFrameworkAdapter:
         state: TemporalGovernanceState,
         *,
         hitl_enabled: bool = True,
-        skip_hitl_activity_types: Optional[set] = None,
-        context_store: Optional[ContextStore] = None,
+        skip_hitl_activity_types: set | None = None,
+        context_store: ContextStore | None = None,
     ):
         self._state = state
         self._hitl_enabled = hitl_enabled
@@ -96,14 +97,14 @@ class TemporalFrameworkAdapter:
         self._pending_approval_or_block(result)
 
     def handle_approval_sync(
-        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+        self, result: EvaluationResult, context: ActivityContext | None = None
     ) -> None:
         """Sync hook seam — same retry-based flow with the span-resolved context
         (ambient lookup can miss in user-spawned threads)."""
         self._pending_approval_or_block(result, context)
 
     def _pending_approval_or_block(
-        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+        self, result: EvaluationResult, context: ActivityContext | None = None
     ) -> None:
         from .hitl import raise_approval_pending, should_skip_hitl
 
@@ -154,7 +155,7 @@ class TemporalFrameworkAdapter:
         self._raise_application_error(result)
 
     def on_completed_hook_result(
-        self, result: EvaluationResult, context: Optional[ActivityContext] = None
+        self, result: EvaluationResult, context: ActivityContext | None = None
     ) -> None:
         """Completed verdicts affect FUTURE execution only (the operation already
         ran). Record a BLOCK/HALT run-scoped so the activity interceptor can skip
@@ -219,7 +220,7 @@ class TemporalFrameworkAdapter:
 def build_core_activity_context(
     info: Any,
     activity_input: Any = None,
-    multi_agent_session_id: Optional[str] = None,
+    multi_agent_session_id: str | None = None,
 ) -> ActivityContext:
     """Shared ActivityContext from a ``temporalio.activity.Info``.
 
@@ -244,8 +245,8 @@ def core_activity_scope(
     info: Any,
     activity_input: Any = None,
     *,
-    trace_id: Optional[int] = None,
-    multi_agent_session_id: Optional[str] = None,
+    trace_id: int | None = None,
+    multi_agent_session_id: str | None = None,
 ) -> Iterator[ActivityContext]:
     """Bind the shared context around activity execution (try/finally reset).
 
@@ -265,13 +266,13 @@ def create_core_runtime(
     state: TemporalGovernanceState,
     timeout_seconds: float = 30.0,
     on_api_error: str = "fail_open",
-    agent_did: Optional[str] = None,
-    agent_private_key: Optional[str] = None,
+    agent_did: str | None = None,
+    agent_private_key: str | None = None,
     hitl_enabled: bool = True,
-    skip_hitl_activity_types: Optional[set] = None,
-    skip_workflow_types: Optional[set] = None,
-    skip_activity_types: Optional[set] = None,
-    skip_signals: Optional[set] = None,
+    skip_hitl_activity_types: set | None = None,
+    skip_workflow_types: set | None = None,
+    skip_activity_types: set | None = None,
+    skip_signals: set | None = None,
     send_start_event: bool = True,
     send_activity_start_event: bool = True,
     instrument_databases: bool = True,

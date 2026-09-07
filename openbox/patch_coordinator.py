@@ -16,7 +16,6 @@ pieces on top of it.
 from __future__ import annotations
 
 import contextvars
-from typing import Optional
 
 from temporalio import workflow
 from temporalio.exceptions import ApplicationError
@@ -58,7 +57,7 @@ class PatchCoordinator:
     """
 
     def __init__(self) -> None:
-        self._request: Optional[PatchRequest] = None
+        self._request: PatchRequest | None = None
 
     def submit(self, req: PatchRequest) -> None:
         """Store the first request; later submits are ignored (first-wins)."""
@@ -68,7 +67,7 @@ class PatchCoordinator:
     def has_request(self) -> bool:
         return self._request is not None
 
-    def get_request(self) -> Optional[PatchRequest]:
+    def get_request(self) -> PatchRequest | None:
         return self._request
 
 
@@ -76,26 +75,26 @@ class PatchCoordinator:
 # with a token at execute_workflow entry and ALWAYS reset in a finally, so a
 # coordinator never leaks into a sequential run (or an error path) on the same
 # worker event loop. Defaults to None between runs.
-_coordinator_var: contextvars.ContextVar[Optional[PatchCoordinator]] = (
+_coordinator_var: contextvars.ContextVar[PatchCoordinator | None] = (
     contextvars.ContextVar("openbox_patch_coordinator", default=None)
 )
 
 
 def bind_coordinator(
     coordinator: PatchCoordinator,
-) -> "contextvars.Token[Optional[PatchCoordinator]]":
+) -> contextvars.Token[PatchCoordinator | None]:
     """Bind the run-local coordinator; returns a token for ``unbind_coordinator``."""
     return _coordinator_var.set(coordinator)
 
 
 def unbind_coordinator(
-    token: "contextvars.Token[Optional[PatchCoordinator]]",
+    token: contextvars.Token[PatchCoordinator | None],
 ) -> None:
     """Reset the ContextVar (call in a finally) so no coordinator leaks across runs."""
     _coordinator_var.reset(token)
 
 
-def get_coordinator() -> Optional[PatchCoordinator]:
+def get_coordinator() -> PatchCoordinator | None:
     """The run-local coordinator bound for the current workflow run, or None."""
     return _coordinator_var.get()
 

@@ -1,12 +1,14 @@
 """Public API compatibility gate.
 
-Pins every export, the ``create_openbox_worker``/``OpenBoxPlugin`` kwargs, and
-the shared shim types' behavioral identity. Any accidental rename/removal fails
-here first.
+Pins every export, the ``OpenBoxPlugin`` kwargs, and the shared shim types'
+behavioral identity. Any accidental rename/removal fails here first.
 
 ``WorkflowSpanProcessor`` and ``WorkflowSpanBuffer`` are intentionally absent.
 Hook instrumentation lives in ``openbox_core`` and the worker owns an
 ``OpenBoxRuntime``.
+
+``create_openbox_worker`` (and its ``sandbox`` kwarg) was removed with the
+plugin-only refactor, so ``SandboxConfig`` is no longer part of the surface.
 """
 
 from __future__ import annotations
@@ -38,7 +40,6 @@ EXPECTED_EXPORTS = {
     "Verdict",
     "VerdictEnforcementResult",
     "WorkflowEventType",
-    "create_openbox_worker",
     "enforce_verdict",
     "extract_governance_error",
     "get_global_config",
@@ -57,23 +58,6 @@ EXPECTED_EXPORTS = {
 REMOVED_EXPORTS = {
     "WorkflowSpanProcessor",
     "WorkflowSpanBuffer",
-}
-
-WORKER_KWARGS = {
-    "client",
-    "task_queue",
-    "workflows",
-    "activities",
-    "openbox_url",
-    "openbox_api_key",
-    "agent_did",
-    "agent_private_key",
-    "governance_timeout",
-    "governance_policy",
-    "send_start_event",
-    "send_activity_start_event",
-    "skip_workflow_types",
-    "skip_activity_types",
 }
 
 PLUGIN_KWARGS = {
@@ -109,7 +93,7 @@ class TestExports:
     def test_public_surface_is_exactly_expected(self):
         # __all__ is the whole public surface — nothing beyond the expected set.
         assert set(openbox.__all__) == EXPECTED_EXPORTS
-        assert len(openbox.__all__) == 34
+        assert len(openbox.__all__) == 33
 
     def test_removed_exports_absent(self):
         for name in REMOVED_EXPORTS:
@@ -118,11 +102,6 @@ class TestExports:
 
 
 class TestEntrypointSignatures:
-    def test_create_openbox_worker_kwargs_preserved(self):
-        parameters = set(inspect.signature(openbox.create_openbox_worker).parameters)
-        missing = WORKER_KWARGS - parameters
-        assert not missing, f"create_openbox_worker lost kwargs: {sorted(missing)}"
-
     def test_plugin_kwargs_preserved(self):
         parameters = set(inspect.signature(openbox.OpenBoxPlugin.__init__).parameters)
         missing = PLUGIN_KWARGS - parameters
