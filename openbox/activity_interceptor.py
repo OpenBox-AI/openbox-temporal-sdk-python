@@ -559,6 +559,34 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
                 governance_verdict.verdict == Verdict.CONSTRAIN
                 and self._sandbox is not None
             ):
+                # Two CONSTRAIN shapes reach here and they name their profile in
+                # opposite places: a policy rule leaves it in the activity input,
+                # a behavioral rule names it on the verdict. Only the policy
+                # shape can be parsed out of args[0], so routing a behavioral
+                # verdict down that path rejects the activity's ordinary business
+                # payload as "governed command input rejected", non-retryably.
+                #
+                # Which stage the rule matches at is state-dependent: a rule with
+                # required prior states matches at ActivityStarted only once those
+                # spans exist, so a first run matches at completion and a retry
+                # matches here. The completed stage already discriminates on
+                # profile_id; do the same, and go through the shared once-guard so
+                # a started-hook dispatch is reused rather than duplicated.
+                if governance_verdict.profile_id is not None:
+                    outcome = await asyncio.shield(
+                        self._behavioral_dispatch_task(
+                            info,
+                            governance_verdict,
+                            input.headers,
+                            activity_root_span_id,
+                        )
+                    )
+                    self._behavioral_dispatch_tasks.pop(
+                        self._behavioral_key(info), None
+                    )
+                    if outcome.get("status") == "failed":
+                        self._raise_behavioral_failure(outcome)
+                    return self._attach_behavioral_outcome(None, outcome)
                 return await self._execute_constrained_activity(
                     input,
                     info,
