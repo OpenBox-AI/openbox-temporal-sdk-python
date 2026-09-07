@@ -62,9 +62,13 @@ async def test_evaluate_maps_shared_result_without_reparsing() -> None:
             "reason": "sandbox required",
             "policy_id": "policy-1",
             "constraints": ["run_in_sandbox"],
+            "age_result": {"profile_id": "post-batch"},
         }
     )
-    shared_result.raw = {"unknown": "preserved"}
+    shared_result.raw = {
+        "unknown": "preserved",
+        "age_result": {"profile_id": "post-batch"},
+    }
     shared.aevaluate.return_value = shared_result
     value = GovernanceClient._from_core_client(
         shared,
@@ -81,7 +85,11 @@ async def test_evaluate_maps_shared_result_without_reparsing() -> None:
     assert isinstance(result, GovernanceVerdictResponse)
     assert result.verdict is Verdict.CONSTRAIN
     assert result.constraints == ["run_in_sandbox"]
-    assert result.raw == {"unknown": "preserved"}
+    assert result.profile_id == "post-batch"
+    assert result.raw == {
+        "unknown": "preserved",
+        "age_result": {"profile_id": "post-batch"},
+    }
     shared.aevaluate.assert_awaited_once_with({"event_type": "ActivityStarted"})
 
 

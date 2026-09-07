@@ -90,8 +90,10 @@ _OUTCOMES = frozenset(
 )
 
 
-def parse_image_digest(template: str) -> str:
-    """Return only a lowercase digest from one full immutable image reference."""
+def parse_image_digest(template: str) -> str | None:
+    """Return an OCI digest, or no image evidence for the native template."""
+    if template == "native://native":
+        return None
     if not isinstance(template, str):
         raise ValueError("immutable image template rejected")
     matched = _IMAGE.fullmatch(template)
@@ -142,7 +144,7 @@ class GovernedCommandTerminalRecord:
     profile_id: str
     workflow_type: str
     task_queue: str
-    image_digest: str
+    image_digest: str | None
     sandbox_provider: str | None
     parent_span_context: Any
     started_ns: int
@@ -159,6 +161,9 @@ class GovernedCommandTerminalRecord:
     stderr_bytes: int
     unsafe_stdout: str | None
     unsafe_stderr: str | None
+    # Per-destination proxy decisions, surfaced as openbox.sandbox.egress.*
+    # Entries expose decision, host, and port attributes (duck-typed).
+    egress: tuple[object, ...] = ()
 
 
 class GovernedCommandTelemetryOwner:
@@ -413,14 +418,18 @@ class GovernedCommandTelemetryBridge:
         ) = self._terminal_metadata(dispatch_result, error)
         unsafe_stdout: str | None = None
         unsafe_stderr: str | None = None
-        if self.include_unsafe_attributes and dispatch_result is not None:
+        egress: tuple[object, ...] = ()
+        if dispatch_result is not None:
             execution = getattr(dispatch_result, "execution", None)
-            stdout = None if execution is None else getattr(execution, "stdout", None)
-            stderr = None if execution is None else getattr(execution, "stderr", None)
-            if isinstance(stdout, bytes):
-                unsafe_stdout = stdout.decode("utf-8", errors="replace")
-            if isinstance(stderr, bytes):
-                unsafe_stderr = stderr.decode("utf-8", errors="replace")
+            if execution is not None:
+                egress = getattr(execution, "egress_decisions", ()) or ()
+            if self.include_unsafe_attributes:
+                stdout = getattr(execution, "stdout", None)
+                stderr = getattr(execution, "stderr", None)
+                if isinstance(stdout, bytes):
+                    unsafe_stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    unsafe_stderr = stderr.decode("utf-8", errors="replace")
         with owner._lock:
             if owner._finalized:
                 return None
@@ -450,6 +459,7 @@ class GovernedCommandTelemetryBridge:
                 stderr_bytes=stderr_bytes,
                 unsafe_stdout=unsafe_stdout,
                 unsafe_stderr=unsafe_stderr,
+                egress=egress,
             )
         with self._state_lock:
             self._owners.discard(owner._key)
@@ -666,8 +676,9 @@ class GovernedCommandTelemetryBridge:
                 "openbox.governed.profile_id": record.profile_id,
                 "openbox.governed.workflow_type": record.workflow_type,
                 "openbox.governed.task_queue": record.task_queue,
-                "openbox.governed.image_digest": record.image_digest,
             }
+            if record.image_digest is not None:
+                attributes["openbox.governed.image_digest"] = record.image_digest
             # `openbox.hook.type` identifies the OTel event category, not the
             # dispatcher's disposition; downstream validators require it to be
             # present on every governed_command terminal span, including
@@ -677,7 +688,20 @@ class GovernedCommandTelemetryBridge:
                 record.disposition == "executed_in_sandbox"
                 and record.sandbox_provider is not None
             ):
-                attributes["sandbox.provider"] = record.sandbox_provider
+                attributes["openbox.sandbox.provider"] = record.sandbox_provider
+            if record.disposition == "executed_in_sandbox" and record.egress:
+                attributes["openbox.sandbox.egress.count"] = len(record.egress)
+                for index, entry in enumerate(record.egress):
+                    prefix = f"openbox.sandbox.egress.{index}"
+                    decision = getattr(entry, "decision", None)
+                    host = getattr(entry, "host", None)
+                    port = getattr(entry, "port", None)
+                    if decision is None or host is None:
+                        continue
+                    attributes[f"{prefix}.decision"] = decision
+                    attributes[f"{prefix}.host"] = host
+                    if port is not None:
+                        attributes[f"{prefix}.port"] = port
             span = tracer.start_span(  # type: ignore[attr-defined]
                 "openbox.governed_command",
                 context=parent,

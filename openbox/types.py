@@ -24,6 +24,16 @@ from openbox_core.contracts.results import (
 from .errors import GovernanceBlockedError  # noqa: F401
 
 
+def _profile_id_from_response(data: dict[str, Any]) -> str | None:
+    """Extract the behavioral command profile from a Core response."""
+    value = data.get("profile_id")
+    if value is None:
+        age_result = data.get("age_result")
+        if isinstance(age_result, dict):
+            value = age_result.get("profile_id")
+    return value if isinstance(value, str) and value else None
+
+
 def rfc3339_now() -> str:
     """Return current UTC time in RFC3339 format (e.g. '2026-03-08T12:00:00.000Z')."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
@@ -50,6 +60,7 @@ class GovernanceVerdictResponse(EvaluationResult):
         alignment_score: float | None = None,
         approval_id: str | None = None,
         constraints: list[dict[str, Any]] | None = None,
+        profile_id: str | None = None,
         **shared_fields: Any,
     ):
         super().__init__(
@@ -67,6 +78,7 @@ class GovernanceVerdictResponse(EvaluationResult):
             constraints=constraints,
             **shared_fields,
         )
+        self.profile_id = profile_id
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GovernanceVerdictResponse":
@@ -75,4 +87,5 @@ class GovernanceVerdictResponse(EvaluationResult):
         base = EvaluationResult.from_dict(data)
         instance = cls.__new__(cls)
         instance.__dict__.update(base.__dict__)
+        instance.profile_id = _profile_id_from_response(data)
         return instance

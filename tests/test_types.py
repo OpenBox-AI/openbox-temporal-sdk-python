@@ -413,6 +413,7 @@ class TestGovernanceVerdictResponse:
         assert response.alignment_score is None
         assert response.approval_id is None
         assert response.constraints is None
+        assert response.profile_id is None
 
     def test_creation_with_all_fields(self):
         """Test creation with all fields specified."""
@@ -436,6 +437,7 @@ class TestGovernanceVerdictResponse:
             alignment_score=0.85,
             approval_id="approval-789",
             constraints=constraints,
+            profile_id="post-batch",
         )
 
         assert response.verdict == Verdict.CONSTRAIN
@@ -450,6 +452,7 @@ class TestGovernanceVerdictResponse:
         assert response.alignment_score == 0.85
         assert response.approval_id == "approval-789"
         assert response.constraints == constraints
+        assert response.profile_id == "post-batch"
 
     # Test action property - backward compat
     def test_action_property_allow_returns_continue(self):
@@ -537,6 +540,23 @@ class TestGovernanceVerdictResponse:
 
         assert response.verdict == Verdict.CONSTRAIN
         assert response.reason == "Rate limited"
+
+    def test_from_dict_v11_constrain_profile_from_age_result(self):
+        data = {
+            "verdict": "constrain",
+            "age_result": {"profile_id": "post-batch"},
+        }
+
+        response = GovernanceVerdictResponse.from_dict(data)
+
+        assert response.profile_id == "post-batch"
+
+    def test_from_dict_v11_constrain_profile_from_top_level(self):
+        response = GovernanceVerdictResponse.from_dict(
+            {"verdict": "constrain", "profile_id": "post-batch"}
+        )
+
+        assert response.profile_id == "post-batch"
 
     def test_from_dict_v11_require_approval_verdict(self):
         """Test parsing v1.1 response with 'require_approval' verdict."""

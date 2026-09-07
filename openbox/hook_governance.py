@@ -41,9 +41,11 @@ _span_processor: WorkflowSpanProcessor | None = None
 _agent_did: str | None = None
 _signer: Any = None
 _core_ssl_context: Any = None
-# Connected Worker mode injects its one shared EvaluationClient here. Direct
-# compatibility setups leave this None and retain the legacy transport seam.
+# Connected Worker mode injects its one shared EvaluationClient and framework
+# adapter here. Direct compatibility setups leave these unset and retain the
+# legacy transport seam.
 _evaluation_client: Any = None
+_constrain_handler: Any = None
 
 # Persistent HTTP clients. httpx Client/AsyncClient themselves are thread-safe
 # for requests; the locks below only guard creation against concurrent activities
@@ -81,7 +83,7 @@ def configure(
         core_ca_path: Optional CA bundle used to pin Core HTTPS.
     """
     global _api_url, _api_key, _api_timeout, _on_api_error, _max_body_size, _span_processor, _sync_client, _async_client
-    global _agent_did, _signer, _core_ssl_context, _evaluation_client
+    global _agent_did, _signer, _core_ssl_context, _evaluation_client, _constrain_handler
     _api_url = api_url.rstrip("/")
     _api_key = api_key
     _api_timeout = api_timeout
@@ -94,6 +96,7 @@ def configure(
 
     _core_ssl_context = resolve_core_ssl_context(core_ca_path)
     _evaluation_client = None
+    _constrain_handler = None
     # Reset persistent clients so they pick up new timeout/config
     _sync_client = None
     _async_client = None
@@ -107,6 +110,115 @@ def set_evaluation_client(client: Any) -> None:
     """Use a Worker-owned shared Core client for hook decisions."""
     global _evaluation_client
     _evaluation_client = client
+
+
+def set_constrain_handler(handler: Any) -> None:
+    """Route started-hook CONSTRAIN results through the framework adapter."""
+    global _constrain_handler
+    _constrain_handler = handler
+
+
+def _trigger_activity_context(
+    span: Any, span_data: dict[str, Any] | None
+) -> Any | None:
+    """Carry the triggering hook span id through the framework callback."""
+    from dataclasses import replace
+
+    from openbox_core.contracts.context import ActivityContext
+
+    from .core_adapter import get_core_context_store
+
+    context = get_core_context_store().current_activity_context()
+    if context is None and _span_processor is not None:
+        span_context = (
+            span.get_span_context()
+            if hasattr(span, "get_span_context")
+            else getattr(span, "context", None)
+        )
+        trace_id = getattr(span_context, "trace_id", None)
+        raw = (
+            _span_processor.get_activity_context_by_trace(trace_id)
+            if isinstance(trace_id, int)
+            else None
+        )
+        if raw is not None:
+            context = ActivityContext(
+                workflow_id=raw.get("workflow_id"),
+                run_id=raw.get("run_id"),
+                workflow_type=raw.get("workflow_type"),
+                task_queue=raw.get("task_queue"),
+                activity_id=raw.get("activity_id"),
+                activity_type=raw.get("activity_type"),
+                activity_input=raw.get("activity_input"),
+                multi_agent_session_id=raw.get("multi_agent_session_id"),
+                metadata={
+                    key: raw[key]
+                    for key in ("attempt", "source")
+                    if key in raw
+                },
+            )
+    if context is None:
+        return None
+
+    trigger_span_id = (span_data or {}).get("span_id")
+    if not isinstance(trigger_span_id, str) or len(trigger_span_id) != 16:
+        trigger_span_id = extract_span_context(span)[0]
+    return replace(
+        context,
+        metadata={
+            **context.metadata,
+            "openbox.trigger_span_id": trigger_span_id,
+        },
+    )
+
+
+def _dispatch_constrain_sync(
+    result: Any,
+    span_data: dict[str, Any] | None,
+    *,
+    span: Any,
+    identifier: str,
+) -> None:
+    if (
+        span_data is not None
+        and span_data.get("stage") == "started"
+        and result.verdict.value == "constrain"
+    ):
+        from .types import GovernanceBlockedError
+
+        reason = result.reason or "Host action intercepted by CONSTRAIN"
+        # Match BLOCK ordering: reserve the activity abort before executing the
+        # replacement profile, then raise the action-level stop before the
+        # instrumented operation can reach its transport.
+        _set_activity_abort(span, reason)
+        if _constrain_handler is not None:
+            _constrain_handler.handle_constrain_sync(
+                result, _trigger_activity_context(span, span_data)
+            )
+        raise GovernanceBlockedError("constrain", reason, identifier)
+
+
+async def _dispatch_constrain_async(
+    result: Any,
+    span_data: dict[str, Any] | None,
+    *,
+    span: Any,
+    identifier: str,
+) -> None:
+    if (
+        span_data is not None
+        and span_data.get("stage") == "started"
+        and result.verdict.value == "constrain"
+    ):
+        from .types import GovernanceBlockedError
+
+        reason = result.reason or "Host action intercepted by CONSTRAIN"
+        _set_activity_abort(span, reason)
+        if _constrain_handler is not None:
+            await _constrain_handler.handle_constrain(
+                result, _trigger_activity_context(span, span_data)
+            )
+        raise GovernanceBlockedError("constrain", reason, identifier)
 
 
 def _get_sync_client() -> httpx.Client:
@@ -417,6 +529,9 @@ def evaluate_sync(
             data.setdefault("verdict", result.verdict.value)
             data.setdefault("reason", result.reason)
             _handle_verdict(data, identifier, span=span)
+            _dispatch_constrain_sync(
+                result, span_data, span=span, identifier=identifier
+            )
         return
 
     from .request_signing import prepare_signed_request, send_sync
@@ -490,6 +605,9 @@ async def evaluate_async(
             data.setdefault("verdict", result.verdict.value)
             data.setdefault("reason", result.reason)
             _handle_verdict(data, identifier, span=span)
+            await _dispatch_constrain_async(
+                result, span_data, span=span, identifier=identifier
+            )
         return
 
     from .request_signing import prepare_signed_request, send_async
