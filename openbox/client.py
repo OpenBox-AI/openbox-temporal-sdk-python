@@ -182,6 +182,7 @@ class GovernanceClient:
             data.setdefault("reason", result.reason)
             data.setdefault("policy_id", result.policy_id)
             data.setdefault("risk_score", result.risk_score)
+            data.setdefault("fallback_used", result.fallback_used)
             return GovernanceVerdictResponse.from_dict(data)
 
         if self._okta_identity is not None:

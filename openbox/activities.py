@@ -91,9 +91,16 @@ def raise_governance_block(
     )
 
 
-def _build_verdict_result(verdict: Verdict, reason, policy_id, risk_score) -> dict:
+def _build_verdict_result(
+    verdict: Verdict,
+    reason,
+    policy_id,
+    risk_score,
+    *,
+    fallback_used: bool = False,
+) -> dict:
     """Build a success result dict from a governance verdict."""
-    return {
+    result = {
         "success": True,
         "verdict": verdict.value,
         "action": verdict.value,  # backward compat
@@ -101,6 +108,9 @@ def _build_verdict_result(verdict: Verdict, reason, policy_id, risk_score) -> di
         "policy_id": policy_id,
         "risk_score": risk_score,
     }
+    if fallback_used:
+        result["fallback_used"] = True
+    return result
 
 
 async def _handle_stop_verdict(
@@ -289,7 +299,15 @@ class GovernanceActivities:
                 if result:
                     return result
 
-            return _build_verdict_result(verdict, reason, policy_id, risk_score)
+            return _build_verdict_result(
+                verdict,
+                reason,
+                policy_id,
+                risk_score,
+                fallback_used=(
+                    parsed.fallback_used if self._workload_private_key else False
+                ),
+            )
 
         except (GovernanceAPIError, ApplicationError, OpenBoxAuthError):
             # OpenBoxAuthError (raised by `_raise_okta_auth_failure` for an
