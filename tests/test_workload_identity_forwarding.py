@@ -9,11 +9,37 @@ from openbox_core.contracts.results import EvaluationResult
 
 from openbox.activities import GovernanceActivities
 from openbox.client import GovernanceClient
+from openbox.config import initialize
+from openbox.errors import OpenBoxConfigError
 from openbox.types import GovernanceVerdictResponse, Verdict
 
 API_URL = "http://localhost:8086"
 API_KEY = "obx_test_workload_agent"
 WORKLOAD_PRIVATE_KEY = "workload-private-key"
+
+
+@pytest.mark.parametrize(
+    "workload_private_key",
+    [
+        "not-a-key",
+        "-----BEGIN PRIVATE KEY-----\nsensitive-junk\n-----END PRIVATE KEY-----",
+    ],
+)
+def test_initialize_names_malformed_workload_key_without_disclosing_it(
+    workload_private_key,
+):
+    with pytest.raises(OpenBoxConfigError) as exc_info:
+        initialize(
+            API_URL,
+            API_KEY,
+            workload_private_key=workload_private_key,
+        )
+
+    assert str(exc_info.value) == (
+        "Invalid workload_private_key: could not load a PKCS8 PEM RSA "
+        "private key (key bytes not shown)."
+    )
+    assert workload_private_key not in str(exc_info.value)
 
 
 def test_plugin_forwards_workload_key_to_every_governance_path():
