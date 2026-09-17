@@ -728,43 +728,16 @@ wheels = [
 [[package]]
 name = "openbox-sdk-python"
 version = "1.3.0"
-source = { editable = "../openbox-sdk-python" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-sdk" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "asyncpg", marker = "extra == 'db'", specifier = ">=0.29.0" },
-    { name = "cryptography", specifier = ">=48.0.1,<50" },
-    { name = "httpx", specifier = ">=0.28.0,<1" },
-    { name = "opentelemetry-api", specifier = ">=1.38.0,<1.40.0" },
-    { name = "opentelemetry-instrumentation-asyncpg", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-dbapi", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-httpx", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-redis", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-requests", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-sqlalchemy", marker = "extra == 'db'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-urllib", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-instrumentation-urllib3", marker = "extra == 'http'", specifier = ">=0.59b0,<0.61b0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.38.0,<1.40.0" },
-    { name = "pymongo", marker = "extra == 'db'", specifier = ">=4.6.0" },
-    { name = "redis", marker = "extra == 'db'", specifier = ">=5.0.0" },
-    { name = "requests", marker = "extra == 'http'", specifier = ">=2.31.0" },
-    { name = "sqlalchemy", marker = "extra == 'db'", specifier = ">=2.0.0" },
-    { name = "wrapt", marker = "extra == 'db'", specifier = ">=1.16.0" },
-]
-provides-extras = ["http", "db"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=1.16.0,<2" },
-    { name = "pytest", specifier = ">=8.2" },
-    { name = "pytest-asyncio", specifier = ">=0.26.0,<0.27" },
-    { name = "ruff", specifier = ">=0.8.0" },
+sdist = { url = "https://files.pythonhosted.org/packages/d3/75/1fe08e0d2048026192d71a898de04f57e480d083785f7f54096c39d782ac/openbox_sdk_python-1.3.0.tar.gz", hash = "sha256:425af9e25759174985334a9fc3392d218efe8b094f88e290fd921282313bdbe6", size = 256208, upload-time = "2026-09-17T22:04:36.692Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/94/654eb786f2272d1cf82216abe439a842c8ad105c46cfd2456eb6268d1780/openbox_sdk_python-1.3.0-py3-none-any.whl", hash = "sha256:d2ea8d325883728c6bd1389041465214867ecdd06a4ba395984d83ad60e77524", size = 123082, upload-time = "2026-09-17T22:04:35.044Z" },
 ]
 
 [[package]]
@@ -814,7 +787,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "httpx", specifier = ">=0.28.0,<1" },
     { name = "mysql-connector-python", specifier = ">=8.0.0" },
-    { name = "openbox-sdk-python", editable = "../openbox-sdk-python" },
+    { name = "openbox-sdk-python", specifier = ">=1.3.0" },
     { name = "opentelemetry-api", specifier = ">=1.38.0,<1.40.0" },
     { name = "opentelemetry-instrumentation-asyncpg", specifier = ">=0.59b0,<0.61b0" },
     { name = "opentelemetry-instrumentation-httpx", specifier = ">=0.59b0,<0.61b0" },
