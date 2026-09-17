@@ -55,7 +55,7 @@ dependencies = [
     # OktaAiAgentIdentityConfig/identity_okta/config.load_okta_identity().
     # Resolve the published package from PyPI so standalone installs and CI use
     # the same dependency source.
-    "openbox-sdk-python>=1.3.0",
+    "openbox-sdk-python>=1.3.1",
 ]
 
 [project.urls]
