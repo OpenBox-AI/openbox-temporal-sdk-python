@@ -4,16 +4,37 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-21
+
 ### Added
 
-- **Okta AI Agent (v2) identity support**, alongside existing OpenBox DID (v1) signing: `create_openbox_worker(...)` / `OpenBoxPlugin(...)` / `initialize(...)` accept `openbox_agent_id`, `organization_id`, `deployment_id`, `okta_agent_id`, `okta_agent_key_id`, `okta_agent_private_key`, `okta_agent_algorithm`, and `agent_proof_audience` (all-or-nothing together, mutually exclusive with `agent_did`/`agent_private_key`). When configured, governance evaluate/approval calls, the activity-level `send_governance_event`, and the startup API-key validation ping all route to Core's `/api/v2/*` endpoints with an RS256 JWT assertion instead of `/api/v1/*` with Ed25519 DID headers — never both. RSA key loading, the 2048-bit floor, algorithm allowlisting, and assertion construction are entirely owned by the base SDK (`openbox_core.identity_okta`); this package only selects the endpoint version and forwards the identity.
-- A 401/403 response from Core while in Okta mode now raises `OpenBoxAuthError`/`OpenBoxSigningError` unconditionally (never a fallback `ALLOW`, never read as "still pending" during approval polling) — matching the v1 auth-failure contract.
-- **Base SDK dependency raised to `openbox-sdk-python>=1.3.0`** for the tagged Okta identity types. Not yet published to PyPI at time of writing (PyPI has up to `1.2.0`); this repo's `1.2.1` decision to depend on PyPI only (no local `[tool.uv.sources]` override, see `_notes/decision-pypi-openbox-core-dependency.md`) is preserved — `uv sync`/`uv lock` will not resolve this constraint until `1.3.0` ships.
+- **IAM v3 workload identity support:** `initialize(...)`, `create_openbox_worker(...)`, and `OpenBoxPlugin(...)` accept `workload_private_key` for a Keycloak service account. The credential is forwarded to startup validation, governance evaluation, approval polling, governance activities, and the base instrumentation runtime. The base SDK owns token exchange and Core v3 authentication.
+- **Okta AI Agent (v2) identity support:** configure `okta_agent_private_key` alone to bootstrap identity metadata from Core, or supply the complete explicit Okta identity configuration. Governance and validation requests use Core's `/api/v2/*` endpoints with RS256 assertions. RSA key validation and request signing are delegated to the base SDK.
+- Regression coverage for workload identity forwarding, Okta bootstrap and explicit configuration, authentication failures, and fail-open result metadata.
 
-### Not changed
+### Changed
 
-- Existing OpenBox DID (v1) configuration, behavior, and tests are unaffected.
-- The existing `emit_handoff(multi_agent_session_id=..., from_agent_did=...)` (legacy receiver-authenticated `Handoff` event, routed through `send_governance_event`) is unchanged. A provider-neutral, source-authenticated `target_agent_id`-based handoff (the base SDK's `/api/v1/handoffs` / `/api/v2/handoffs`) was evaluated but deferred — it needs a new activity + workflow-safe wrapper preserving the existing Continue-As-New/patch-coordinator semantics, which is a separate, larger change than this identity-forwarding pass.
+- Raise the base SDK dependency from `openbox-sdk-python>=1.2.0` to `>=1.3.1`, resolved from PyPI.
+- Reuse the resolved Okta identity across lifecycle governance and the base instrumentation runtime.
+
+### Fixed
+
+- Preserve `fallback_used` from the base SDK in workload-authenticated governance responses and activity results so callers can identify fail-open decisions.
+- Surface Okta authentication and signing failures as `OpenBoxAuthError` / `OpenBoxSigningError`, including approval polling, instead of treating them as fail-open decisions or pending approvals.
+- Cover malformed workload private keys with regression tests requiring an error that names `workload_private_key` without exposing the supplied key.
+
+### Security and release automation
+
+- Update the locked `cryptography` dependency from `49.0.0` to `50.0.1`.
+- Update the locked `anyio` dependency from `4.12.1` to `4.14.2` to fix the TLS hostname verification vulnerability reported as `CVE-2026-63374`.
+- Publish tagged releases through PyPI OIDC trusted publishing, with package-version validation against the pushed tag.
+- Add pull-request security scanning.
+
+### Upgrade notes
+
+- Existing OpenBox DID (v1) configuration remains supported. DID and Okta identity configuration are mutually exclusive.
+- Okta private-key-only bootstrap requires server validation; `initialize(..., validate=False)` is supported only when bootstrap is not needed. Partial explicit Okta identity configuration is rejected.
+- The legacy `emit_handoff(multi_agent_session_id=..., from_agent_did=...)` interface is unchanged.
 
 ## [1.4.0] - 2026-07-23
 
