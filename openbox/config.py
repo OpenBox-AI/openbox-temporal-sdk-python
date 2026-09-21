@@ -50,6 +50,7 @@ from .errors import (  # noqa: F401
     OpenBoxConfigError,
     OpenBoxInsecureURLError,
     OpenBoxNetworkError,
+    OpenBoxSigningError,
 )
 
 # GovernanceConfig - Configuration for interceptors
@@ -159,18 +160,26 @@ def _validate_did(agent_did: str) -> None:
         raise OpenBoxConfigError(str(exc)) from exc
 
 
-def resolve_signing_defaults(agent_did, signer):
-    """Fall back to the global config's loaded DID + signer when both are omitted.
+def resolve_signing_defaults(agent_did, signer, okta_identity=None):
+    """Fall back to the global config's loaded identity when ALL THREE identity
+    args are omitted.
 
-    Ensures a MANUAL SDK setup that called initialize(..., agent_did=, agent_private_key=)
-    also signs governance calls — not just the /auth/validate GET. Worker/plugin pass
-    explicit values so this is a no-op for them. Falls back only when BOTH are None
-    (DID + key are both-or-neither), so it never produces a partial signing state.
+    Ensures a MANUAL SDK setup that called initialize(..., agent_did=,
+    agent_private_key=) or initialize(..., okta_agent_id=, ...) also signs
+    governance calls — not just the /auth/validate GET. Worker/plugin pass
+    explicit values so this is a no-op for them. Falls back only when
+    agent_did, signer, AND okta_identity are all None, so it never produces a
+    partial/mixed signing state.
+
+    Returns:
+        ``(agent_did, signer, okta_identity)`` — exactly one of
+        ``(agent_did, signer)`` or ``okta_identity`` is non-None (or all None
+        for legacy_unsigned), never both (proposal §13.1 mutual exclusion).
     """
-    if agent_did is None and signer is None:
+    if agent_did is None and signer is None and okta_identity is None:
         gc = get_global_config()
-        return gc.agent_did, gc.get_signer()
-    return agent_did, signer
+        return gc.agent_did, gc.get_signer(), gc.get_okta_identity()
+    return agent_did, signer, okta_identity
 
 
 def _load_ed25519_seed(agent_private_key: str):
@@ -181,6 +190,101 @@ def _load_ed25519_seed(agent_private_key: str):
         return load_core_ed25519_seed(agent_private_key)
     except CoreOpenBoxConfigError as exc:
         raise OpenBoxConfigError(str(exc)) from exc
+
+
+def _load_okta_identity(
+    *,
+    openbox_agent_id: str,
+    organization_id: str,
+    deployment_id: str,
+    okta_agent_id: str,
+    okta_agent_key_id: str,
+    okta_agent_private_key: str,
+    agent_proof_audience: str,
+    okta_agent_algorithm: str = "RS256",
+):
+    """Build + load an Okta AI Agent (v2) identity through the shared base SDK.
+
+    Entirely delegates RSA key loading, the 2048-bit floor, and algorithm
+    allowlisting to ``openbox_core.identity_okta.OktaAgentIdentity`` (proposal
+    §13.7) — never re-implemented here.
+    """
+    from openbox_core.identity_okta import OktaAgentIdentity
+    from openbox_core.identity_types import OktaAiAgentIdentityConfig
+
+    try:
+        return OktaAgentIdentity.from_config(
+            OktaAiAgentIdentityConfig(
+                openbox_agent_id=openbox_agent_id,
+                organization_id=organization_id,
+                deployment_id=deployment_id,
+                external_agent_id=okta_agent_id,
+                key_id=okta_agent_key_id,
+                audience=agent_proof_audience,
+                private_key=okta_agent_private_key,
+                algorithm=okta_agent_algorithm,  # type: ignore[arg-type]
+            )
+        )
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
+
+
+def _bootstrap_okta_identity(
+    *,
+    api_url: str,
+    api_key: str,
+    timeout: float,
+    okta_agent_private_key: str,
+):
+    """Resolve an Okta identity from Core using only the local private key.
+
+    The base SDK owns bootstrap response validation, key parsing, thumbprint
+    matching, endpoint selection, and request signing. Temporal keeps only the
+    resulting loaded identity object; the raw PEM is never copied into the
+    global configuration singleton.
+    """
+    from openbox_core.client import EvaluationClient
+    from openbox_core.errors import OpenBoxAuthError as CoreOpenBoxAuthError
+    from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
+    from openbox_core.errors import OpenBoxNetworkError as CoreOpenBoxNetworkError
+    from openbox_core.errors import OpenBoxSigningError as CoreOpenBoxSigningError
+
+    from .request_signing import _sdk_identifier
+
+    client = EvaluationClient(
+        api_url,
+        api_key,
+        timeout_seconds=timeout,
+        okta_bootstrap_private_key=okta_agent_private_key,
+        sdk_version=_sdk_identifier(),
+    )
+    try:
+        client.validate_api_key()
+        document = client.identity_metadata()
+        if document is None:
+            raise OpenBoxConfigError(
+                "Okta identity bootstrap completed without identity metadata."
+            )
+        return _load_okta_identity(
+            openbox_agent_id=document.openbox_agent_id,
+            organization_id=document.organization_id,
+            deployment_id=document.deployment_id,
+            okta_agent_id=document.okta.external_agent_id,
+            okta_agent_key_id=document.okta.credential_kid,
+            okta_agent_private_key=okta_agent_private_key,
+            agent_proof_audience=document.assertion_audience,
+            okta_agent_algorithm="RS256",
+        )
+    except CoreOpenBoxSigningError as exc:
+        raise OpenBoxSigningError(str(exc), getattr(exc, "reason_code", None)) from exc
+    except CoreOpenBoxAuthError as exc:
+        raise OpenBoxAuthError(str(exc)) from exc
+    except CoreOpenBoxNetworkError as exc:
+        raise OpenBoxNetworkError(str(exc)) from exc
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
+    finally:
+        client.close()
 
 
 def _validate_url_security(api_url: str) -> None:
@@ -225,6 +329,44 @@ def _extract_reason_code(http_error) -> Optional[str]:
     return code if isinstance(code, str) else None
 
 
+def _validate_workload_identity_with_server(
+    api_url: str,
+    api_key: str,
+    timeout: float,
+    *,
+    workload_private_key: str,
+) -> None:
+    """Validate the API key and active service account through Core v3."""
+
+    from openbox_core.client import EvaluationClient
+    from openbox_core.errors import OpenBoxAuthError as CoreOpenBoxAuthError
+    from openbox_core.errors import OpenBoxConfigError as CoreOpenBoxConfigError
+    from openbox_core.errors import OpenBoxNetworkError as CoreOpenBoxNetworkError
+    from openbox_core.errors import OpenBoxSigningError as CoreOpenBoxSigningError
+
+    from .request_signing import _sdk_identifier
+
+    client = EvaluationClient(
+        api_url,
+        api_key,
+        timeout_seconds=timeout,
+        workload_private_key=workload_private_key,
+        sdk_version=_sdk_identifier(),
+    )
+    try:
+        client.validate_api_key()
+    except CoreOpenBoxSigningError as exc:
+        raise OpenBoxSigningError(str(exc), getattr(exc, "reason_code", None)) from exc
+    except CoreOpenBoxAuthError as exc:
+        raise OpenBoxAuthError(str(exc)) from exc
+    except CoreOpenBoxNetworkError as exc:
+        raise OpenBoxNetworkError(str(exc)) from exc
+    except CoreOpenBoxConfigError as exc:
+        raise OpenBoxConfigError(str(exc)) from exc
+    finally:
+        client.close()
+
+
 def _validate_api_key_with_server(
     api_url: str,
     api_key: str,
@@ -232,14 +374,20 @@ def _validate_api_key_with_server(
     *,
     agent_did: Optional[str] = None,
     signer=None,
+    okta_identity=None,
 ) -> None:
     """
-    Validate API key by calling /v1/auth/validate endpoint.
+    Validate API key by calling the version-appropriate auth-validate endpoint.
     Raises OpenBoxAuthError for invalid key, OpenBoxNetworkError for connectivity issues.
 
     When agent_did + signer are provided, the GET is signed (AIP DID headers) so a
     signing_required=true agent passes verification. The GET carries no body, so the
     body hash is SHA-256(b"").
+
+    When okta_identity is provided (v2, proposal §13.7), the GET is signed with an
+    RS256 assertion and sent to ``/api/v2/auth/validate`` instead — Core rejects a
+    v1 call from an okta_ai_agent-method agent (no-downgrade rule), so an
+    Okta-configured agent must never validate against v1.
 
     NOTE: urllib imports are lazy to avoid Temporal sandbox restrictions.
     urllib.request uses os.stat internally which triggers sandbox errors.
@@ -249,20 +397,33 @@ def _validate_api_key_with_server(
     from urllib.request import Request, urlopen
 
     # Build signed (or plain) headers via the single source of truth.
-    from .request_signing import prepare_signed_request
+    if okta_identity is not None:
+        from .request_signing import prepare_okta_signed_request
 
-    headers, _body = prepare_signed_request(
-        "GET",
-        "/api/v1/auth/validate",
-        None,
-        api_key=api_key,
-        agent_did=agent_did,
-        signer=signer,
-    )
+        headers, _body = prepare_okta_signed_request(
+            "GET",
+            "/api/v2/auth/validate",
+            None,
+            api_key=api_key,
+            okta_identity=okta_identity,
+        )
+        pathname = "/api/v2/auth/validate"
+    else:
+        from .request_signing import prepare_signed_request
+
+        headers, _body = prepare_signed_request(
+            "GET",
+            "/api/v1/auth/validate",
+            None,
+            api_key=api_key,
+            agent_did=agent_did,
+            signer=signer,
+        )
+        pathname = "/api/v1/auth/validate"
 
     try:
         req = Request(
-            f"{api_url}/api/v1/auth/validate",
+            f"{api_url}{pathname}",
             headers={**headers, "Content-Type": "application/json"},
             method="GET",
         )
@@ -279,8 +440,27 @@ def _validate_api_key_with_server(
         if e.code == 401 or e.code == 403:
             # When signing is enabled, surface Core's machine reason code as an
             # actionable signing error (signature_invalid, nonce_replayed, ...).
-            reason_code = _extract_reason_code(e) if signer is not None else None
+            # v2 (Okta) reason codes (contract §7) are a disjoint, larger set
+            # than v1's — delegate to the BASE SDK's own mapper for those
+            # rather than duplicating its reason-code table here.
+            reason_code = (
+                _extract_reason_code(e)
+                if (signer is not None or okta_identity is not None)
+                else None
+            )
             if reason_code:
+                if okta_identity is not None:
+                    # Reuse the base SDK's v2 reason-code CLASSIFICATION (all 12
+                    # contract §7 codes) rather than duplicating that table here
+                    # — but always raise THIS package's own exception type, so
+                    # callers catching `openbox.errors.OpenBoxSigningError`
+                    # work identically for v1 and v2.
+                    from openbox_core.errors import (
+                        map_signing_error as core_map_signing_error,
+                    )
+
+                    core_exc = core_map_signing_error(reason_code)
+                    raise OpenBoxSigningError(str(core_exc), reason_code) from core_exc
                 from .errors import map_signing_error
 
                 raise map_signing_error(reason_code)
@@ -311,6 +491,9 @@ class _GlobalConfig:
         self.agent_did: Optional[str] = None
         # Loaded Ed25519PrivateKey object — NEVER the raw seed bytes/string.
         self._signer = None
+        # Loaded OktaAgentIdentity object (v2, proposal §13.7) — NEVER the raw
+        # PEM string. Mutually exclusive with agent_did/_signer.
+        self._okta_identity = None
 
     def configure(
         self,
@@ -320,17 +503,21 @@ class _GlobalConfig:
         *,
         agent_did: Optional[str] = None,
         signer=None,
+        okta_identity=None,
     ):
         """Configure OpenBox settings.
 
         signer is a pre-loaded Ed25519PrivateKey object (loaded by initialize()),
         never the raw seed. agent_did is the public identity asserted in signed headers.
+        okta_identity is a pre-loaded OktaAgentIdentity object (v2), mutually
+        exclusive with agent_did/signer.
         """
         self.api_url = api_url.rstrip("/")
         self.api_key = api_key
         self.governance_timeout = governance_timeout
         self.agent_did = agent_did
         self._signer = signer
+        self._okta_identity = okta_identity
 
     def is_configured(self) -> bool:
         """Check if OpenBox is configured."""
@@ -344,6 +531,14 @@ class _GlobalConfig:
         """Return the loaded Ed25519PrivateKey signer (or None)."""
         return self._signer
 
+    def has_okta_identity(self) -> bool:
+        """True when an Okta AI Agent (v2) identity is loaded."""
+        return self._okta_identity is not None
+
+    def get_okta_identity(self):
+        """Return the loaded OktaAgentIdentity (or None)."""
+        return self._okta_identity
+
     def __repr__(self) -> str:
         """Return string representation with masked API key. NEVER includes the key."""
         if self.api_key and len(self.api_key) > 8:
@@ -352,12 +547,14 @@ class _GlobalConfig:
             masked_key = "****"
         else:
             masked_key = ""
+        okta_agent_id = getattr(self._okta_identity, "external_agent_id", None)
         return (
             f"_GlobalConfig(api_url={self.api_url!r}, "
             f"api_key={masked_key!r}, "
             f"governance_timeout={self.governance_timeout}, "
             f"agent_did={self.agent_did!r}, "
-            f"signing={'enabled' if self.has_signing() else 'disabled'})"
+            f"signing={'enabled' if self.has_signing() else 'disabled'}, "
+            f"okta_agent_id={okta_agent_id!r})"
         )
 
 
@@ -378,6 +575,15 @@ def initialize(
     *,
     agent_did: Optional[str] = None,
     agent_private_key: Optional[str] = None,
+    workload_private_key: Optional[str] = None,
+    openbox_agent_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    deployment_id: Optional[str] = None,
+    okta_agent_id: Optional[str] = None,
+    okta_agent_key_id: Optional[str] = None,
+    okta_agent_private_key: Optional[str] = None,
+    okta_agent_algorithm: Optional[str] = None,
+    agent_proof_audience: Optional[str] = None,
 ) -> None:
     """
     Initialize OpenBox SDK.
@@ -387,14 +593,35 @@ def initialize(
         api_key: API key (format: obx_live_... or obx_test_...)
         governance_timeout: Timeout for governance requests in seconds (default: 30.0)
         validate: Validate API key with server on initialization (default: True)
-        agent_did: Agent DID (format: did:aip:<uuid>). Asserted in signed request
+        agent_did: Agent DID (format: did:aip:<uuid>, v1). Asserted in signed request
             headers. Pair with agent_private_key (both-or-neither).
-        agent_private_key: Base64 raw 32-byte Ed25519 seed. Signs every Core request
-            locally. Non-repudiation material — never logged or stored as raw bytes.
+        agent_private_key: Base64 raw 32-byte Ed25519 seed (v1). Signs every Core
+            request locally. Non-repudiation material — never logged or stored as
+            raw bytes.
+        workload_private_key: PKCS8 PEM RSA private key for the active Keycloak
+            service account (v3). The base SDK exchanges a short-lived token and
+            composes it with the agent API key on every governed request.
+        openbox_agent_id: OpenBox agent UUID (v2, Okta AI Agent).
+        organization_id: OpenBox organization ID (v2).
+        deployment_id: OpenBox deployment ID (v2).
+        okta_agent_id: External Okta AI Agent ID (v2).
+        okta_agent_key_id: Okta credential ``kid`` (v2).
+        okta_agent_private_key: PKCS8 PEM RSA private key (v2). By itself, selects
+            bootstrap mode: Core supplies the non-secret identity metadata. With
+            all explicit Okta metadata fields, preserves the legacy explicit mode.
+            Signs every Core request locally; never logged or stored raw.
+        okta_agent_algorithm: Signing algorithm, only ``"RS256"`` is supported at
+            launch (default ``"RS256"``).
+        agent_proof_audience: Deployment-specific assertion audience (v2).
+
+    Okta v2 supports either private-key-only bootstrap or the complete legacy
+    explicit field set. A partial explicit set is rejected. Both modes are
+    mutually exclusive with agent_did/agent_private_key (proposal §13.1).
 
     Raises:
         OpenBoxAuthError: Invalid API key
-        OpenBoxConfigError: Invalid DID / private key, or only one of the pair set
+        OpenBoxConfigError: Invalid DID / private key / Okta fields, both
+            identity methods configured together, or a partial pair/set
         OpenBoxNetworkError: Cannot reach OpenBox Core
 
     Note:
@@ -432,10 +659,89 @@ def initialize(
             "(got only one). Provide both to enable signed requests, or neither."
         )
 
+    okta_metadata_fields = {
+        "openbox_agent_id": openbox_agent_id,
+        "organization_id": organization_id,
+        "deployment_id": deployment_id,
+        "okta_agent_id": okta_agent_id,
+        "okta_agent_key_id": okta_agent_key_id,
+        "agent_proof_audience": agent_proof_audience,
+    }
+    okta_metadata_present = [
+        name for name, value in okta_metadata_fields.items() if value
+    ]
+    okta_bootstrap = bool(okta_agent_private_key) and not okta_metadata_present
+    okta_any_present = bool(okta_agent_private_key) or bool(okta_metadata_present)
+
+    explicit_okta_fields = {
+        **okta_metadata_fields,
+        "okta_agent_private_key": okta_agent_private_key,
+    }
+    okta_explicit_missing = [
+        name for name, value in explicit_okta_fields.items() if not value
+    ]
+    if okta_metadata_present and okta_explicit_missing:
+        raise OpenBoxConfigError(
+            "Partial Okta AI Agent identity configuration: "
+            f"{', '.join(okta_metadata_present)} given but missing "
+            f"{', '.join(okta_explicit_missing)}. Provide only "
+            "okta_agent_private_key for bootstrap mode, or provide the complete "
+            "explicit Okta identity field set."
+        )
+
+    if agent_did and okta_any_present:
+        raise OpenBoxConfigError(
+            "agent_did/agent_private_key (v1) and the Okta AI Agent fields (v2) "
+            "are mutually exclusive. Configure exactly one identity verification "
+            "method."
+        )
+
+    if okta_bootstrap and okta_agent_algorithm not in (None, "RS256"):
+        raise OpenBoxConfigError(
+            f"Unsupported okta_agent_algorithm {okta_agent_algorithm!r}; "
+            "only 'RS256' is supported at launch."
+        )
+
     signer = None
     if agent_did and agent_private_key:
         _validate_did(agent_did)
         signer = _load_ed25519_seed(agent_private_key)
+
+    okta_identity = None
+    if okta_metadata_present:
+        # `okta_explicit_missing` above is empty here, so every field is non-None —
+        # asserted (not just relied on) so mypy narrows str | None -> str,
+        # matching _load_okta_identity's signature.
+        assert openbox_agent_id is not None
+        assert organization_id is not None
+        assert deployment_id is not None
+        assert okta_agent_id is not None
+        assert okta_agent_key_id is not None
+        assert okta_agent_private_key is not None
+        assert agent_proof_audience is not None
+        okta_identity = _load_okta_identity(
+            openbox_agent_id=openbox_agent_id,
+            organization_id=organization_id,
+            deployment_id=deployment_id,
+            okta_agent_id=okta_agent_id,
+            okta_agent_key_id=okta_agent_key_id,
+            okta_agent_private_key=okta_agent_private_key,
+            agent_proof_audience=agent_proof_audience,
+            okta_agent_algorithm=okta_agent_algorithm or "RS256",
+        )
+    elif okta_bootstrap:
+        if not validate:
+            raise OpenBoxConfigError(
+                "Okta private-key-only bootstrap requires server validation; "
+                "initialize(..., validate=False) cannot resolve the identity metadata."
+            )
+        assert okta_agent_private_key is not None
+        okta_identity = _bootstrap_okta_identity(
+            api_url=api_url.rstrip("/"),
+            api_key=api_key,
+            timeout=governance_timeout,
+            okta_agent_private_key=okta_agent_private_key,
+        )
 
     _config.configure(
         api_url=api_url,
@@ -443,19 +749,28 @@ def initialize(
         governance_timeout=governance_timeout,
         agent_did=agent_did,
         signer=signer,
+        okta_identity=okta_identity,
     )
 
     # Validate API key with server (signed when signing is configured).
-    if validate:
+    if validate and workload_private_key:
+        _validate_workload_identity_with_server(
+            api_url.rstrip("/"),
+            api_key,
+            governance_timeout,
+            workload_private_key=workload_private_key,
+        )
+    elif validate and not okta_bootstrap:
         _validate_api_key_with_server(
             api_url.rstrip("/"),
             api_key,
             governance_timeout,
             agent_did=agent_did,
             signer=signer,
+            okta_identity=okta_identity,
         )
 
     _get_logger().info(
         f"OpenBox SDK initialized with API URL: {api_url} "
-        f"(signing={'enabled' if signer else 'disabled'})"
+        f"(signing={'workload' if workload_private_key else ('enabled' if signer else ('okta' if okta_identity else 'disabled'))})"
     )

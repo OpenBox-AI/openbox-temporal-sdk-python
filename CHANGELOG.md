@@ -4,6 +4,17 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+### Added
+
+- **Okta AI Agent (v2) identity support**, alongside existing OpenBox DID (v1) signing: `create_openbox_worker(...)` / `OpenBoxPlugin(...)` / `initialize(...)` accept `openbox_agent_id`, `organization_id`, `deployment_id`, `okta_agent_id`, `okta_agent_key_id`, `okta_agent_private_key`, `okta_agent_algorithm`, and `agent_proof_audience` (all-or-nothing together, mutually exclusive with `agent_did`/`agent_private_key`). When configured, governance evaluate/approval calls, the activity-level `send_governance_event`, and the startup API-key validation ping all route to Core's `/api/v2/*` endpoints with an RS256 JWT assertion instead of `/api/v1/*` with Ed25519 DID headers — never both. RSA key loading, the 2048-bit floor, algorithm allowlisting, and assertion construction are entirely owned by the base SDK (`openbox_core.identity_okta`); this package only selects the endpoint version and forwards the identity.
+- A 401/403 response from Core while in Okta mode now raises `OpenBoxAuthError`/`OpenBoxSigningError` unconditionally (never a fallback `ALLOW`, never read as "still pending" during approval polling) — matching the v1 auth-failure contract.
+- **Base SDK dependency raised to `openbox-sdk-python>=1.3.0`** for the tagged Okta identity types. Not yet published to PyPI at time of writing (PyPI has up to `1.2.0`); this repo's `1.2.1` decision to depend on PyPI only (no local `[tool.uv.sources]` override, see `_notes/decision-pypi-openbox-core-dependency.md`) is preserved — `uv sync`/`uv lock` will not resolve this constraint until `1.3.0` ships.
+
+### Not changed
+
+- Existing OpenBox DID (v1) configuration, behavior, and tests are unaffected.
+- The existing `emit_handoff(multi_agent_session_id=..., from_agent_did=...)` (legacy receiver-authenticated `Handoff` event, routed through `send_governance_event`) is unchanged. A provider-neutral, source-authenticated `target_agent_id`-based handoff (the base SDK's `/api/v1/handoffs` / `/api/v2/handoffs`) was evaluated but deferred — it needs a new activity + workflow-safe wrapper preserving the existing Continue-As-New/patch-coordinator semantics, which is a separate, larger change than this identity-forwarding pass.
+
 ## [1.4.0] - 2026-07-23
 
 **BREAKING:** Renames the retryable-BLOCK remediation vocabulary introduced in `1.3.0` to `patch`, matching the cross-repository rename of `retry_plan` → `patch` (see the base SDK `1.2.0` changelog and `docs/proposal-block-patch-workflow-restart.md`). No behavior change — this is a terminology rename plus the required base-SDK wire-key bump.
