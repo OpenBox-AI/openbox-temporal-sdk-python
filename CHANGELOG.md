@@ -26,6 +26,7 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 ### Security and release automation
 
 - Update the locked `cryptography` dependency from `49.0.0` to `50.0.1`.
+- Update the locked `anyio` dependency from `4.12.1` to `4.14.2` to fix the TLS hostname verification vulnerability reported as `CVE-2026-63374`.
 - Publish tagged releases through PyPI OIDC trusted publishing, with package-version validation against the pushed tag.
 - Add pull-request security scanning.
 
