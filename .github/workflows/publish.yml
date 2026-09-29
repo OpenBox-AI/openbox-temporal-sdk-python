@@ -5,8 +5,7 @@ on:
     tags:
       - "v*.*.*"
 
-# Workflow-level default — no ambient permissions. The publish job opts into
-# id-token: write below (needed for PyPI trusted publishing).
+# Read-only repository access for checkout.
 permissions:
   contents: read
 
@@ -14,15 +13,19 @@ jobs:
   publish:
     name: Build and Publish
     runs-on: ubuntu-latest
-    # Bound to the `release` environment so its deployment tag policy
-    # admits only `v[0-9]+.[0-9]+.[0-9]+` refs, its env-scoped secrets
-    # scope, and its OIDC token carries `environment:release` — which the
-    # PyPI trusted-publisher registration matches on.
+    # Keep the release environment's deployment tag policy and scoped secrets.
     environment: release
-    permissions:
-      id-token: write  # PyPI trusted publishing (OIDC)
 
     steps:
+      - name: Verify PyPI API token is configured
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${PYPI_API_TOKEN:-}" ]; then
+            echo "::error::PYPI_API_TOKEN is missing. Add it as a repository or release environment secret."
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -49,8 +52,10 @@ jobs:
       - name: Build package
         run: hatch build
 
-      # Trusted publishing consumes the OIDC id-token grant above; no
-      # long-lived PYPI_API_TOKEN needed. Requires trusted-publisher
-      # registration on PyPI first — see report §"Pre-requisites".
-      - name: Publish to PyPI (trusted publishing)
+      # Store the full API token in PYPI_API_TOKEN, including its pypi- prefix.
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false
