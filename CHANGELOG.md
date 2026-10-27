@@ -4,6 +4,16 @@ All notable changes to OpenBox SDK for Temporal Workflows.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-10-26
+
+### Changed
+
+- Raise the base SDK dependency to `openbox-sdk-python[http]>=1.5.0` for OpenRouter routing provenance on activity HTTP calls.
+
+### Fixed
+
+- A REQUIRE_APPROVAL returned on `ActivityCompleted` no longer raises `ApprovalPending`. The activity had already run, and the retryable error made Temporal re-run it once approved — repeating its side effects — while the workflow stalled until someone approved. It is now logged and the activity's result is kept, the same as in the LangChain and LangGraph SDKs.
+
 ## [2.0.0] - 2026-09-21
 
 ### Added

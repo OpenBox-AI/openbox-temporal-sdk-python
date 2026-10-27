@@ -551,4 +551,4 @@ MIT License - See LICENSE file for details
 
 ---
 
-**Version:** 2.0.0 | **Last Updated:** 2026-09-21
+**Version:** 2.1.0 | **Last Updated:** 2026-10-26
