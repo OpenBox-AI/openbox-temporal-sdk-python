@@ -963,6 +963,41 @@ class TestActivityInterceptor:
         )
 
     @pytest.mark.asyncio
+    async def test_completion_stage_require_approval_keeps_the_result(
+        self, state, mock_activity_info
+    ):
+        """REQUIRE_APPROVAL on ActivityCompleted arrives after the activity ran.
+        Raising ApprovalPending would retry (re-run) it, so the result is kept
+        and nothing is marked pending."""
+        config = GovernanceConfig(send_activity_start_event=True, hitl_enabled=True)
+        client = MagicMock()
+        client.evaluate_event = AsyncMock(
+            side_effect=[
+                GovernanceVerdictResponse(verdict=Verdict.ALLOW),
+                GovernanceVerdictResponse(
+                    verdict=Verdict.REQUIRE_APPROVAL, reason="review refunds"
+                ),
+            ]
+        )
+        client.poll_approval = AsyncMock(return_value=None)
+        interceptor = make_interceptor(
+            state, config, next_result={"refunded": 12}, client=client
+        )
+
+        ctx, _ = patched_activity(mock_activity_info)
+        try:
+            result = await interceptor.execute_activity(make_input([]))
+        finally:
+            ctx.stop()
+
+        assert result == {"refunded": 12}
+        assert client.evaluate_event.call_count == 2
+        client.poll_approval.assert_not_called()
+        assert not state.has_pending_approval(
+            "test-workflow-id", "test-run-id", "test-activity-id"
+        )
+
+    @pytest.mark.asyncio
     async def test_approval_polling_on_retry_when_pending(
         self, state, mock_activity_info
     ):

@@ -420,6 +420,20 @@ class _ActivityInterceptor(ActivityInboundInterceptor):
         if req is not None:
             _raise_patch(req)
 
+        if context == "activity_end" and verdict_response.verdict.requires_approval():
+            # The activity already ran. Raising ApprovalPending here would make
+            # Temporal retry it — running its side effects again once approved —
+            # and waiting cannot undo it either. Log and keep the result; same
+            # behavior as the LangChain and LangGraph SDKs.
+            activity.logger.warning(
+                "REQUIRE_APPROVAL returned after activity %s completed; continuing "
+                "without waiting. Match the rule on ActivityStarted to gate the "
+                "activity.%s",
+                info.activity_type,
+                f" Reason: {verdict_response.reason}" if verdict_response.reason else "",
+            )
+            return
+
         try:
             verdict_result = enforce_verdict(verdict_response, context)
             if verdict_result.requires_hitl and not should_skip_hitl(
